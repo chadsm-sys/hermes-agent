@@ -284,6 +284,67 @@ def test_delegate_task_background_routes_async_and_does_not_block(monkeypatch):
     assert "the real task" in text and "ctx" in text
 
 
+def test_agent_dispatch_delegate_task_forwards_background(monkeypatch):
+    """Live agent tool-call dispatch must preserve background=True.
+
+    The async executor can be correct while the live tool-call path still drops
+    the schema field. This guards the gateway/agent serialization hop that
+    turns model tool args into the direct delegate_task() call.
+    """
+    from run_agent import AIAgent
+    import tools.delegate_tool as dt
+
+    captured = {}
+
+    def fake_delegate_task(**kwargs):
+        captured.update(kwargs)
+        return '{"status": "dispatched", "mode": "background"}'
+
+    monkeypatch.setattr(dt, "delegate_task", fake_delegate_task)
+    agent = object.__new__(AIAgent)
+
+    out = agent._dispatch_delegate_task({"goal": "bg task", "background": True})
+
+    assert '"status": "dispatched"' in out
+    assert captured["goal"] == "bg task"
+    assert captured["background"] is True
+    assert captured["parent_agent"] is agent
+
+
+def test_invoke_tool_delegate_task_forwards_background():
+    """The live invoke_tool() path must preserve background=True into dispatch."""
+    from agent.agent_runtime_helpers import invoke_tool
+
+    captured = {}
+
+    class FakeAgent:
+        _memory_manager = None
+        _memory_store = None
+        _todo_store = None
+        session_id = "test-session"
+        valid_tool_names = {"delegate_task"}
+        enabled_toolsets = ["delegation"]
+        disabled_toolsets = None
+
+        def _dispatch_delegate_task(self, function_args):
+            captured.update(function_args)
+            return '{"status": "dispatched", "mode": "background"}'
+
+    agent = FakeAgent()
+
+    out = invoke_tool(
+        agent,
+        "delegate_task",
+        {"goal": "bg task", "background": True},
+        effective_task_id="task-1",
+        tool_call_id="tool-1",
+    )
+
+    assert '"status": "dispatched"' in out
+    assert captured["goal"] == "bg task"
+    assert captured["background"] is True
+
+
 def test_delegate_task_background_rejects_batch(monkeypatch):
     """background=True with a multi-item tasks batch is rejected (v1: single-task only)."""
     import json
