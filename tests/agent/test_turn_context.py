@@ -171,6 +171,26 @@ def test_persist_user_message_becomes_original():
     assert ctx.messages[-1]["content"] == "api-prefixed"
 
 
+def test_process_notification_event_reaches_pre_llm_hook():
+    agent = _FakeAgent()
+    raw_event = {
+        "type": "async_delegation_complete",
+        "delegation_id": "delig_turnctx",
+        "status": "completed",
+    }
+    captured = {}
+
+    def fake_invoke_hook(name, **kwargs):
+        if name == "pre_llm_call":
+            captured.update(kwargs)
+        return []
+
+    with patch("hermes_cli.plugins.invoke_hook", fake_invoke_hook):
+        _build(agent, process_notification_event=raw_event)
+
+    assert captured["process_notification_event"] == raw_event
+
+
 def test_memory_nudge_fires_at_interval():
     agent = _FakeAgent()
     agent._memory_nudge_interval = 1

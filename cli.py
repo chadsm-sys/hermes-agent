@@ -2580,6 +2580,41 @@ def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
     return not pasted_text.strip()
 
 
+_PROCESS_NOTIFICATION_INPUT_SENTINEL = "__hermes_process_notification_input__"
+
+
+def _make_process_notification_input(raw_event: dict, formatted_text: str) -> dict:
+    """Bundle a synthetic process notification with its raw event.
+
+    The interactive CLI queues background-process completions through the same
+    path as user input.  The agent must receive the human-readable text, but the
+    raw event has to survive the queue handoff so downstream dispatch can still
+    inspect the original completion metadata.
+    """
+    from copy import deepcopy
+
+    return {
+        _PROCESS_NOTIFICATION_INPUT_SENTINEL: True,
+        "text": formatted_text,
+        "raw_event": deepcopy(raw_event),
+    }
+
+
+def _unpack_process_notification_input(value: Any) -> tuple[Any, dict | None]:
+    """Return ``(message_text, raw_event)`` for queued process notifications.
+
+    Plain user input is returned unchanged with ``raw_event`` set to ``None``.
+    """
+    if (
+        isinstance(value, dict)
+        and value.get(_PROCESS_NOTIFICATION_INPUT_SENTINEL) is True
+        and "text" in value
+    ):
+        raw_event = value.get("raw_event")
+        return value.get("text"), raw_event if isinstance(raw_event, dict) else None
+    return value, None
+
+
 def _strip_leaked_bracketed_paste_wrappers(text: str) -> str:
     """Strip leaked bracketed-paste wrapper markers from user-visible text.
 
@@ -9973,7 +10008,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             except Exception:
                 pass
 
-    def chat(self, message, images: list = None) -> Optional[str]:
+    def chat(self, message, images: list | None = None, process_notification_event: dict | None = None) -> Optional[str]:
         """
         Send a message to the agent and get a response.
         
@@ -10247,7 +10282,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         conversation_history=self.conversation_history[:-1],  # Exclude the message we just added
                         stream_callback=stream_callback,
                         task_id=self.session_id,
-                        persist_user_message=message if _voice_prefix else None,
+                        persist_user_message=(
+                            message if (_voice_prefix or process_notification_event is None) else None
+                        ),
+                        process_notification_event=process_notification_event,
                     )
                 except Exception as exc:
                     logging.error("run_conversation raised: %s", exc, exc_info=True)
@@ -12943,7 +12981,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                             try:
                                 from tools.process_registry import process_registry
                                 for _evt, _synth in process_registry.drain_notifications():
-                                    self._pending_input.put(_synth)
+                                    self._pending_input.put(
+                                        _make_process_notification_input(_evt, _synth)
+                                    )
                             except Exception:
                                 pass
                         continue
@@ -12954,6 +12994,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     # The user has typed and submitted something, so any
                     # post-resize transient suppression should end here.
                     self._status_bar_suppressed_after_resize = False
+
+                    process_notification_event = None
+                    user_input, process_notification_event = _unpack_process_notification_input(user_input)
 
                     # Unpack image payload: (text, [Path, ...]) or plain str
                     submit_images = []
@@ -13039,7 +13082,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     app.invalidate()  # Refresh status line
 
                     try:
-                        self.chat(user_input, images=submit_images or None)
+                        self.chat(
+                            user_input,
+                            images=submit_images or None,
+                            process_notification_event=process_notification_event,
+                        )
                     finally:
                         self._agent_running = False
                         self._spinner_text = ""

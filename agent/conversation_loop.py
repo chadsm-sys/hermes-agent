@@ -441,6 +441,7 @@ def run_conversation(
     task_id: str = None,
     stream_callback: Optional[callable] = None,
     persist_user_message: Optional[str] = None,
+    process_notification_event: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -456,7 +457,8 @@ def run_conversation(
         persist_user_message: Optional clean user message to store in
             transcripts/history when user_message contains API-only
             synthetic prefixes.
-                or queuing follow-up prefetch work.
+        process_notification_event: Optional raw process-registry event that
+            produced a synthetic background notification turn.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -477,6 +479,7 @@ def run_conversation(
         task_id,
         stream_callback,
         persist_user_message,
+        process_notification_event,
         restore_or_build_system_prompt=_restore_or_build_system_prompt,
         install_safe_stdio=_install_safe_stdio,
         sanitize_surrogates=_sanitize_surrogates,
