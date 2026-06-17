@@ -211,7 +211,19 @@ class TestAcpExecAskGate:
         monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
         monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
 
-        from tools.approval import check_all_command_guards
+        from tools.approval import (
+            check_all_command_guards,
+            clear_session,
+            get_current_session_key,
+        )
+
+        # Prior runs on a dev machine may have session-scoped approvals for
+        # common dangerous patterns; reset so this test actually prompts.
+        clear_session(get_current_session_key())
+        monkeypatch.setattr("tools.approval._get_approval_mode", lambda: "manual")
+        # Dev config.yaml command_allowlist entries (e.g. "delete in root path")
+        # must not short-circuit this hermetic unit test.
+        monkeypatch.setattr("tools.approval._permanent_approved", set())
 
         called_with = []
 

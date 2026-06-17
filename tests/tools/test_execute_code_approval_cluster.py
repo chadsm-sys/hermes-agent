@@ -115,15 +115,23 @@ def gw_session(monkeypatch):
     monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
 
     session_key = "cluster-test-session"
-    token = A.set_current_session_key(session_key)
+    restore_handle = A.set_current_session_key(session_key)
     with A._lock:
+        A._permanent_approved.clear()
+        A._session_approved.pop(session_key, None)
+        A._session_yolo.discard(session_key)
+        A._pending.pop(session_key, None)
         A._gateway_queues.pop(session_key, None)
         A._gateway_notify_cbs.pop(session_key, None)
     try:
         yield session_key
     finally:
-        A.reset_current_session_key(token)
+        A.reset_current_session_key(restore_handle)
         with A._lock:
+            A._permanent_approved.clear()
+            A._session_approved.pop(session_key, None)
+            A._session_yolo.discard(session_key)
+            A._pending.pop(session_key, None)
             A._gateway_queues.pop(session_key, None)
             A._gateway_notify_cbs.pop(session_key, None)
 

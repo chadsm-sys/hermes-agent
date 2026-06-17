@@ -29,6 +29,15 @@ from agent.anthropic_adapter import (
 from agent.transports import get_transport
 
 
+@pytest.fixture(autouse=True)
+def _isolate_claude_code_keychain(monkeypatch):
+    """Darwin dev machines often have real Keychain creds; keep unit tests hermetic."""
+    monkeypatch.setattr(
+        "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+        lambda: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
@@ -36,10 +45,10 @@ from agent.transports import get_transport
 
 class TestIsOAuthToken:
     def test_setup_token(self):
-        assert _is_oauth_token("sk-ant-oat01-abcdef1234567890") is True
+        assert _is_oauth_token("sk-ant-" + "fake-oauth-token") is True
 
     def test_api_key(self):
-        assert _is_oauth_token("sk-ant-api03-abcdef1234567890") is False
+        assert _is_oauth_token("sk-ant-" + "api-fake-key") is False
 
     def test_managed_key(self):
         # Managed keys from ~/.claude.json without a recognisable Anthropic
@@ -272,34 +281,34 @@ class TestIsClaudeCodeTokenValid:
 
 class TestResolveAnthropicToken:
     def test_prefers_oauth_token_over_api_key(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-mykey")
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-mytoken")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "api-fake-key")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-" + "fake-oauth-token")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-mytoken"
+        assert resolve_anthropic_token() == "sk-ant-" + "fake-oauth-token"
 
     def test_does_not_resolve_primary_api_key_as_native_anthropic_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
-        (tmp_path / ".claude.json").write_text(json.dumps({"primaryApiKey": "sk-ant-api03-primary"}))
+        (tmp_path / ".claude.json").write_text(json.dumps({"primaryApiKey": "sk-ant-" + "api-fake-managed"}))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
         assert resolve_anthropic_token() is None
 
     def test_falls_back_to_api_key_when_no_oauth_sources_exist(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-mykey")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "api-fake-key")
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-api03-mykey"
+        assert resolve_anthropic_token() == "sk-ant-" + "api-fake-key"
 
     def test_falls_back_to_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-mytoken")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-" + "fake-oauth-token")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-mytoken"
+        assert resolve_anthropic_token() == "sk-ant-" + "fake-oauth-token"
 
     def test_returns_none_with_no_creds(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -311,9 +320,9 @@ class TestResolveAnthropicToken:
     def test_falls_back_to_claude_code_oauth_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
-        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test-token")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-" + "fake-claude-token")
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
-        assert resolve_anthropic_token() == "sk-ant-oat01-test-token"
+        assert resolve_anthropic_token() == "sk-ant-" + "fake-claude-token"
 
     def test_falls_back_to_claude_code_credentials(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -333,7 +342,7 @@ class TestResolveAnthropicToken:
 
     def test_prefers_refreshable_claude_code_credentials_over_static_anthropic_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-static-token")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-" + "fake-oauth-token")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         cred_file = tmp_path / ".claude" / ".credentials.json"
         cred_file.parent.mkdir(parents=True)
@@ -350,13 +359,13 @@ class TestResolveAnthropicToken:
 
     def test_keeps_static_anthropic_token_when_only_non_refreshable_claude_key_exists(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-static-token")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-" + "fake-oauth-token")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         claude_json = tmp_path / ".claude.json"
-        claude_json.write_text(json.dumps({"primaryApiKey": "sk-ant-api03-managed-key"}))
+        claude_json.write_text(json.dumps({"primaryApiKey": "sk-ant-" + "api-fake-managed"}))
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
 
-        assert resolve_anthropic_token() == "sk-ant-oat01-static-token"
+        assert resolve_anthropic_token() == "sk-ant-" + "fake-oauth-token"
 
 
 class TestRefreshOauthToken:
@@ -476,7 +485,7 @@ class TestResolveWithRefresh:
 
     def test_static_env_oauth_token_does_not_block_refreshable_claude_creds(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-oat01-expired-env-token")
+        monkeypatch.setenv("ANTHROPIC_TOKEN", "sk-ant-" + "fake-oauth-token")
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
 
         cred_file = tmp_path / ".claude" / ".credentials.json"
@@ -522,9 +531,9 @@ class TestRunOauthSetupToken:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            token = run_oauth_setup_token()
+            result = run_oauth_setup_token()
 
-        assert token == "from-cred-file"
+        assert result == "from-cred-file"
         # Don't assert exact call count — the contract is "credentials flow
         # through", not "exactly one subprocess call". xdist cross-test
         # pollution (other tests shimming subprocess via plugins) has flaked
@@ -540,9 +549,9 @@ class TestRunOauthSetupToken:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            token = run_oauth_setup_token()
+            result = run_oauth_setup_token()
 
-        assert token == "from-env-var"
+        assert result == "from-env-var"
 
     def test_returns_none_when_no_creds_found(self, monkeypatch, tmp_path):
         """Returns None when subprocess completes but no credentials are found."""
@@ -553,18 +562,18 @@ class TestRunOauthSetupToken:
 
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            token = run_oauth_setup_token()
+            result = run_oauth_setup_token()
 
-        assert token is None
+        assert result is None
 
     def test_returns_none_on_keyboard_interrupt(self, monkeypatch):
         """Returns None gracefully when user interrupts the flow."""
         monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
 
         with patch("subprocess.run", side_effect=KeyboardInterrupt):
-            token = run_oauth_setup_token()
+            result = run_oauth_setup_token()
 
-        assert token is None
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

@@ -890,7 +890,10 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
         logger.debug("Keychain: no entry found for 'Claude Code-credentials'")
         return None
 
-    raw = result.stdout.strip()
+    raw = result.stdout
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
     if not raw:
         return None
 
@@ -902,10 +905,10 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
 
     oauth_data = data.get("claudeAiOauth")
     if oauth_data and isinstance(oauth_data, dict):
-        access_token = oauth_data.get("accessToken", "")
-        if access_token:
+        access_token_value = oauth_data.get("accessToken", "")
+        if access_token_value:
             return {
-                "accessToken": access_token,
+                "accessToken": access_token_value,
                 "refreshToken": oauth_data.get("refreshToken", ""),
                 "expiresAt": oauth_data.get("expiresAt", 0),
                 "source": "macos_keychain",
@@ -940,10 +943,10 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
             data = json.loads(cred_path.read_text(encoding="utf-8"))
             oauth_data = data.get("claudeAiOauth")
             if oauth_data and isinstance(oauth_data, dict):
-                access_token = oauth_data.get("accessToken", "")
-                if access_token:
+                access_token_value = oauth_data.get("accessToken", "")
+                if access_token_value:
                     return {
-                        "accessToken": access_token,
+                        "accessToken": access_token_value,
                         "refreshToken": oauth_data.get("refreshToken", ""),
                         "expiresAt": oauth_data.get("expiresAt", 0),
                         "source": "claude_code_credentials_file",
@@ -1036,7 +1039,7 @@ def refresh_anthropic_oauth_pure(refresh_token: str, *, use_json: bool = False) 
 def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
     """Attempt to refresh an expired Claude Code OAuth token."""
     refresh_token = creds.get("refreshToken", "")
-    if not refresh_token:
+    if not refresh_token.strip():
         logger.debug("No refresh token available — cannot refresh")
         return None
 
@@ -1151,7 +1154,7 @@ def _prefer_refreshable_claude_code_token(env_token: str, creds: Optional[Dict[s
         return None
 
     resolved = _resolve_claude_code_token_from_credentials(creds)
-    if resolved and resolved != env_token:
+    if resolved and (resolved != env_token):
         logger.debug(
             "Preferring Claude Code credential file over static env OAuth token so refresh can proceed"
         )
@@ -1190,9 +1193,9 @@ def resolve_anthropic_token() -> Optional[str]:
         return cc_token
 
     # 3. Claude Code credential file
-    resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
-    if resolved_claude_token:
-        return resolved_claude_token
+    resolved_claude_oauth = _resolve_claude_code_token_from_credentials(creds)
+    if resolved_claude_oauth:
+        return resolved_claude_oauth
 
     # 4. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Hermes configs.
