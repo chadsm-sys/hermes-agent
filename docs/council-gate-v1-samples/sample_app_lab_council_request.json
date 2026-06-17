@@ -1,0 +1,44 @@
+{
+  "allowed_actions": [
+    "create sample Council artifacts"
+  ],
+  "artifacts": [
+    "docs/council-gate-v1-templates.md"
+  ],
+  "branch": "feat/hermes-council-gate-v1",
+  "candidate": "Proposed policy: AppLab candidates must show product wedge, distribution wedge, and monetization wedge before exact teardown or build work starts.",
+  "context": "",
+  "created_at": "2026-06-17T23:13:11+00:00",
+  "deterministic_checks": {
+    "app_lab_patch_applied": "NO",
+    "live_model_call": "NO",
+    "mock_mode_only": "PASS"
+  },
+  "evidence": [
+    "No live model call. Mock Council mode only. Sample artifact for future patch review."
+  ],
+  "forbidden_actions": [
+    "apply AppLab full-money-loop patch",
+    "contact users",
+    "spend money",
+    "call live models"
+  ],
+  "frozen_plan_or_delivery": "Proposed policy: AppLab candidates must show product wedge, distribution wedge, and monetization wedge before exact teardown or build work starts.",
+  "gate_type": "APPLAB_CANDIDATE",
+  "goal": "AppLab full-money-loop preflight",
+  "goal_name": "AppLab full-money-loop preflight",
+  "host_summary": "Dogfood sample only. Do not apply the AppLab patch. Review whether AppLab should require product wedge + distribution wedge + monetization wedge before exact teardown or build.",
+  "metadata": {},
+  "redaction_status": "unredacted",
+  "repo_path": "/Users/macmini/.hermes/hermes-agent",
+  "review_id": "sample-app-lab-council",
+  "reviewer_questions": [
+    "Should all three wedges be required before teardown/build?"
+  ],
+  "risk_notes": [
+    "Avoid building product workflows before buyer/distribution/monetization proof."
+  ],
+  "session_id": "",
+  "subject": "Proposed policy: AppLab candidates must show product wedge, distribution wedge, and monetization wedge before exact teardown or build work starts.",
+  "trigger": "applab_candidate"
+}
