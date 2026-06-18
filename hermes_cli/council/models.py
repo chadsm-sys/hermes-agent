@@ -216,11 +216,16 @@ class CouncilReviewResult:
     def __post_init__(self) -> None:
         if self.decision and not self.verdict:
             self.verdict = _DECISION_TO_VERDICT.get(self.decision.strip().lower(), self.decision)
-        self.verdict = (self.verdict or "APPROVE").strip().upper()
+        missing_or_blank_verdict = not str(self.verdict or "").strip()
+        self.verdict = (self.verdict or "BLOCK").strip().upper()
         if self.verdict.lower() in VALID_DECISIONS:
             self.verdict = _DECISION_TO_VERDICT[self.verdict.lower()]
         if self.verdict not in VALID_VERDICTS:
             raise ValueError(f"invalid Council verdict: {self.verdict!r}")
+        if missing_or_blank_verdict:
+            self.primary_risks = list(self.primary_risks or []) + ["missing_verdict"]
+            if not self.final_recommendation and not self.summary:
+                self.final_recommendation = "Council verdict missing; no approval granted."
         self.confidence = (self.confidence or "MEDIUM").strip().upper()
         if self.confidence not in VALID_CONFIDENCE:
             raise ValueError(f"invalid Council confidence: {self.confidence!r}")

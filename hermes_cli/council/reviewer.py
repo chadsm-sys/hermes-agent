@@ -23,7 +23,7 @@ class CouncilReviewer(ABC):
 
 
 class MockCouncilReviewer(CouncilReviewer):
-    """Safe local reviewer used by default and in tests."""
+    """Local test/debug reviewer; must be explicitly enabled in config."""
 
     reviewer_name = "mock"
 
@@ -197,10 +197,12 @@ def build_reviewer(config: Optional[Dict[str, Any]] = None) -> CouncilReviewer:
     """Build a reviewer adapter from config."""
 
     cfg = config or {}
-    mode = str(cfg.get("mode") or "mock").strip().lower()
+    mode = str(cfg.get("mode") or "manual").strip().lower()
     if mode in {"off", "disabled"}:
         return ManualCouncilReviewer()
     if mode == "mock":
+        if cfg.get("enabled") and not cfg.get("allow_mock_unsafe"):
+            return ManualCouncilReviewer()
         return MockCouncilReviewer()
     if mode == "manual":
         return ManualCouncilReviewer()

@@ -85,13 +85,15 @@ def _review_markdown(request: CouncilReviewRequest, result: CouncilReviewResult)
 class CouncilArtifactWriter:
     """Minimal artifact writer for Council requests/results."""
 
-    def __init__(self, artifact_dir: str | Path):
-        self.artifact_dir = Path(artifact_dir)
+    def __init__(self, artifact_dir: str | Path, *, persist_raw_request_unsafe: bool = False):
+        self.artifact_dir = Path(artifact_dir).expanduser()
+        self.persist_raw_request_unsafe = bool(persist_raw_request_unsafe)
 
     def write_request(self, request: CouncilReviewRequest, redacted_request: Dict[str, Any]) -> Path:
         review_dir = self.artifact_dir / request.review_id
         review_dir.mkdir(parents=True, exist_ok=True)
-        _write_json(review_dir / "council_request.json", request.to_dict())
+        if self.persist_raw_request_unsafe:
+            _write_json(review_dir / "council_request.raw.unsafe.json", request.to_dict())
         _write_json(review_dir / "council_request_redacted.json", redacted_request)
         return review_dir
 
@@ -113,8 +115,11 @@ class CouncilGate:
         self.config = config or {}
         self.reviewer = reviewer or build_reviewer(self.config)
         self.max_revisions = int(self.config.get("max_revisions") or 1)
-        artifact_dir = self.config.get("artifact_dir") or "council"
-        self.writer = CouncilArtifactWriter(artifact_dir)
+        artifact_dir = self.config.get("artifact_dir") or "~/.hermes/council"
+        self.writer = CouncilArtifactWriter(
+            artifact_dir,
+            persist_raw_request_unsafe=bool(self.config.get("persist_raw_request_unsafe")),
+        )
 
     def _deterministic_failed(self, request: CouncilReviewRequest) -> bool:
         checks = request.deterministic_checks or {}

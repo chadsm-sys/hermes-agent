@@ -7871,14 +7871,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if existing is not None and getattr(existing, "session_id", None) == sid:
             return existing
 
+        council_cfg = {}
         try:
             cfg = load_config() or {}
             goals_cfg = cfg.get("goals") or {}
+            council_cfg = cfg.get("council") or {}
             max_turns = int(goals_cfg.get("max_turns", 20) or 20)
         except Exception:
             max_turns = 20
 
-        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
+        mgr = GoalManager(session_id=sid, default_max_turns=max_turns, council_config=council_cfg)
         self._goal_manager = mgr
         return mgr
 

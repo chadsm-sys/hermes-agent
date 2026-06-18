@@ -248,13 +248,14 @@ Add under `DEFAULT_CONFIG` in `hermes_cli/config.py`:
 ```yaml
 council:
   enabled: false
-  mode: mock        # mock | manual | command
+  mode: manual      # manual | command | mock; mock requires allow_mock_unsafe=true when enabled
   blocking: true
   triggers:
-    goal_plan: true
-    scope_validation: true
-    delivery_review: true
+    - delivery       # delivery/done/delivery_review aliases activate the implemented done checkpoint
+    - done
   artifact_dir: "~/.hermes/council"
+  persist_raw_request_unsafe: false
+  allow_mock_unsafe: false
   command:
     argv: []
     timeout_seconds: 60

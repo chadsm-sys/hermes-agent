@@ -813,15 +813,17 @@ DEFAULT_CONFIG = {
     "toolsets": ["hermes-cli"],
     "council": {
         "enabled": False,
-        "mode": "mock",
+        "mode": "manual",
         "live_model_enabled": False,
         "command_enabled": False,
+        "allow_mock_unsafe": False,
+        "persist_raw_request_unsafe": False,
         "command": [],
         "timeout_seconds": 60,
         "max_revisions": 1,
-        "triggers": ["plan", "scope", "delivery"],
+        "triggers": ["plan", "scope", "delivery", "done"],
         "require_for_gates": [],
-        "artifact_dir": "council",
+        "artifact_dir": "~/.hermes/council",
     },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.

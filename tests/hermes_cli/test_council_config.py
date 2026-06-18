@@ -9,10 +9,13 @@ def test_council_default_config_is_disabled_and_safe():
     council = DEFAULT_CONFIG["council"]
 
     assert council["enabled"] is False
-    assert council["mode"] == "mock"
+    assert council["mode"] == "manual"
     assert council["live_model_enabled"] is False
-    assert council["triggers"] == ["plan", "scope", "delivery"]
-    assert council["artifact_dir"] == "council"
+    assert council["command_enabled"] is False
+    assert council["allow_mock_unsafe"] is False
+    assert council["persist_raw_request_unsafe"] is False
+    assert council["triggers"] == ["plan", "scope", "delivery", "done"]
+    assert council["artifact_dir"] == "~/.hermes/council"
 
 
 def test_load_config_includes_council_defaults(tmp_path, monkeypatch):

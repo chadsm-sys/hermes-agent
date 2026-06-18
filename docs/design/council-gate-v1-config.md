@@ -9,19 +9,13 @@ Add to `DEFAULT_CONFIG` in `hermes_cli/config.py`:
 ```python
 "council": {
     "enabled": False,
-    "mode": "mock",
+    "mode": "manual",
     "blocking": True,
     "artifact_dir": "~/.hermes/council",
     "write_artifacts": True,
-    "triggers": {
-        "delivery_review": True,
-        "goal_plan": False,
-        "scope_validation": False,
-        "applab_candidate": False,
-        "commit_readiness": False,
-        "merge_readiness": False,
-        "cron_resume": False,
-    },
+    "persist_raw_request_unsafe": False,
+    "allow_mock_unsafe": False,
+    "triggers": ["plan", "scope", "delivery", "done"],
     "manual": {
         "default_decision": "needs_review",
     },
@@ -35,26 +29,29 @@ Add to `DEFAULT_CONFIG` in `hermes_cli/config.py`:
 ## Rules
 
 - `enabled=false` must preserve all current `/goal` behavior.
-- `mode` values: `mock`, `manual`, `command`.
+- `mode` values: `manual`, `command`, `mock`. `mock` is unsafe/debug-only and requires `allow_mock_unsafe=true` when Council is enabled.
 - `blocking=true` means review failures pause or require human review.
 - `blocking=false` means review failures are reported as skipped/non-blocking.
-- `artifact_dir` expands `~` and should default to the active Hermes profile home.
+- `artifact_dir` expands `~` and defaults outside the current repo/workspace at `~/.hermes/council`.
 - `write_artifacts=false` is allowed for tests, but runtime default is true.
+- Raw request persistence is disabled by default; only `council_request_redacted.json` is written unless `persist_raw_request_unsafe=true` is explicitly configured.
 - `command.argv` must be a list, not a shell string.
 - `command` mode with empty argv is configuration error.
 - No `.env` keys for V1 because no secrets are required.
 
-## Example enabled mock config
+## Example enabled manual config
 
 ```yaml
 council:
   enabled: true
-  mode: mock
+  mode: manual
   blocking: true
   artifact_dir: "~/.hermes/council"
   write_artifacts: true
+  persist_raw_request_unsafe: false
   triggers:
-    delivery_review: true
+    - delivery
+    - done
 ```
 
 ## Example manual review config
@@ -91,11 +88,13 @@ Required checks:
 | Field | Validation | Bad value behavior |
 |---|---|---|
 | `enabled` | bool-ish | disabled/skipped if false |
-| `mode` | `mock`, `manual`, `command` | configuration error |
+| `mode` | `manual`, `command`, `mock` | configuration error; enabled mock mode requires explicit unsafe opt-in |
 | `blocking` | bool-ish | default true |
 | `artifact_dir` | non-empty path string | default profile council dir |
 | `write_artifacts` | bool-ish | default true |
-| `triggers` | dict of bool-ish | missing trigger = false except `delivery_review` default true |
+| `triggers` | list or dict of enabled triggers | `delivery`, `done`, and `delivery_review` all activate the implemented done/delivery checkpoint |
+| `persist_raw_request_unsafe` | bool-ish | default false; raw request is not persisted by default |
+| `allow_mock_unsafe` | bool-ish | default false; prevents mock mode from approving production-enabled Council gates |
 | `manual.default_decision` | valid Council decision | default `needs_review` |
 | `command.argv` | non-empty list[str] for command mode | configuration error |
 | `command.timeout_seconds` | positive int | default 60 |
