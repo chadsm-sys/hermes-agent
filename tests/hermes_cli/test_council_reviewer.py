@@ -5,15 +5,15 @@ from __future__ import annotations
 import json
 
 
-def _request():
+def _request(*, subject: str = "Status: PASS\nEvidence: tests passed", metadata: dict | None = None):
     from hermes_cli.council.models import CouncilReviewRequest
 
     return CouncilReviewRequest(
         session_id="sess-123",
         goal="Build a safe delivery artifact",
         trigger="delivery_review",
-        subject="Status: PASS\nEvidence: tests passed",
-        metadata={"phase": "red-test"},
+        subject=subject,
+        metadata={"phase": "red-test", **(metadata or {})},
     )
 
 
@@ -53,14 +53,15 @@ def test_command_council_reviewer_blocks_shell_strings():
     assert CommandCouncilReviewer(command="python3 reviewer.py; rm -rf /tmp/nope").review(_request()).decision == "blocked"
 
 
-def test_artifact_writer_persists_markdown_and_json(tmp_path):
+def test_artifact_writer_persists_markdown_and_redacted_json_by_default(tmp_path):
     from hermes_cli.council.artifacts import write_council_artifact
     from hermes_cli.council.models import CouncilReviewResult
 
+    sentinel = "sk-" + "test-legacy-artifact-do-not-persist"
     result = CouncilReviewResult(decision="pass", summary="Safe enough for V1.")
     written = write_council_artifact(
         base_dir=tmp_path,
-        request=_request(),
+        request=_request(subject=f"api_key={sentinel}", metadata={"token": sentinel}),
         result=result,
     )
 
@@ -70,7 +71,32 @@ def test_artifact_writer_persists_markdown_and_json(tmp_path):
     assert md_path.exists()
     assert json_path.exists()
     assert "Council Gate Review" in md_path.read_text(encoding="utf-8")
-    assert json.loads(json_path.read_text(encoding="utf-8"))["result"]["decision"] == "pass"
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["result"]["decision"] == "pass"
+    assert data["request"]["redaction_status"] == "redacted"
+    for artifact in tmp_path.iterdir():
+        if artifact.is_file():
+            assert sentinel not in artifact.read_text(encoding="utf-8")
+    assert not list(tmp_path.glob("*.raw.unsafe.json"))
+
+
+def test_artifact_writer_raw_request_requires_unsafe_opt_in(tmp_path):
+    from hermes_cli.council.artifacts import write_council_artifact
+    from hermes_cli.council.models import CouncilReviewResult
+
+    sentinel = "sk-" + "test-legacy-artifact-do-not-persist"
+    result = CouncilReviewResult(decision="pass", summary="Safe enough for V1.")
+    written = write_council_artifact(
+        base_dir=tmp_path,
+        request=_request(subject=f"api_key={sentinel}", metadata={"token": sentinel}),
+        result=result,
+        persist_raw_request_unsafe=True,
+    )
+
+    raw_path = written["raw_unsafe_json"]
+    assert raw_path.name.endswith(".raw.unsafe.json")
+    assert raw_path.exists()
+    assert sentinel in raw_path.read_text(encoding="utf-8")
 
 
 def test_council_redacts_obvious_secrets_before_review(tmp_path):
