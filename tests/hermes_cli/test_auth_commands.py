@@ -356,6 +356,24 @@ def test_auth_add_nous_oauth_honors_custom_label(tmp_path, monkeypatch):
     assert payload["providers"]["nous"]["label"] == "my-nous"
 
 
+def test_normalize_provider_prefers_builtin_codex_over_custom_alias(monkeypatch):
+    """A same-named custom provider must not shadow native Codex OAuth.
+
+    Regression: when config contained a provider entry named ``openai-codex``,
+    ``hermes auth add openai-codex`` normalized to ``custom-openai-codex`` and
+    fell into the API-key prompt path instead of native device-code OAuth.
+    """
+    from hermes_cli import auth_commands
+
+    monkeypatch.setattr(
+        auth_commands,
+        "_get_custom_provider_names",
+        lambda: [("openai-codex", "custom-openai-codex", "openai-codex")],
+    )
+
+    assert auth_commands._normalize_provider("openai-codex") == "openai-codex"
+
+
 def test_auth_add_codex_oauth_persists_pool_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})

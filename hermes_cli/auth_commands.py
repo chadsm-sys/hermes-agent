@@ -80,6 +80,12 @@ def _normalize_provider(provider: str) -> str:
         return "openrouter"
     if normalized in {"grok-oauth", "xai-oauth", "x-ai-oauth", "xai-grok-oauth"}:
         return "xai-oauth"
+    # Built-in providers must win over same-named custom provider aliases.
+    # Otherwise a config entry like providers.openai-codex shadows the native
+    # OAuth-capable Codex provider as custom-openai-codex and routes auth add
+    # into the API-key prompt instead of the Codex device-code flow.
+    if normalized in PROVIDER_REGISTRY or normalized == "openrouter":
+        return normalized
     # Check if it matches a custom provider name
     custom_key = _resolve_custom_provider_input(normalized)
     if custom_key:
