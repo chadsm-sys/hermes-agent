@@ -8130,8 +8130,10 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         sys.exit(1)
 
     if is_shallow:
-        # No history to count across the shallow boundary. Compare tip SHAs and
-        # report presence-only (mirrors the banner's _check_via_local_git).
+        # No history to count across the shallow boundary. Compare reachability
+        # first so local carried commits on top of the fetched tip still count
+        # as up to date; fall back to tip-SHA presence-only if rev-list cannot
+        # traverse the shallow boundary.
         head_sha = subprocess.run(
             git_cmd + ["rev-parse", "HEAD"],
             cwd=PROJECT_ROOT, capture_output=True, text=True,
@@ -8140,6 +8142,23 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             git_cmd + ["rev-parse", compare_branch],
             cwd=PROJECT_ROOT, capture_output=True, text=True,
         ).stdout.strip()
+        if target_sha:
+            reachability_result = subprocess.run(
+                git_cmd + ["rev-list", f"HEAD..{target_sha}", "--count"],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            if reachability_result.returncode == 0:
+                behind = int(reachability_result.stdout.strip())
+                if behind == 0:
+                    print("✓ Already up to date.")
+                else:
+                    print(f"⚕ Update available (behind {compare_branch}).")
+                    from hermes_cli.config import recommended_update_command
+
+                    print(f"  Run '{recommended_update_command()}' to install.")
+                return
         if head_sha and target_sha and head_sha == target_sha:
             print("✓ Already up to date.")
         else:

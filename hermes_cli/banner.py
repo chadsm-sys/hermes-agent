@@ -226,13 +226,27 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     if is_shallow:
         # No history to count across the shallow boundary. `origin/main` may not
         # be a tracking ref in a `clone --depth 1`, so prefer FETCH_HEAD (just
-        # updated by the fetch above) and fall back to origin/main.
-        head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+        # updated by the fetch above) and fall back to origin/main. Local carried
+        # commits may put HEAD ahead of the fetched tip; do not report an update
+        # when the target has zero commits not already reachable from HEAD.
         target_rev = (
             _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
             or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
         )
-        if not head_rev or not target_rev:
+        if not target_rev:
+            return None
+        try:
+            result = subprocess.run(
+                ["git", "rev-list", "--count", f"HEAD..{target_rev}"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(repo_dir),
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except Exception:
+            pass
+        head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
+        if not head_rev:
             return None
         return 0 if head_rev == target_rev else UPDATE_AVAILABLE_NO_COUNT
 
@@ -424,7 +438,8 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
             pass
         return None
 
-    upstream = _git_short_hash(repo_dir, "origin/main")
+    upstream_ref = "upstream/main" if _git_short_hash(repo_dir, "upstream/main") else "origin/main"
+    upstream = _git_short_hash(repo_dir, upstream_ref)
     local = _git_short_hash(repo_dir, "HEAD")
     if not upstream or not local:
         # Live-git lookup failed (e.g. shallow clone without origin/main).
@@ -441,7 +456,7 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     ahead = 0
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            ["git", "rev-list", "--count", f"{upstream_ref}..HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
