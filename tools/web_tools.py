@@ -317,7 +317,13 @@ def _backend_supports_capability(backend: str, capability: str) -> bool:
 def _candidate_backends_for_capability(capability: str, cfg: dict) -> list[str]:
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     shared = (cfg.get("backend") or "").lower().strip()
-    candidates = [specific, shared, _get_backend(), *_WEB_BACKEND_FALLBACK_ORDER]
+    configured_candidates = [specific, shared, _get_backend()]
+    candidates = list(configured_candidates)
+    if any(
+        backend in _WEB_BACKENDS and _backend_supports_capability(backend, capability)
+        for backend in configured_candidates
+    ):
+        candidates.extend(_WEB_BACKEND_FALLBACK_ORDER)
     return [
         backend
         for backend in dict.fromkeys(candidates)

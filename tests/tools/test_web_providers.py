@@ -200,6 +200,23 @@ class TestPerCapabilityBackendSelection:
         assert web_tools._get_search_backend() == "tavily"
         assert web_tools._get_extract_backend() == "tavily"
 
+    def test_search_only_backend_does_not_fall_back_to_available_extract_provider(self, monkeypatch):
+        from tools import web_tools
+
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
+            "backend": "ddgs",
+            "search_backend": "ddgs",
+            "extract_backend": "",
+        })
+        monkeypatch.setattr(
+            web_tools,
+            "_is_backend_available",
+            lambda backend: backend in {"ddgs", "tavily"},
+        )
+
+        assert web_tools._get_search_backend() == "ddgs"
+        assert web_tools._get_extract_backend() == "ddgs"
+
     def test_open_search_circuit_skips_configured_backend(self, monkeypatch, tmp_path):
         from tools import web_tools
 
