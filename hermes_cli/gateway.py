@@ -3663,11 +3663,29 @@ def refresh_launchd_plist_if_needed() -> bool:
         check=False,
         timeout=90,
     )
-    subprocess.run(
+    bootstrap = subprocess.run(
         ["launchctl", "bootstrap", domain, str(plist_path)],
+        capture_output=True,
+        text=True,
         check=False,
         timeout=30,
     )
+    if bootstrap.returncode != 0:
+        time.sleep(1)
+        bootstrap = subprocess.run(
+            ["launchctl", "bootstrap", domain, str(plist_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    if bootstrap.returncode != 0:
+        detail = (bootstrap.stderr or bootstrap.stdout or "").strip()
+        print_warning(
+            "launchd service definition updated, but bootstrap did not complete: "
+            f"{detail or f'exit {bootstrap.returncode}'}"
+        )
+        return False
     print(
         "↻ Updated gateway launchd service definition to match the current Hermes install"
     )
@@ -4748,6 +4766,185 @@ def _runtime_health_lines() -> list[str]:
         lines.append(f"⚠ Last shutdown reason: {exit_reason}")
 
     return lines
+
+
+def _quick_health_api_endpoint() -> str:
+    host = os.environ.get("API_SERVER_HOST")
+    port = os.environ.get("API_SERVER_PORT")
+    try:
+        raw = read_raw_config() or {}
+    except Exception:
+        raw = {}
+    platforms = raw.get("platforms") if isinstance(raw, dict) else {}
+    api_cfg = platforms.get("api_server") if isinstance(platforms, dict) else None
+    if isinstance(api_cfg, dict):
+        extra = api_cfg.get("extra")
+        if isinstance(extra, dict):
+            host = host or extra.get("host")
+            port = port or extra.get("port")
+        host = host or api_cfg.get("host")
+        port = port or api_cfg.get("port")
+
+    probe_host = str(host or "127.0.0.1").strip() or "127.0.0.1"
+    if probe_host in {"0.0.0.0", "::", "[::]"}:
+        probe_host = "127.0.0.1"
+    if ":" in probe_host and not probe_host.startswith("["):
+        probe_host = f"[{probe_host}]"
+    try:
+        probe_port = int(port or 8642)
+    except (TypeError, ValueError):
+        probe_port = 8642
+    return f"http://{probe_host}:{probe_port}/health"
+
+
+def _quick_health_launchd(timeout: float) -> tuple[bool | None, str]:
+    if not is_macos() or not get_launchd_plist_path().exists():
+        return None, "not installed"
+    target = f"{_launchd_domain()}/{get_launchd_label()}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", target],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "launchctl print timed out"
+    except Exception as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        return False, detail[0] if detail else f"launchctl exit {result.returncode}"
+    output = result.stdout or ""
+    state = None
+    pid = None
+    for line in output.splitlines():
+        stripped = line.strip()
+        if state is None and stripped.startswith("state = "):
+            state = stripped.split("=", 1)[1].strip()
+        elif pid is None and stripped.startswith("pid = "):
+            pid = stripped.split("=", 1)[1].strip()
+    if state == "running":
+        return True, f"running pid={pid}" if pid else "running"
+    return False, f"state={state or 'unknown'}"
+
+
+def _quick_health_probe_http(url: str, timeout: float) -> tuple[bool, str]:
+    try:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read(8192)
+            status = getattr(response, "status", None) or response.getcode()
+        try:
+            payload = _json.loads(body.decode("utf-8", errors="replace"))
+        except Exception:
+            payload = {}
+        health_status = payload.get("status") if isinstance(payload, dict) else None
+        if 200 <= int(status) < 300 and (health_status in {None, "ok"}):
+            detail = f"HTTP {status}"
+            if health_status:
+                detail = f"{detail} status={health_status}"
+            return True, detail
+        return False, f"HTTP {status} status={health_status or 'unknown'}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _quick_health_restart_helper_count(timeout: float) -> int:
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception:
+        return 0
+    if result.returncode != 0:
+        return 0
+    count = 0
+    for line in result.stdout.splitlines():
+        if "/tmp/hermes_gateway_restart_once.sh" in line:
+            count += 1
+        elif "gateway_restart_helper.lock" in line and "gateway restart" in line:
+            count += 1
+    return count
+
+
+def gateway_quick_health(args) -> None:
+    """Fast, bounded liveness check for watchdogs and operator triage."""
+    import json as _json
+
+    timeout = float(getattr(args, "timeout", 2.0) or 2.0)
+    json_output = bool(getattr(args, "json", False))
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool | None, detail: str, required: bool = True) -> None:
+        checks.append(
+            {
+                "name": name,
+                "ok": ok,
+                "required": required,
+                "detail": detail,
+            }
+        )
+
+    try:
+        from gateway.status import read_runtime_status
+
+        state = read_runtime_status() or {}
+    except Exception:
+        state = {}
+
+    gateway_state = state.get("gateway_state")
+    active_agents = state.get("active_agents")
+    runtime_pid = state.get("pid")
+    state_detail = f"gateway_state={gateway_state or 'unknown'}"
+    if runtime_pid:
+        state_detail += f" pid={runtime_pid}"
+    if active_agents is not None:
+        state_detail += f" active_agents={active_agents}"
+    add("runtime_state", gateway_state == "running", state_detail)
+
+    launchd_ok, launchd_detail = _quick_health_launchd(timeout)
+    add("launchd", launchd_ok, launchd_detail, required=launchd_ok is not None)
+
+    api_state = ((state.get("platforms") or {}).get("api_server") or {}).get("state")
+    api_required = api_state == "connected" or bool(os.environ.get("API_SERVER_ENABLED"))
+    url = _quick_health_api_endpoint()
+    http_ok, http_detail = _quick_health_probe_http(url, timeout)
+    add("api_health", http_ok, f"{url} {http_detail}", required=api_required)
+
+    pids = tuple(find_gateway_pids())
+    add(
+        "gateway_process",
+        bool(pids),
+        "pids=" + ",".join(str(pid) for pid in pids) if pids else "no process found",
+    )
+
+    helper_count = _quick_health_restart_helper_count(timeout)
+    add(
+        "restart_helper",
+        helper_count == 0,
+        f"{helper_count} helper process(es)",
+        required=False,
+    )
+
+    ok = all(check["ok"] is not False for check in checks if check["required"])
+    payload = {"ok": ok, "checks": checks}
+    if json_output:
+        print(_json.dumps(payload, sort_keys=True))
+    else:
+        print("PASS gateway quick-health" if ok else "FAIL gateway quick-health")
+        for check in checks:
+            status = "OK" if check["ok"] is True else "WARN" if not check["required"] else "FAIL"
+            if check["ok"] is None:
+                status = "SKIP"
+            print(f"{status} {check['name']}: {check['detail']}")
+    sys.exit(0 if ok else 1)
 
 
 def _set_platform_unauthorized_dm_behavior(platform_key: str, behavior: str) -> None:
@@ -6498,6 +6695,9 @@ def _gateway_command_inner(args):
             # Start fresh
             print("Starting gateway...")
             run_gateway(verbose=0)
+
+    elif subcmd == "quick-health":
+        gateway_quick_health(args)
 
     elif subcmd == "status":
         deep = getattr(args, "deep", False)

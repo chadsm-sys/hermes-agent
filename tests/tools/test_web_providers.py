@@ -200,6 +200,38 @@ class TestPerCapabilityBackendSelection:
         assert web_tools._get_search_backend() == "tavily"
         assert web_tools._get_extract_backend() == "tavily"
 
+    def test_open_search_circuit_skips_configured_backend(self, monkeypatch, tmp_path):
+        from tools import web_tools
+
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FILE", str(tmp_path / "web-circuit.json"))
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FAILURE_THRESHOLD", "2")
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
+            "backend": "tavily",
+            "search_backend": "tavily",
+        })
+        monkeypatch.setattr(
+            web_tools,
+            "_is_backend_available",
+            lambda backend: backend in {"tavily", "ddgs"},
+        )
+
+        web_tools._record_backend_result("tavily", "search", False, "HTTP 432 quota exceeded")
+        web_tools._record_backend_result("tavily", "search", False, "HTTP 432 quota exceeded")
+
+        assert web_tools._get_search_backend() == "ddgs"
+
+    def test_success_clears_open_search_circuit(self, monkeypatch, tmp_path):
+        from tools import web_tools
+
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FILE", str(tmp_path / "web-circuit.json"))
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FAILURE_THRESHOLD", "1")
+
+        web_tools._record_backend_result("tavily", "search", False, "HTTP 432 quota exceeded")
+        assert web_tools._is_backend_circuit_open("tavily", "search") is True
+
+        web_tools._record_backend_result("tavily", "search", True)
+        assert web_tools._is_backend_circuit_open("tavily", "search") is False
+
 
 # ---------------------------------------------------------------------------
 # Config key presence in DEFAULT_CONFIG
@@ -492,4 +524,3 @@ class TestDispatchersTriggerPluginDiscovery:
             assert web_search_registry.get_provider("brave-free") is not None
         finally:
             restore()
-

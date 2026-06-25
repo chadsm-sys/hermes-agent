@@ -3676,6 +3676,35 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_slash_confirm failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    @staticmethod
+    def _is_binary_approval_choices(choices: Optional[list]) -> bool:
+        """Return True for two-choice approve/deny style prompts.
+
+        Telegram inline keyboard buttons cannot be colored by bots, so approval
+        prompts use explicit green/red emoji labels and no fallback "Other"
+        button.  That keeps cash/action approvals one tap: approve or deny.
+        """
+        if not choices or len(choices) != 2:
+            return False
+        normalized = [str(c).strip().lower() for c in choices]
+        approve_terms = ("approve", "allow", "yes", "✅", "green")
+        deny_terms = ("deny", "cancel", "no", "reject", "stop", "❌", "🛑", "red")
+        has_approve = any(any(term in c for term in approve_terms) for c in normalized)
+        has_deny = any(any(term in c for term in deny_terms) for c in normalized)
+        return has_approve and has_deny
+
+    @staticmethod
+    def _clarify_button_label(choice: Any, idx: int, *, prefer_text: bool = False) -> str:
+        label = str(choice).strip()
+        if not label:
+            return str(idx + 1)
+        if prefer_text and "\n" not in label:
+            label = " ".join(label.split())
+            if len(label) <= 52:
+                return label
+            return label[:49] + "..."
+        return str(idx + 1)
+
     async def send_clarify(
         self,
         chat_id: str,
@@ -3688,9 +3717,9 @@ class TelegramAdapter(BasePlatformAdapter):
         """Render a clarify prompt with one inline button per choice.
 
         Multi-choice mode (``choices`` non-empty): renders one button per
-        option plus a final "✏️ Other (type answer)" button.  Picking the
-        "Other" button flips the entry into text-capture mode so the next
-        message becomes the response.
+        option.  Binary approve/deny choices are rendered as one-tap action
+        buttons with the option text as the button label and no "Other" button.
+        Other multi-choice prompts keep numeric buttons plus "✏️ Other".
 
         Open-ended mode (``choices`` empty): renders the question as plain
         text — no buttons.  The next message in the session is captured by
@@ -3723,21 +3752,33 @@ class TelegramAdapter(BasePlatformAdapter):
 
             if choices:
                 # Telegram caps callback_data at 64 bytes; keep "cl:<id>:<idx>"
-                # short.
+                # short.  Binary approval prompts must stay one-tap on mobile:
+                # show the action labels directly and omit the "Other" escape.
+                is_binary_approval = self._is_binary_approval_choices(choices)
                 rows = []
-                for idx in range(len(choices)):
+                binary_row = []
+                for idx, choice in enumerate(choices):
+                    button = InlineKeyboardButton(
+                        self._clarify_button_label(
+                            choice,
+                            idx,
+                            prefer_text=is_binary_approval,
+                        ),
+                        callback_data=f"cl:{clarify_id}:{idx}",
+                    )
+                    if is_binary_approval:
+                        binary_row.append(button)
+                    else:
+                        rows.append([button])
+                if binary_row:
+                    rows.append(binary_row)
+                if not is_binary_approval:
                     rows.append([
                         InlineKeyboardButton(
-                            str(idx + 1),
-                            callback_data=f"cl:{clarify_id}:{idx}",
+                            "✏️ Other (type answer)",
+                            callback_data=f"cl:{clarify_id}:other",
                         )
                     ])
-                rows.append([
-                    InlineKeyboardButton(
-                        "✏️ Other (type answer)",
-                        callback_data=f"cl:{clarify_id}:other",
-                    )
-                ])
                 kwargs["reply_markup"] = InlineKeyboardMarkup(rows)
 
             reply_to_id = self._reply_to_message_id_for_send(None, metadata)

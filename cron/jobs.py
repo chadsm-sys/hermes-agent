@@ -74,6 +74,69 @@ _jobs_file_lock = threading.RLock()
 _jobs_lock_state = threading.local()
 OUTPUT_DIR = CRON_DIR / "output"
 ONESHOT_GRACE_SECONDS = 120
+CRON_FAILURE_QUARANTINE_THRESHOLD = 3
+CRON_FAILURE_QUARANTINE_MINUTES = 180
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _short_error_text(error: Optional[str]) -> str:
+    text = re.sub(r"\s+", " ", str(error or "unknown failure")).strip()
+    return text[:240]
+
+
+def _apply_run_failure_quarantine(
+    job: Dict[str, Any],
+    *,
+    success: bool,
+    error: Optional[str],
+    now_iso: str,
+) -> None:
+    if success:
+        job["consecutive_failures"] = 0
+        job["quarantined_until"] = None
+        job["quarantine_reason"] = None
+        return
+
+    try:
+        failures = int(job.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
+    failures += 1
+    job["consecutive_failures"] = failures
+
+    threshold = max(
+        1,
+        _int_env("HERMES_CRON_FAILURE_QUARANTINE_THRESHOLD", CRON_FAILURE_QUARANTINE_THRESHOLD),
+    )
+    if failures < threshold:
+        return
+
+    quarantine_minutes = max(
+        1,
+        _int_env("HERMES_CRON_FAILURE_QUARANTINE_MINUTES", CRON_FAILURE_QUARANTINE_MINUTES),
+    )
+    try:
+        now_dt = datetime.fromisoformat(now_iso)
+    except ValueError:
+        now_dt = _hermes_now()
+    quarantined_until = (now_dt + timedelta(minutes=quarantine_minutes)).isoformat()
+    reason = (
+        f"Auto-quarantined after {failures} consecutive failures: "
+        f"{_short_error_text(error)}"
+    )
+    job["enabled"] = False
+    job["state"] = "paused"
+    job["paused_at"] = now_iso
+    job["paused_reason"] = reason
+    job["quarantined_until"] = quarantined_until
+    job["quarantine_reason"] = reason
+    job["next_run_at"] = None
 
 
 def _jobs_lock_file() -> Path:
@@ -962,6 +1025,9 @@ def create_job(
         "last_status": None,
         "last_error": None,
         "last_delivery_error": None,
+        "consecutive_failures": 0,
+        "quarantined_until": None,
+        "quarantine_reason": None,
         # Delivery configuration
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
@@ -1126,6 +1192,9 @@ def resume_job(job_id: str) -> Optional[Dict[str, Any]]:
             "paused_at": None,
             "paused_reason": None,
             "next_run_at": next_run_at,
+            "consecutive_failures": 0,
+            "quarantined_until": None,
+            "quarantine_reason": None,
         },
     )
 
@@ -1239,6 +1308,13 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
                         job["state"] = "completed"
                 elif job.get("state") != "paused":
                     job["state"] = "scheduled"
+
+                _apply_run_failure_quarantine(
+                    job,
+                    success=success,
+                    error=error,
+                    now_iso=now,
+                )
 
                 save_jobs(jobs)
                 return

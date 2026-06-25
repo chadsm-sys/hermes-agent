@@ -5008,6 +5008,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     _STUCK_LOOP_THRESHOLD = 3  # restarts while active before auto-suspend
     _STUCK_LOOP_FILE = ".restart_failure_counts"
+    _STARTUP_AUTO_RESUME_CLAIMS_FILE = ".startup_auto_resume_claims"
+    _STARTUP_AUTO_RESUME_SHUTDOWN_TIMEOUT_LIMIT = 1
 
     def _increment_restart_failure_counts(self, active_session_keys: set) -> None:
         """Increment restart-failure counters for sessions active at shutdown.
@@ -5106,6 +5108,78 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             pass
 
+    def _startup_auto_resume_claim_key(self, entry) -> str:
+        marker = entry.last_resume_marked_at or entry.updated_at or entry.created_at
+        if isinstance(marker, datetime):
+            marker_text = marker.isoformat()
+        else:
+            marker_text = str(marker or "")
+        return "|".join(
+            [
+                str(getattr(entry, "session_key", "")),
+                str(getattr(entry, "session_id", "")),
+                str(getattr(entry, "resume_reason", "")),
+                marker_text,
+            ]
+        )
+
+    def _claim_startup_auto_resume(self, entry) -> bool:
+        """Return True when startup may synthesize a resume turn for entry.
+
+        Shutdown-timeout recovery is useful once, but re-running it on every
+        startup can keep relaunching the exact turn that prevented the previous
+        gateway from draining. Cap only that reason; restart/crash recovery keeps
+        the existing behavior and stuck-loop counter.
+        """
+        if getattr(entry, "resume_reason", None) != "shutdown_timeout":
+            return True
+
+        path = _hermes_home / self._STARTUP_AUTO_RESUME_CLAIMS_FILE
+        key = self._startup_auto_resume_claim_key(entry)
+        now = time.time()
+        try:
+            claims = json.loads(path.read_text()) if path.exists() else {}
+            if not isinstance(claims, dict):
+                claims = {}
+        except Exception:
+            claims = {}
+
+        # Bound file growth; the resume marker itself is freshness-gated.
+        max_age = max(float(_auto_continue_freshness_window()) * 2, 3600.0)
+        pruned = {}
+        for claim_key, claim in claims.items():
+            if not isinstance(claim, dict):
+                continue
+            updated_at = claim.get("updated_at")
+            if isinstance(updated_at, (int, float)) and now - float(updated_at) <= max_age:
+                pruned[claim_key] = claim
+        claims = pruned
+
+        current = claims.get(key, {})
+        count = int(current.get("count") or 0) if isinstance(current, dict) else 0
+        if count >= self._STARTUP_AUTO_RESUME_SHUTDOWN_TIMEOUT_LIMIT:
+            try:
+                self.session_store.clear_resume_pending(entry.session_key)
+            except Exception:
+                pass
+            logger.warning(
+                "Skipped repeated startup auto-resume for %s after shutdown_timeout; "
+                "cleared resume_pending to prevent a restart loop",
+                entry.session_key,
+            )
+            try:
+                atomic_json_write(path, claims, indent=None)
+            except Exception:
+                pass
+            return False
+
+        claims[key] = {"count": count + 1, "updated_at": now}
+        try:
+            atomic_json_write(path, claims, indent=None)
+        except Exception:
+            pass
+        return True
+
     async def _launch_detached_restart_command(self) -> None:
         import shutil
         import subprocess
@@ -5200,9 +5274,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         cmd = " ".join(shlex.quote(part) for part in hermes_cmd)
+        restart_lock_dir = _hermes_home / "tmp" / "gateway_restart_helper.lock"
+        try:
+            restart_lock_dir.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        lock_dir = shlex.quote(str(restart_lock_dir))
+        quick_health_cmd = f"{cmd} gateway quick-health --timeout 2 >/dev/null 2>&1"
         shell_cmd = (
-            f"while kill -0 {current_pid} 2>/dev/null; do sleep 0.2; done; "
-            f"{cmd} gateway restart"
+            f"lockdir={lock_dir}; "
+            "now=$(date +%s); "
+            'if mkdir "$lockdir" 2>/dev/null; then '
+            'trap \'rm -rf "$lockdir"\' EXIT; '
+            'printf "%s\\n" "$$" > "$lockdir/pid"; '
+            'printf "%s\\n" "$now" > "$lockdir/created_at"; '
+            "else "
+            'created=$(cat "$lockdir/created_at" 2>/dev/null || printf "0"); '
+            'case "$created" in *[!0-9]*|"") created=0;; esac; '
+            'if [ "$created" -gt 0 ] && [ $((now - created)) -gt 300 ]; then '
+            'rm -rf "$lockdir"; '
+            'mkdir "$lockdir" 2>/dev/null || exit 0; '
+            'trap \'rm -rf "$lockdir"\' EXIT; '
+            'printf "%s\\n" "$$" > "$lockdir/pid"; '
+            'printf "%s\\n" "$now" > "$lockdir/created_at"; '
+            "else exit 0; fi; "
+            "fi; "
+            "deadline=$((now + 120)); "
+            f"while kill -0 {current_pid} 2>/dev/null; do "
+            'if [ "$(date +%s)" -ge "$deadline" ]; then exit 0; fi; '
+            "sleep 0.2; "
+            "done; "
+            f"if {quick_health_cmd}; then exit 0; fi; "
+            f"exec {cmd} gateway restart"
         )
         # Same marker scrub as the Windows watcher above: this watcher runs
         # `hermes gateway restart` from outside the gateway, but it inherits
@@ -5479,6 +5582,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     entry.session_key,
                     getattr(source.platform, "value", source.platform),
                 )
+                continue
+
+            if not self._claim_startup_auto_resume(entry):
                 continue
 
             # Claim the session slot *before* spawning the task so that an

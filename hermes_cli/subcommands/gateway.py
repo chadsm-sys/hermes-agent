@@ -149,6 +149,23 @@ def build_gateway_parser(
     )
     _add_compat_platform_flag(gateway_status)
 
+    # gateway quick-health
+    gateway_quick_health = gateway_subparsers.add_parser(
+        "quick-health",
+        help="Fast bounded gateway liveness check for watchdogs",
+    )
+    gateway_quick_health.add_argument(
+        "--timeout",
+        type=float,
+        default=2.0,
+        help="Per-check timeout in seconds",
+    )
+    gateway_quick_health.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+
     # gateway install
     gateway_install = gateway_subparsers.add_parser(
         "install", help="Install gateway as a systemd/launchd background service"

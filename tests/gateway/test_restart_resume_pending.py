@@ -992,6 +992,44 @@ async def test_startup_auto_resume_includes_crash_recovery():
 
 
 @pytest.mark.asyncio
+async def test_repeated_shutdown_timeout_startup_auto_resume_is_quarantined(
+    tmp_path, monkeypatch
+):
+    """Do not re-run the same shutdown-timeout resume on every gateway boot."""
+    monkeypatch.setattr("gateway.run._hermes_home", tmp_path)
+    runner, adapter = make_restart_runner()
+    source = make_restart_source(chat_id="shutdown-loop")
+    pending_entry = SessionEntry(
+        session_key="agent:main:telegram:dm:shutdown-loop",
+        session_id="sid",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        resume_pending=True,
+        resume_reason="shutdown_timeout",
+        last_resume_marked_at=datetime.now(),
+    )
+    runner.session_store._entries = {pending_entry.session_key: pending_entry}
+    adapter.handle_message = AsyncMock()
+
+    first = runner._schedule_resume_pending_sessions()
+    await asyncio.sleep(0)
+    runner._running_agents.clear()
+    runner._running_agents_ts.clear()
+
+    second = runner._schedule_resume_pending_sessions()
+
+    assert first == 1
+    assert second == 0
+    adapter.handle_message.assert_awaited_once()
+    runner.session_store.clear_resume_pending.assert_called_once_with(
+        pending_entry.session_key
+    )
+
+
+@pytest.mark.asyncio
 async def test_startup_auto_resume_skips_stale_entries():
     """Entries older than the freshness window must not be auto-resumed."""
     runner, adapter = make_restart_runner()
