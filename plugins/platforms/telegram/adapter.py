@@ -217,137 +217,13 @@ def _separate_chunk_indicator_from_fence(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Telegram's MarkdownV2 has no table syntax — '|' is just an escaped literal,
 # so pipe tables render as noisy backslash-pipe text with no alignment.
-# Reformating each row into a bold heading plus bullet list keeps the content
-# readable on mobile clients while preserving the source data.
+# The shared convert_table_to_bullets() in gateway.platforms.helpers handles
+# the full conversion (detection + rendering); Telegram just calls it.
 
-# Matches a GFM table delimiter row: optional outer pipes, cells containing
-# only dashes (with optional leading/trailing colons for alignment) separated
-# by '|'.  Requires at least one internal '|' so lone '---' horizontal rules
-# are NOT matched.
-_TABLE_SEPARATOR_RE = re.compile(
-    r'^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*){1,}\|?\s*$'
+from gateway.platforms.helpers import (
+    TABLE_SEPARATOR_RE as _TABLE_SEPARATOR_RE,
+    convert_table_to_bullets as _wrap_markdown_tables,
 )
-
-
-def _is_table_row(line: str) -> bool:
-    """Return True if *line* could plausibly be a table data row."""
-    stripped = line.strip()
-    return bool(stripped) and '|' in stripped
-
-
-def _split_markdown_table_row(line: str) -> list[str]:
-    """Split a simple GFM table row into stripped cell values."""
-    stripped = line.strip()
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|"):
-        stripped = stripped[:-1]
-    return [cell.strip() for cell in stripped.split("|")]
-
-
-def _render_table_block_for_telegram(table_block: list[str]) -> str:
-    """Render a detected GFM table as Telegram-friendly row groups."""
-    if len(table_block) < 3:
-        return "\n".join(table_block)
-
-    headers = _split_markdown_table_row(table_block[0])
-    if len(headers) < 2:
-        return "\n".join(table_block)
-
-    # Detect row-label column: present when data rows have one more cell
-    # than the header row (the row-label column carries no header).
-    first_data_row = _split_markdown_table_row(table_block[2]) if len(table_block) > 2 else []
-    has_row_label_col = len(first_data_row) == len(headers) + 1
-
-    rendered_groups: list[str] = []
-    for index, row in enumerate(table_block[2:], start=1):
-        cells = _split_markdown_table_row(row)
-        if has_row_label_col:
-            # First cell is the row-label (heading); remaining cells align with headers.
-            heading = cells[0] if cells and cells[0] else f"Row {index}"
-            data_cells = cells[1:]
-        else:
-            # No row-label column: use first non-empty cell as heading.
-            heading = next((cell for cell in cells if cell), f"Row {index}")
-            data_cells = cells
-
-        # Pad or trim data_cells to match headers length.
-        if len(data_cells) < len(headers):
-            data_cells.extend([""] * (len(headers) - len(data_cells)))
-        elif len(data_cells) > len(headers):
-            data_cells = data_cells[: len(headers)]
-
-        # Build the bulleted lines for this row.  Skip any bullet whose value
-        # duplicates the heading text -- when has_row_label_col is False the
-        # heading IS the first data cell, and emitting it twice (once as the
-        # bold heading, once as the first bullet) is visual noise.
-        bullets: list[str] = []
-        for header, value in zip(headers, data_cells):
-            if not has_row_label_col and value == heading:
-                continue
-            bullets.append(f"• {header}: {value}")
-
-        # Within a row-group: single newline between heading and its bullets,
-        # and between successive bullets.  This keeps the row visually tight
-        # on Telegram instead of stretching each bullet into its own paragraph.
-        group_lines = [f"**{heading}**", *bullets]
-        rendered_groups.append("\n".join(group_lines))
-
-    # Between row-groups: blank line so each group reads as a distinct block.
-    return "\n\n".join(rendered_groups)
-
-
-def _wrap_markdown_tables(text: str) -> str:
-    """Rewrite GFM-style pipe tables into Telegram-friendly bullet groups.
-
-    Detected by a row containing '|' immediately followed by a delimiter
-    row matching :data:`_TABLE_SEPARATOR_RE`.  Subsequent pipe-containing
-    non-blank lines are consumed as the table body and rewritten as
-    per-row bullet groups. Tables inside existing fenced code blocks are left
-    alone.
-    """
-    if '|' not in text or '-' not in text:
-        return text
-
-    lines = text.split('\n')
-    out: list[str] = []
-    in_fence = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.lstrip()
-
-        # Track existing fenced code blocks — never touch content inside.
-        if stripped.startswith('```'):
-            in_fence = not in_fence
-            out.append(line)
-            i += 1
-            continue
-        if in_fence:
-            out.append(line)
-            i += 1
-            continue
-
-        # Look for a header row (contains '|') immediately followed by a
-        # delimiter row.
-        if (
-            '|' in line
-            and i + 1 < len(lines)
-            and _TABLE_SEPARATOR_RE.match(lines[i + 1])
-        ):
-            table_block = [line, lines[i + 1]]
-            j = i + 2
-            while j < len(lines) and _is_table_row(lines[j]):
-                table_block.append(lines[j])
-                j += 1
-            out.append(_render_table_block_for_telegram(table_block))
-            i = j
-            continue
-
-        out.append(line)
-        i += 1
-
-    return '\n'.join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +413,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
         self._polling_error_callback_ref = None
+        self._polling_heartbeat_task: Optional[asyncio.Task] = None
         # After sustained reconnect storms the PTB httpx pool can return
         # SendResult(success=True) for sends that never actually transmit.
         # _handle_polling_network_error sets this; _verify_polling_after_reconnect
@@ -1714,6 +1591,63 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
 
+    async def _polling_heartbeat_loop(self) -> None:
+        """Detect dead Telegram TCP sockets (CLOSE-WAIT) by periodic probing.
+
+        PTB's long-poll task blocks on epoll waiting for Telegram to push an
+        update.  When the underlying TCP connection enters CLOSE-WAIT (the remote
+        sent a FIN but the httpx pool has not yet noticed), epoll still reports
+        the socket as readable and no exception is raised — so PTB's
+        ``error_callback`` never fires and the gateway silently stops receiving
+        messages.
+
+        This loop probes ``get_me()`` every ``HEARTBEAT_INTERVAL`` seconds on the
+        *general* request path (not the getUpdates pool), so a healthy long-poll
+        waiting for the 30-second Telegram window is never interrupted.  On any
+        connect-level failure the loop hands off to
+        ``_handle_polling_network_error`` — the same path triggered by PTB's own
+        ``error_callback`` — which drains the dead pool and restarts polling.
+
+        Unlike ``_verify_polling_after_reconnect`` (a one-shot probe scheduled
+        only after an explicit reconnect), this loop runs for the full lifetime
+        of the polling connection, so it catches a socket that wedges during
+        steady-state operation without any prior error event.
+        """
+        HEARTBEAT_INTERVAL = 90   # seconds between probes
+        PROBE_TIMEOUT = 15        # seconds before declaring the path dead
+
+        while True:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+                if self.has_fatal_error:
+                    return
+                bot = self._app.bot if self._app else None
+                if bot is None:
+                    continue
+                # A real PTB Bot always exposes get_me(); if it's absent the
+                # app isn't a live polling client (e.g. torn down or a test
+                # double), so there is nothing to probe — exit rather than spin.
+                if not callable(getattr(bot, "get_me", None)):
+                    return
+                await asyncio.wait_for(bot.get_me(), PROBE_TIMEOUT)
+            except asyncio.CancelledError:
+                return
+            except (asyncio.TimeoutError, OSError) as probe_err:
+                logger.warning(
+                    "[%s] Polling heartbeat probe failed (%s); triggering reconnect",
+                    self.name, probe_err,
+                )
+                if self._polling_error_task and not self._polling_error_task.done():
+                    continue   # reconnect already in progress
+                loop = asyncio.get_running_loop()
+                self._polling_error_task = loop.create_task(
+                    self._handle_polling_network_error(probe_err)
+                )
+            except Exception:
+                # Non-connectivity errors (e.g. TelegramError 401) are not
+                # CLOSE-WAIT symptoms — let PTB's own handlers surface them.
+                pass
+
     async def _verify_polling_after_reconnect(self) -> None:
         """Heartbeat probe scheduled after a successful reconnect.
 
@@ -2174,13 +2108,21 @@ class TelegramAdapter(BasePlatformAdapter):
                             self.name, topic_name, seed_err,
                         )
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Telegram via polling or webhook.
 
         By default, uses long polling (outbound connection to Telegram).
         If ``TELEGRAM_WEBHOOK_URL`` is set, starts an HTTP webhook server
         instead.  Webhook mode is useful for cloud deployments (Fly.io,
         Railway) where inbound HTTP can wake a suspended machine.
+
+        ``is_reconnect`` distinguishes a cold first boot (False — drop any
+        stale Bot API queue) from a watcher reconnect after a prolonged
+        outage (True — preserve the updates Telegram queued while the bot
+        was offline, otherwise every message sent during the outage is
+        silently lost). The in-process network-error ladder and the
+        409-conflict handler already pass ``drop_pending_updates=False``
+        for the same reason; bootstrap follows suit on the reconnect path.
 
         Env vars for webhook mode::
 
@@ -2418,7 +2360,11 @@ class TelegramAdapter(BasePlatformAdapter):
                     webhook_url=webhook_url,
                     secret_token=webhook_secret,
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    # Webhooks are push-based — Telegram does not hold a
+                    # server-side getUpdates queue, so this flag is a no-op
+                    # in practice. Mirror the polling path's reconnect
+                    # semantics for consistency.
+                    drop_pending_updates=not is_reconnect,
                 )
                 self._webhook_mode = True
                 logger.info(
@@ -2451,7 +2397,10 @@ class TelegramAdapter(BasePlatformAdapter):
 
                 await self._app.updater.start_polling(
                     allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
+                    # On a cold first boot drop the stale Bot API queue; on a
+                    # watcher reconnect after an outage preserve it so messages
+                    # sent while the bot was offline are delivered (#46621).
+                    drop_pending_updates=not is_reconnect,
                     error_callback=_polling_error_callback,
                 )
             
@@ -2504,6 +2453,16 @@ class TelegramAdapter(BasePlatformAdapter):
             self._mark_connected()
             mode = "webhook" if self._webhook_mode else "polling"
             logger.info("[%s] Connected to Telegram (%s mode)", self.name, mode)
+
+            # Start the persistent heartbeat loop in polling mode. Webhook mode
+            # receives updates via incoming pushes — there is no long-poll
+            # socket to wedge in CLOSE-WAIT, so the loop is not needed there.
+            if not self._webhook_mode:
+                if self._polling_heartbeat_task and not self._polling_heartbeat_task.done():
+                    self._polling_heartbeat_task.cancel()
+                self._polling_heartbeat_task = asyncio.ensure_future(
+                    self._polling_heartbeat_loop()
+                )
 
             # Surface the gateway as "Online" in the bot's short description
             # (opt-in via extra.status_indicator). Non-fatal.
@@ -2563,6 +2522,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Stop polling/webhook, cancel pending album flushes, and disconnect."""
+        # Cancel the heartbeat before tearing down the app so the probe task
+        # cannot fire get_me() into a half-shutdown bot client.
+        if self._polling_heartbeat_task and not self._polling_heartbeat_task.done():
+            self._polling_heartbeat_task.cancel()
+            try:
+                await self._polling_heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        self._polling_heartbeat_task = None
+
         # Mark the bot "Offline" in its short description while the bot's HTTP
         # client is still alive (before app shutdown closes it). Opt-in via
         # extra.status_indicator. Non-fatal. This is the clean-shutdown path;
