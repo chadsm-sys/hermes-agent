@@ -411,6 +411,12 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
     text = str(message or "").strip()
     if not text:
         return None
+    # A2A is synchronous request/response: ``adapter.send()`` fulfils the
+    # blocked JSON-RPC ``message/send`` Future.  Lifecycle/status sends would be
+    # indistinguishable from the final assistant reply and can win the race,
+    # returning startup/compression notices as the task artifact.
+    if _gateway_platform_value(platform) == "a2a":
+        return None
     if _gateway_surface_passes_raw_text(platform):
         return text
 
@@ -10147,7 +10153,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         # One-time prompt if no home channel is set for this platform
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        if (
+            not history
+            and source.platform
+            and source.platform != Platform.LOCAL
+            and source.platform != Platform.WEBHOOK
+            and source.platform.value != "a2a"
+        ):
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
             if not os.getenv(env_key):
