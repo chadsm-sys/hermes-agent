@@ -543,6 +543,32 @@ class TestMarkJobRun:
         assert "Auto-quarantined after 2 consecutive failures" in updated["paused_reason"]
         assert updated["quarantined_until"]
 
+    def test_expired_failure_quarantine_auto_resumes_recurring_job(self, tmp_cron_dir, monkeypatch):
+        monkeypatch.setenv("HERMES_CRON_FAILURE_QUARANTINE_THRESHOLD", "1")
+        monkeypatch.setenv("HERMES_CRON_FAILURE_QUARANTINE_MINUTES", "30")
+
+        job = create_job(prompt="Fail", schedule="every 1h")
+        mark_job_run(job["id"], success=False, error="model timeout")
+        paused = get_job(job["id"])
+        assert paused["enabled"] is False
+        assert paused["quarantined_until"]
+
+        jobs = load_jobs()
+        jobs[0]["quarantined_until"] = (
+            datetime.now().astimezone() - timedelta(minutes=1)
+        ).isoformat()
+        save_jobs(jobs)
+
+        assert get_due_jobs() == []
+
+        resumed = get_job(job["id"])
+        assert resumed["enabled"] is True
+        assert resumed["state"] == "scheduled"
+        assert resumed["consecutive_failures"] == 0
+        assert resumed["quarantined_until"] is None
+        assert resumed["quarantine_reason"] is None
+        assert resumed["next_run_at"]
+
     def test_resume_clears_failure_quarantine(self, tmp_cron_dir, monkeypatch):
         monkeypatch.setenv("HERMES_CRON_FAILURE_QUARANTINE_THRESHOLD", "1")
 

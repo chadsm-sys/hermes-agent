@@ -437,7 +437,14 @@ def _get_capability_backend(capability: str) -> str:
     for backend in _candidate_backends_for_capability(capability, cfg):
         if _is_backend_available(backend) and not _is_backend_circuit_open(backend, capability):
             return backend
-    return _get_backend()
+    fallback = _get_backend()
+    if (
+        fallback in _WEB_BACKENDS
+        and _backend_supports_capability(fallback, capability)
+        and _is_backend_circuit_open(fallback, capability)
+    ):
+        return ""
+    return fallback
 
 
 def _is_backend_available(backend: str) -> bool:

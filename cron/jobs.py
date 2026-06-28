@@ -613,6 +613,38 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
     return None
 
 
+def _maybe_release_run_failure_quarantine(job: Dict[str, Any], now: datetime) -> bool:
+    """Release an expired recurring-job failure quarantine in-place."""
+    quarantined_until = job.get("quarantined_until")
+    if not quarantined_until:
+        return False
+
+    try:
+        until_dt = _ensure_aware(datetime.fromisoformat(str(quarantined_until)))
+    except (TypeError, ValueError):
+        return False
+    if until_dt > now:
+        return False
+
+    schedule = job.get("schedule") or {}
+    if schedule.get("kind") not in {"cron", "interval"}:
+        return False
+
+    next_run_at = compute_next_run(schedule, now.isoformat())
+    if not next_run_at:
+        return False
+
+    job["enabled"] = True
+    job["state"] = "scheduled"
+    job["paused_at"] = None
+    job["paused_reason"] = None
+    job["next_run_at"] = next_run_at
+    job["consecutive_failures"] = 0
+    job["quarantined_until"] = None
+    job["quarantine_reason"] = None
+    return True
+
+
 # =============================================================================
 # Ticker heartbeat (liveness signal for `hermes cron status`)
 # =============================================================================
@@ -1438,9 +1470,17 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     """Inner implementation of get_due_jobs(); must be called with _jobs_lock held."""
     now = _hermes_now()
     raw_jobs = load_jobs()
+    needs_save = False
+    for raw_job in raw_jobs:
+        if _maybe_release_run_failure_quarantine(raw_job, now):
+            logger.info(
+                "Job '%s' failure quarantine expired; re-enabled for next run at %s",
+                raw_job.get("name", raw_job.get("id")),
+                raw_job.get("next_run_at"),
+            )
+            needs_save = True
     jobs = [_apply_skill_fields(j) for j in copy.deepcopy(raw_jobs)]
     due = []
-    needs_save = False
 
     for job in jobs:
         if not job.get("enabled", True):

@@ -237,6 +237,25 @@ class TestPerCapabilityBackendSelection:
 
         assert web_tools._get_search_backend() == "ddgs"
 
+    def test_open_search_circuit_with_no_alternate_returns_no_backend(self, monkeypatch, tmp_path):
+        from tools import web_tools
+
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FILE", str(tmp_path / "web-circuit.json"))
+        monkeypatch.setenv("HERMES_WEB_CIRCUIT_FAILURE_THRESHOLD", "1")
+        monkeypatch.setattr(web_tools, "_load_web_config", lambda: {
+            "backend": "tavily",
+            "search_backend": "tavily",
+        })
+        monkeypatch.setattr(
+            web_tools,
+            "_is_backend_available",
+            lambda backend: backend == "tavily",
+        )
+
+        web_tools._record_backend_result("tavily", "search", False, "HTTP 432 quota exceeded")
+
+        assert web_tools._get_search_backend() == ""
+
     def test_success_clears_open_search_circuit(self, monkeypatch, tmp_path):
         from tools import web_tools
 
@@ -266,10 +285,12 @@ class TestDefaultConfig:
         assert "backend" in web
         assert "search_backend" in web
         assert "extract_backend" in web
+        assert "ddgs_backend" in web
         # All empty string by default (no override)
         assert web["backend"] == ""
         assert web["search_backend"] == ""
         assert web["extract_backend"] == ""
+        assert web["ddgs_backend"] == "duckduckgo"
 
 
 # ---------------------------------------------------------------------------

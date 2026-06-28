@@ -15,7 +15,6 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import html as _html
 import logging
-import os
 import re
 from typing import Any, Dict
 from urllib.parse import parse_qs, unquote, urlparse
@@ -33,6 +32,17 @@ _SEARCH_TIMEOUT_SECS = 30
 _DEFAULT_DDGS_BACKEND = "duckduckgo"
 
 
+def _ddgs_backend_from_config() -> str:
+    try:
+        from hermes_cli.config import load_config
+
+        web_cfg = load_config().get("web") or {}
+        configured = web_cfg.get("ddgs_backend") if isinstance(web_cfg, dict) else ""
+    except Exception:
+        configured = ""
+    return str(configured or _DEFAULT_DDGS_BACKEND).strip() or _DEFAULT_DDGS_BACKEND
+
+
 def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
     """Run the blocking ddgs query and return normalized hits.
 
@@ -43,7 +53,7 @@ def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
     """
     from ddgs import DDGS  # type: ignore
 
-    backend = (os.getenv("HERMES_DDGS_BACKEND") or _DEFAULT_DDGS_BACKEND).strip()
+    backend = _ddgs_backend_from_config()
     results: list[dict[str, Any]] = []
     with DDGS(timeout=10) as client:
         try:
