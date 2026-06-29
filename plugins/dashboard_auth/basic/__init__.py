@@ -217,8 +217,8 @@ class BasicAuthProvider(DashboardAuthProvider):
             raise ValueError("username must be non-empty")
         if not password_hash:
             raise ValueError("password_hash must be non-empty")
-        if len(secret) < 16:
-            raise ValueError("secret must be at least 16 bytes")
+        if len(secret) < 32:
+            raise ValueError("secret must be at least 32 bytes")
         self._username = username
         self._password_hash = password_hash
         self._secret = secret

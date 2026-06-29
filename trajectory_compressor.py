@@ -504,26 +504,34 @@ class TrajectoryCompressor:
                 first_tool = i
         
         # Protect first turns
+        head_protected = []
         if self.config.protect_first_system and first_system is not None:
             protected.add(first_system)
+            head_protected.append(first_system)
         if self.config.protect_first_human and first_human is not None:
             protected.add(first_human)
+            head_protected.append(first_human)
         if self.config.protect_first_gpt and first_gpt is not None:
             protected.add(first_gpt)
+            head_protected.append(first_gpt)
         if self.config.protect_first_tool and first_tool is not None:
             protected.add(first_tool)
-        
+            head_protected.append(first_tool)
+
         # Protect last N turns
-        for i in range(max(0, n - self.config.protect_last_n_turns), n):
+        tail_start = max(0, n - self.config.protect_last_n_turns) if self.config.protect_last_n_turns > 0 else n
+        for i in range(tail_start, n):
             protected.add(i)
-        
-        # Determine compressible region
-        # Start after the last protected head turn
-        head_protected = [i for i in protected if i < n // 2]
-        tail_protected = [i for i in protected if i >= n // 2]
-        
-        compressible_start = max(head_protected) + 1 if head_protected else 0
-        compressible_end = min(tail_protected) if tail_protected else n
+
+        # Determine compressible region from the explicit head/tail boundaries
+        # rather than guessing at the midpoint: a large protect_last_n_turns can
+        # push tail-protected indices below n//2, where a midpoint split would
+        # misclassify them as head turns and collapse the compressible region.
+        # Only count head-protected indices that fall before the tail region so
+        # the start never advances past the protected tail.
+        head_before_tail = [i for i in head_protected if i < tail_start]
+        compressible_start = max(head_before_tail) + 1 if head_before_tail else 0
+        compressible_end = tail_start
 
         return protected, compressible_start, compressible_end
 
@@ -1175,9 +1183,11 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         self.aggregate_metrics.trajectories_failed += 1
                         in_flight -= 1
                         progress.advance(main_task)
-                    
-                    # Keep original entry on error
-                    results[file_path][entry_idx] = (entry, TrajectoryMetrics())
+
+                    # Drop this entry on error (mirror the timeout branch):
+                    # keeping the original would let an uncompressed, possibly
+                    # over-budget entry reach downstream consumers.
+                    results[file_path][entry_idx] = None
         
         # Create progress bar
         with Progress(

@@ -87,8 +87,11 @@ MAX_STDERR_BYTES = 10_000    # 10 KB
 _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                       "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
                       "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+# NB: "PAT" is intentionally spelled "_PAT" — a bare "PAT" substring would
+# also drop PATH / PYTHONPATH / PATHEXT (safe vars checked *after* this block).
 _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH", "DSN", "WEBHOOK")
+                      "PASSWD", "AUTH", "DSN", "WEBHOOK", "PRIVATE",
+                      "CERT", "SESSION", "COOKIE", "SK_", "_PAT", "ACCESS")
 
 # Operational HERMES_* vars the child legitimately needs by exact name — these
 # are non-secret runtime-location flags (the same set hermes_cli treats as the

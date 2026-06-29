@@ -1612,12 +1612,7 @@ class AIAgent:
                             _txt.append("[screenshot]")
                     content = "\n".join(_txt) if _txt else None
                 tool_calls_data = None
-                if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
-                    tool_calls_data = [
-                        {"name": tc.function.name, "arguments": tc.function.arguments}
-                        for tc in msg.tool_calls
-                    ]
-                elif isinstance(msg.get("tool_calls"), list):
+                if isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
                 self._session_db.append_message(
                     session_id=self.session_id,
@@ -1872,7 +1867,7 @@ class AIAgent:
             return "<entra-id-bearer>"
         if not key:
             return None
-        if len(key) <= 12:
+        if len(key) < 20:
             return "***"
         return f"{key[:8]}...{key[-4:]}"
 

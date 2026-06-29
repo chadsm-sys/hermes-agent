@@ -41,7 +41,18 @@ _EDIT_APPROVAL_REQUESTER: ContextVar[EditApprovalRequester | None] = ContextVar(
 _PERMISSION_REQUEST_IDS = count(1)
 
 
-SENSITIVE_AUTO_APPROVE_NAMES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
+SENSITIVE_AUTO_APPROVE_NAMES = {
+    ".env", ".env.local", ".env.production",
+    "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+    ".npmrc", ".netrc", ".pypirc",
+    "credentials",  # ~/.aws/credentials
+    "config.json",  # ~/.docker/config.json
+    ".bashrc", ".zshrc", ".profile", ".bash_profile",
+}
+# Sensitive directory components: any path with one of these segments asks.
+SENSITIVE_AUTO_APPROVE_DIRS = {".git", ".ssh", ".aws", ".kube", ".docker", ".gnupg"}
+# Sensitive filename extensions (matched on the basename suffix).
+SENSITIVE_AUTO_APPROVE_SUFFIXES = (".gpg",)
 AUTO_APPROVE_ASK = "ask"
 AUTO_APPROVE_WORKSPACE = "workspace_session"
 AUTO_APPROVE_SESSION = "session"
@@ -140,9 +151,12 @@ def build_edit_proposal(tool_name: str, arguments: dict[str, Any]) -> EditPropos
 def _is_sensitive_auto_approve_path(path: str) -> bool:
     parts = Path(path).expanduser().parts
     lowered = {part.lower() for part in parts}
-    if ".git" in lowered or ".ssh" in lowered:
+    if lowered & SENSITIVE_AUTO_APPROVE_DIRS:
         return True
-    return Path(path).name.lower() in SENSITIVE_AUTO_APPROVE_NAMES
+    name = Path(path).name.lower()
+    if name in SENSITIVE_AUTO_APPROVE_NAMES:
+        return True
+    return name.endswith(SENSITIVE_AUTO_APPROVE_SUFFIXES)
 
 
 def should_auto_approve_edit(proposal: EditProposal, policy: str, cwd: str | None = None) -> bool:

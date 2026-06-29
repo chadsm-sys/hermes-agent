@@ -7757,7 +7757,16 @@ def _resolve_update_branch(args) -> str:
     ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
     the same answer.
     """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    import re
+    branch = (getattr(args, "branch", None) or "main").strip() or "main"
+    # Reject branch names that could be parsed as git options (e.g.
+    # ``--upload-pack=...``) or otherwise malformed refs. A literal ``--``
+    # separator is also inserted before the branch in git invocations as
+    # defense-in-depth.
+    if not re.match(r"^[A-Za-z0-9._/-]+$", branch) or branch.startswith("-"):
+        print(f"✗ Invalid branch name: {branch!r}")
+        sys.exit(1)
+    return branch
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
@@ -7816,7 +7825,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     if branch == "main":
         print("→ Fetching from upstream...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "upstream", branch],
+            git_cmd + ["fetch", "upstream", "--", branch],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -7825,7 +7834,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             # Fallback to origin if upstream doesn't exist
             print("→ Fetching from origin...")
             fetch_result = subprocess.run(
-                git_cmd + ["fetch", "origin", branch],
+                git_cmd + ["fetch", "origin", "--", branch],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
@@ -7839,7 +7848,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
         # Non-default branch: compare against origin/<branch> directly.
         print("→ Fetching from origin...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + ["fetch", "origin", "--", branch],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -8550,7 +8559,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print("→ Fetching updates...")
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + ["fetch", "origin", "--", branch],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

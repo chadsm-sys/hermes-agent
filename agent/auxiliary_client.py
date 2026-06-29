@@ -5034,10 +5034,10 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
             raise AttributeError("missing choices[0].message")
     except (AttributeError, TypeError, IndexError) as exc:
         response_type = type(response).__name__
-        response_preview = str(response)[:120]
+        response_length = len(str(response))
         raise RuntimeError(
             f"Auxiliary {task or 'call'}: LLM returned invalid response "
-            f"(type={response_type}): {response_preview!r}. "
+            f"(type={response_type}, length={response_length}). "
             f"Expected object with .choices[0].message — check provider "
             f"adapter or custom endpoint compatibility."
         ) from exc
@@ -5624,6 +5624,7 @@ async def async_call_llm(
             base_url=resolved_base_url,
             api_key=resolved_api_key,
             api_mode=resolved_api_mode,
+            main_runtime=main_runtime,
         )
         if client is None:
             _explicit = (resolved_provider or "").strip().lower()
@@ -5636,7 +5637,7 @@ async def async_call_llm(
             if not resolved_base_url:
                 logger.info("Auxiliary %s: provider %s unavailable, trying auto-detection chain",
                             task or "call", resolved_provider)
-                client, final_model = _get_cached_client("auto", async_mode=True)
+                client, final_model = _get_cached_client("auto", async_mode=True, main_runtime=main_runtime)
         if client is None:
             raise RuntimeError(
                 f"No LLM provider configured for task={task} provider={resolved_provider}. "

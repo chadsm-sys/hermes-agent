@@ -889,7 +889,7 @@ def _get_script_timeout() -> int:
     return _DEFAULT_SCRIPT_TIMEOUT
 
 
-def _run_job_script(script_path: str) -> tuple[bool, str]:
+def _run_job_script(script_path: str, cwd: Optional[str] = None) -> tuple[bool, str]:
     """Execute a cron job's data-collection script and capture its output.
 
     Scripts must reside within HERMES_HOME/scripts/.  Both relative and
@@ -911,6 +911,11 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         script_path: Path to the script.  Relative paths are resolved
             against HERMES_HOME/scripts/.  Absolute and ~-prefixed paths
             are also validated to ensure they stay within the scripts dir.
+        cwd: Optional working directory for the subprocess.  When provided
+            (a job's configured workdir), it is passed straight to
+            ``subprocess.run`` so the script runs from there WITHOUT mutating
+            the scheduler's process-global cwd.  Falls back to the script's
+            own parent directory when unset.
 
     Returns:
         (success, output) — on failure *output* contains the error message so the
@@ -974,7 +979,7 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=script_timeout,
-            cwd=str(path.parent),
+            cwd=cwd if cwd else str(path.parent),
             **popen_kwargs,
         )
         stdout = (result.stdout or "").strip()
@@ -1340,24 +1345,17 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
 
         # Apply workdir if configured — lets scripts use predictable relative
         # paths. For no_agent jobs this is just the subprocess cwd (not an
-        # agent TERMINAL_CWD bridge).
+        # agent TERMINAL_CWD bridge).  Pass it straight through to the
+        # subprocess via cwd= rather than mutating the scheduler's
+        # process-global cwd with os.chdir — that mutation raced concurrent
+        # parallel-pool jobs which saw the wrong cwd between the chdir and its
+        # restore.
         _job_workdir = (job.get("workdir") or "").strip() or None
-        _prior_cwd = None
-        if _job_workdir and Path(_job_workdir).is_dir():
-            _prior_cwd = os.getcwd()
-            try:
-                os.chdir(_job_workdir)
-            except OSError:
-                _prior_cwd = None
+        _script_cwd = (
+            _job_workdir if (_job_workdir and Path(_job_workdir).is_dir()) else None
+        )
 
-        try:
-            ok, output = _run_job_script(script_path)
-        finally:
-            if _prior_cwd is not None:
-                try:
-                    os.chdir(_prior_cwd)
-                except OSError:
-                    pass
+        ok, output = _run_job_script(script_path, cwd=_script_cwd)
 
         now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
 

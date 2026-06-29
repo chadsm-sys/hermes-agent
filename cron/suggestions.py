@@ -209,6 +209,28 @@ def _set_status(suggestion_id: str, status: str) -> bool:
         return changed
 
 
+def _compare_and_set_status(suggestion_id: str, expected: str, new: str) -> bool:
+    """Atomically flip a suggestion's status only if it currently equals
+    ``expected``.  Returns True if the swap happened, False otherwise.
+
+    The compare and the set occur together under ``_suggestions_lock`` so two
+    concurrent callers can't both observe ``expected`` and proceed — exactly one
+    wins the swap.  Used by accept_suggestion() to claim a pending suggestion
+    before create_job(), preventing duplicate jobs from concurrent accepts.
+    """
+    with _suggestions_lock:
+        suggestions = _load_raw().get("suggestions", [])
+        for s in suggestions:
+            if s.get("id") == suggestion_id:
+                if s.get("status") != expected:
+                    return False
+                s["status"] = new
+                s["resolved_at"] = _hermes_now().isoformat()
+                _save_raw(suggestions)
+                return True
+        return False
+
+
 def dismiss_suggestion(ref: str) -> bool:
     """Dismiss a suggestion (latched — never re-offered for its dedup_key)."""
     s = get_suggestion(ref)
@@ -229,14 +251,26 @@ def accept_suggestion(ref: str, *, origin: Optional[Dict[str, Any]] = None) -> O
     if not s or s.get("status") != _STATUS_PENDING:
         return None
 
+    # Atomically claim the suggestion BEFORE creating the job: flip pending →
+    # accepted under _suggestions_lock so a second concurrent accept of the same
+    # ref loses the compare-and-set and bails out, rather than both creating a
+    # duplicate job. The earlier get_suggestion() check is a cheap fast-path; the
+    # CAS below is the real guard.
+    if not _compare_and_set_status(s["id"], _STATUS_PENDING, _STATUS_ACCEPTED):
+        return None
+
     from cron.jobs import create_job
 
     spec = dict(s.get("job_spec") or {})
     if origin is not None and "origin" not in spec:
         spec["origin"] = origin
 
-    job = create_job(**spec)
-    _set_status(s["id"], _STATUS_ACCEPTED)
+    try:
+        job = create_job(**spec)
+    except Exception:
+        # Job creation failed — release our claim so the user can retry.
+        _compare_and_set_status(s["id"], _STATUS_ACCEPTED, _STATUS_PENDING)
+        raise
     return job
 
 

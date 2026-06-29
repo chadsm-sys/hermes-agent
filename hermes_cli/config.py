@@ -3646,6 +3646,24 @@ def get_missing_env_vars(required_only: bool = False) -> List[Dict[str, Any]]:
     return missing
 
 
+def _lookup_default_type(dotted_key: str):
+    """Return the declared Python type of ``dotted_key`` in DEFAULT_CONFIG.
+
+    Walks the DEFAULT_CONFIG tree along the dotted path and returns
+    ``type(default_value)`` for the leaf, or ``None`` if the key is not
+    present in the schema (e.g. dynamic/list-indexed paths). Used by
+    ``set_config_value`` to coerce by the key's real type instead of
+    guessing from the input string's shape.
+    """
+    node = DEFAULT_CONFIG
+    for part in dotted_key.split("."):
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return type(node)
+
+
 def _set_nested(config, dotted_key: str, value):
     """Set a value at an arbitrarily nested dotted key path.
 
@@ -5763,8 +5781,10 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     ``UnicodeEncodeError: 'ascii' codec can't encode character`` at
     request time.
 
-    Returns the sanitized (ASCII-only) value.  Prints a warning if any
-    non-ASCII characters were found and removed.
+    Returns the value unchanged when it is already pure ASCII.  Raises
+    ``ValueError`` if non-ASCII characters are present, rather than silently
+    stripping them — saving a truncated/corrupted secret would leave the user
+    believing the key was stored intact.
     """
     try:
         value.encode("ascii")
@@ -5777,20 +5797,17 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     for i, ch in enumerate(value):
         if ord(ch) > 127:
             bad_chars.append(f"  position {i}: {ch!r} (U+{ord(ch):04X})")
-    sanitized = value.encode("ascii", errors="ignore").decode("ascii")
 
-    print(
-        f"\n  Warning: {key} contains non-ASCII characters that will break API requests.\n"
+    raise ValueError(
+        f"{key} contains non-ASCII characters that will break API requests.\n"
         f"  This usually happens when copy-pasting from a PDF, rich-text editor,\n"
         f"  or web page that substitutes lookalike Unicode glyphs for ASCII letters.\n"
         f"\n"
         + "\n".join(f"  {line}" for line in bad_chars[:5])
         + ("\n  ... and more" if len(bad_chars) > 5 else "")
-        + f"\n\n  The non-ASCII characters have been stripped automatically.\n"
-        f"  If authentication fails, re-copy the key from the provider's dashboard.\n",
-        file=sys.stderr,
+        + f"\n\n  The key was NOT saved to avoid storing a corrupted secret.\n"
+        f"  Re-copy the key from the provider's dashboard and try again."
     )
-    return sanitized
 
 
 def save_env_value(key: str, value: str):
@@ -6267,15 +6284,39 @@ def set_config_value(key: str, value: str):
     # _set_nested which preserves list-typed nodes; before #17876 the
     # inline navigation here silently overwrote lists with dicts.
 
-    # Convert value to appropriate type
-    if value.lower() in {'true', 'yes', 'on'}:
-        value = True
-    elif value.lower() in {'false', 'no', 'off'}:
-        value = False
-    elif value.isdigit():
-        value = int(value)
-    elif value.replace('.', '', 1).isdigit():
-        value = float(value)
+    # Convert value to appropriate type. Prefer the target key's declared
+    # type in DEFAULT_CONFIG so numeric/boolean-looking strings (e.g. "007",
+    # "1.0", "on") destined for a string field are preserved verbatim. Only
+    # fall back to shape-based guessing when the key is unknown to the schema.
+    declared = _lookup_default_type(key)
+    if declared is bool:
+        if value.lower() in {'true', 'yes', 'on', '1'}:
+            value = True
+        elif value.lower() in {'false', 'no', 'off', '0'}:
+            value = False
+    elif declared is int:
+        try:
+            value = int(value)
+        except ValueError:
+            pass
+    elif declared is float:
+        try:
+            value = float(value)
+        except ValueError:
+            pass
+    elif declared is str:
+        # Known string key — keep the raw string, don't coerce.
+        pass
+    else:
+        # Unknown key: fall back to the historic shape-based heuristic.
+        if value.lower() in {'true', 'yes', 'on'}:
+            value = True
+        elif value.lower() in {'false', 'no', 'off'}:
+            value = False
+        elif value.isdigit():
+            value = int(value)
+        elif value.replace('.', '', 1).isdigit():
+            value = float(value)
 
     _set_nested(user_config, key, value)
     

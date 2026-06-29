@@ -312,6 +312,14 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     if schedule_lower.startswith("every "):
         duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
+        # A zero/sub-minute interval would make compute_next_run() return the
+        # last run time unchanged, so the job fires every scheduler tick. Reject
+        # it with a clear error consistent with the other invalid-schedule paths.
+        if minutes < 1:
+            raise ValueError(
+                f"Invalid interval '{original}': recurring jobs must run at "
+                f"least 1 minute apart (got {minutes}m)."
+            )
         return {
             "kind": "interval",
             "minutes": minutes,
@@ -466,6 +474,10 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
 
     elif schedule["kind"] == "interval":
         minutes = schedule["minutes"]
+        # Defensive clamp: a persisted interval <= 0 would make next_run equal
+        # last_run, causing the job to fire every tick. Force a 1-minute floor.
+        if minutes < 1:
+            minutes = 1
         if last_run_at:
             # Next run is last_run + interval
             last = _ensure_aware(datetime.fromisoformat(last_run_at))
