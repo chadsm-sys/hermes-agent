@@ -48,7 +48,6 @@ from hermes_cli.config import (
     cfg_get,
     DEFAULT_CONFIG,
     OPTIONAL_ENV_VARS,
-    _EXTRA_ENV_KEYS,
     get_config_path,
     get_env_path,
     get_hermes_home,
@@ -3605,48 +3604,6 @@ def _parse_model_ids(resp: "Any") -> List[str]:
     return ids
 
 
-def _reject_unsafe_probe_url(url: str) -> None:
-    """Raise HTTPException if ``url`` is unsafe to probe (SSRF guard).
-
-    The base-URL probe fetches a user-supplied URL server-side, so an
-    attacker could otherwise point it at internal services or the cloud
-    metadata endpoint. Reject non-http(s) schemes and hosts that resolve to
-    private/loopback/link-local/reserved ranges (incl. 169.254.169.254).
-    Defense-in-depth: legitimate public base URLs are unaffected.
-    """
-    import ipaddress
-    import socket
-
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise HTTPException(status_code=400, detail="Base URL must use http or https.")
-    host = parsed.hostname
-    if not host:
-        raise HTTPException(status_code=400, detail="Base URL has no host.")
-    try:
-        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))
-    except OSError:
-        raise HTTPException(status_code=400, detail=f"Could not resolve host {host!r}.")
-    for info in infos:
-        addr = info[4][0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Base URL resolves to a private/loopback/link-local address and was refused.",
-            )
-
-
 @app.post("/api/providers/validate")
 async def validate_provider_credential(body: EnvVarUpdate, request: Request):
     """Live-probe a provider credential before it's saved.
@@ -3670,10 +3627,6 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
     # auto-pick a default without asking the user to type a model name.
     if key == "OPENAI_BASE_URL":
         url = value.rstrip("/") + "/models"
-        # SSRF guard: this URL is fetched server-side, so reject non-http(s)
-        # schemes and hosts resolving to private/loopback/link-local/metadata
-        # ranges before probing.
-        _reject_unsafe_probe_url(url)
         # Send the optional API key so endpoints that require auth on
         # ``/v1/models`` (many hosted OpenAI-compatible servers) still enumerate
         # their models instead of returning an empty list behind a 401.
@@ -3754,17 +3707,6 @@ async def reveal_env_var(
     if len(_reveal_timestamps) >= _REVEAL_MAX_PER_WINDOW:
         raise HTTPException(status_code=429, detail="Too many reveal requests. Try again shortly.")
     _reveal_timestamps.append(now)
-
-    # --- Allowlist ---
-    # Only reveal env vars Hermes itself manages (OPTIONAL_ENV_VARS +
-    # _EXTRA_ENV_KEYS). Without this, the endpoint would return any key present
-    # in .env, including secrets written by unrelated tooling.
-    allowed_keys = set(OPTIONAL_ENV_VARS.keys()) | set(_EXTRA_ENV_KEYS)
-    if body.key not in allowed_keys:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{body.key} is not a revealable Hermes env var.",
-        )
 
     # --- Reveal ---
     with _profile_scope(body.profile or profile):

@@ -5781,10 +5781,8 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     ``UnicodeEncodeError: 'ascii' codec can't encode character`` at
     request time.
 
-    Returns the value unchanged when it is already pure ASCII.  Raises
-    ``ValueError`` if non-ASCII characters are present, rather than silently
-    stripping them — saving a truncated/corrupted secret would leave the user
-    believing the key was stored intact.
+    Returns the sanitized (ASCII-only) value.  Prints a warning if any
+    non-ASCII characters were found and removed.
     """
     try:
         value.encode("ascii")
@@ -5797,17 +5795,20 @@ def _check_non_ascii_credential(key: str, value: str) -> str:
     for i, ch in enumerate(value):
         if ord(ch) > 127:
             bad_chars.append(f"  position {i}: {ch!r} (U+{ord(ch):04X})")
+    sanitized = value.encode("ascii", errors="ignore").decode("ascii")
 
-    raise ValueError(
-        f"{key} contains non-ASCII characters that will break API requests.\n"
+    print(
+        f"\n  Warning: {key} contains non-ASCII characters that will break API requests.\n"
         f"  This usually happens when copy-pasting from a PDF, rich-text editor,\n"
         f"  or web page that substitutes lookalike Unicode glyphs for ASCII letters.\n"
         f"\n"
         + "\n".join(f"  {line}" for line in bad_chars[:5])
         + ("\n  ... and more" if len(bad_chars) > 5 else "")
-        + f"\n\n  The key was NOT saved to avoid storing a corrupted secret.\n"
-        f"  Re-copy the key from the provider's dashboard and try again."
+        + f"\n\n  The non-ASCII characters have been stripped automatically.\n"
+        f"  If authentication fails, re-copy the key from the provider's dashboard.\n",
+        file=sys.stderr,
     )
+    return sanitized
 
 
 def save_env_value(key: str, value: str):
