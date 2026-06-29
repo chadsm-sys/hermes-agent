@@ -1380,6 +1380,13 @@ class TelegramAdapter(BasePlatformAdapter):
                 task = asyncio.ensure_future(
                     self._handle_polling_network_error(retry_err)
                 )
+                # Re-arm the dedup guard: _polling_error_callback skips
+                # scheduling while _polling_error_task is not done. Without
+                # this, the original task has completed, so a concurrent
+                # polling-error callback could spawn a second reconnect ladder
+                # racing this one and corrupting _polling_network_error_count.
+                # Mirrors the conflict path. Keep it in _background_tasks too.
+                self._polling_error_task = task
                 self._background_tasks.add(task)
                 task.add_done_callback(self._background_tasks.discard)
 
@@ -3763,6 +3770,20 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
+            # The model picker changes the model (and cost) for the shared
+            # session, so gate it on caller authorization like the other
+            # state-changing callbacks — otherwise any group member could
+            # hijack another user's /model picker.
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(
+                caller_id,
+                chat_id=query_chat_id,
+                chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                user_name=query_user_name,
+            ):
+                await query.answer(text="⛔ You are not authorized to change the model.")
+                return
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
                 await self._handle_model_picker_callback(query, data, chat_id)
@@ -4227,7 +4248,7 @@ class TelegramAdapter(BasePlatformAdapter):
         limit_mb = max(1, max_bytes // (1024 * 1024))
         try:
             size_mb = int(file_size or 0) / (1024 * 1024)
-            size_text = f"{size_mb:.1f} MB"
+            size_text = f"{size_mb:.1f} MB" if file_size else "unknown size"
         except (TypeError, ValueError):
             size_text = "unknown size"
         return (
@@ -4245,7 +4266,11 @@ class TelegramAdapter(BasePlatformAdapter):
         except (TypeError, ValueError):
             size = 0
         if size <= 0:
-            return True, None
+            # Fail closed when Telegram doesn't report a verifiable size: a
+            # crafted update could omit/zero file_size to slip an oversized
+            # download past the cap. Matches the document path, which also
+            # rejects a missing file_size (tests/.../test_telegram_documents.py).
+            return False, self._telegram_media_too_large_note(label, file_size, max_bytes)
         if size <= max_bytes:
             return True, None
         return False, self._telegram_media_too_large_note(label, size, max_bytes)
@@ -6096,6 +6121,12 @@ class TelegramAdapter(BasePlatformAdapter):
 
         elif msg.video:
             try:
+                allowed, note = self._telegram_media_size_allowed(msg.video, "video file")
+                if not allowed:
+                    event.text = self._append_observed_note(event.text, note or "")
+                    logger.info("[Telegram] Skipped oversized user video (size=%s)", getattr(msg.video, "file_size", None))
+                    await self.handle_message(event)
+                    return
                 file_obj = await msg.video.get_file()
                 video_bytes = await file_obj.download_as_bytearray()
                 ext = ".mp4"
