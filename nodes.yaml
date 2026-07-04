@@ -6,8 +6,11 @@ nodes:
   - id: mbp
     label: MacBook Pro
     role: aggregator
-    url: http://127.0.0.1:0   # placeholder; local node reads its own APIs in-process in v1
-    enabled: false            # v0 ships mock-only; flip after Chad approval
+    # The desktop app's own local backend (hermes serve). Port is dynamic
+    # (--port 0): if it changes on desktop restart the card degrades to
+    # offline — exactly the designed failure mode, no risk. Loopback only.
+    url: http://127.0.0.1:49772
+    enabled: true             # live-read-only demo node (local machine only)
     read_only: true
     token_env: null
 

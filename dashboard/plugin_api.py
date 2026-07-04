@@ -19,6 +19,7 @@ operator approves token provisioning and the M0 connectivity test passes.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -88,6 +89,21 @@ def _load_nodes() -> Optional[list[dict[str, Any]]]:
         return None
 
 
+def _connector():
+    """Load the sibling connector module by path. plugin_api is imported via
+    spec_from_file_location (no package, dashboard/ not on sys.path), so a
+    plain ``import connector`` cannot resolve inside the dashboard server."""
+    import importlib.util
+    name = "hermes_mc_connector"
+    mod = sys.modules.get(name)
+    if mod is None:
+        spec = importlib.util.spec_from_file_location(name, _HERE / "connector.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+    return mod
+
+
 @router.get("/fleet/summary")
 async def fleet_summary() -> dict[str, Any]:
     """Fleet cards from nodes.yaml. Enabled nodes are polled read-only via the
@@ -102,11 +118,7 @@ async def fleet_summary() -> dict[str, Any]:
                               "reason": "nodes.yaml and fixture unreadable"})
         return _envelope({"nodes": fixture})
 
-    try:
-        import connector
-    except ImportError:
-        from . import connector  # type: ignore[no-redef]
-
+    connector = _connector()
     cards = []
     any_live = False
     for node in nodes:

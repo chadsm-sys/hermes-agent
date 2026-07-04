@@ -36,21 +36,45 @@ def test_health_reports_mock_mode():
     assert body["mode"] == "mock", "v0 must never report live mode"
 
 
-def test_fleet_summary_schema_and_all_nodes_disabled():
+def test_fleet_summary_schema_and_disabled_node_safety():
+    """Hermetic: inject an all-disabled registry; assert schema + that
+    disabled nodes render config-only (never contacted, no live fields)."""
     client = make_client()
-    resp = client.get(f"{PREFIX}/fleet/summary")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["mode"] == "mock"
-    assert isinstance(body["nodes"], list) and len(body["nodes"]) >= 3
-    for node in body["nodes"]:
-        for key in ("id", "label", "role", "enabled", "read_only"):
-            assert key in node, f"fleet node missing {key}"
-        # SAFETY INVARIANT: v0 ships with every node disabled + read-only.
-        assert node["enabled"] is False
-        assert node["read_only"] is True
-    ids = {n["id"] for n in body["nodes"]}
-    assert {"mbp", "mac-mini", "dgx-spark"} <= ids
+    test_nodes = [
+        {"id": n, "label": n, "role": "test", "url": "http://192.0.2.9:9",
+         "enabled": False, "read_only": True, "token_env": None}
+        for n in ("mbp", "mac-mini", "dgx-spark")
+    ]
+    original = plugin_api._load_nodes
+    plugin_api._load_nodes = lambda: test_nodes
+    try:
+        resp = client.get(f"{PREFIX}/fleet/summary")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["mode"] == "mock", "all-disabled fleet must not report live mode"
+        assert {n["id"] for n in body["nodes"]} == {"mbp", "mac-mini", "dgx-spark"}
+        for node in body["nodes"]:
+            for key in ("id", "label", "role", "enabled", "read_only", "source", "alive"):
+                assert key in node, f"fleet node missing {key}"
+            assert node["enabled"] is False
+            assert node["read_only"] is True
+            assert node["source"] == "configured-disabled"
+            assert node["alive"] is None
+    finally:
+        plugin_api._load_nodes = original
+
+
+def test_real_registry_production_nodes_stay_gated():
+    """The shipped nodes.yaml must keep mac-mini and dgx-spark disabled +
+    read-only until Chad's M0 approval. (mbp loopback demo node is exempt.)"""
+    nodes = plugin_api._load_nodes()
+    assert nodes, "nodes.yaml should be readable"
+    by_id = {n["id"]: n for n in nodes}
+    for node_id in ("mac-mini", "dgx-spark"):
+        assert by_id[node_id]["enabled"] is False, f"{node_id} must stay disabled"
+        assert by_id[node_id]["read_only"] is True
+    assert by_id["mbp"]["url"].startswith("http://127.0.0.1"), \
+        "only loopback may be enabled without approval"
 
 
 def test_jobs_summary_counts_match_jobs():
@@ -149,14 +173,14 @@ def test_missing_fixture_degrades_not_500(monkeypatch=None):
 
 
 def test_fleet_disabled_nodes_render_without_contact():
-    """Registry-driven fleet: all-disabled registry yields cards with
-    source=configured-disabled and never flips the envelope to live mode."""
+    """Registry-driven fleet: disabled entries in the real registry yield
+    source=configured-disabled cards (config-only, zero contact)."""
     client = make_client()
     body = client.get(f"{PREFIX}/fleet/summary").json()
-    assert body["mode"] == "mock", "all-disabled fleet must not report live mode"
     for node in body["nodes"]:
-        assert node["enabled"] is False and node["read_only"] is True
-        assert node["source"] == "configured-disabled"
+        if not node["enabled"]:
+            assert node["source"] == "configured-disabled"
+            assert node["alive"] is None
 
 
 def test_no_mutation_routes_against_remote_nodes():
