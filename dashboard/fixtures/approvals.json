@@ -1,0 +1,3 @@
+[
+  {"node": "mbp", "session_id": "sess-mock-1", "kind": "approval", "summary": "rm -rf ~/tmp/scratch (mock)", "requested_at": 1783299000.0}
+]

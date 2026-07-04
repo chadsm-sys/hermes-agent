@@ -1,0 +1,28 @@
+# Mission Control v0 — node registry
+# SAFETY: tokens NEVER live in this file. `token_env` names an environment
+# variable expected in the operator-managed .env. A node with enabled: false
+# is never contacted, even in live mode.
+nodes:
+  - id: mbp
+    label: MacBook Pro
+    role: aggregator
+    url: http://127.0.0.1:0   # placeholder; local node reads its own APIs in-process in v1
+    enabled: false            # v0 ships mock-only; flip after Chad approval
+    read_only: true
+    token_env: null
+
+  - id: mac-mini
+    label: Mac mini (PRODUCTION)
+    role: production
+    url: https://REPLACE-mini-tailnet-host:PORT
+    enabled: false            # HARD GATE: requires Chad-provisioned token + M0 PASS
+    read_only: true           # never mutated by broker, enforced in code
+    token_env: MC_MACMINI_TOKEN
+
+  - id: dgx-spark
+    label: DGX Spark
+    role: lab
+    url: https://REPLACE-dgx-tailnet-host:PORT
+    enabled: false
+    read_only: true
+    token_env: MC_DGX_TOKEN

@@ -1,0 +1,6 @@
+[
+  {"provider": "anthropic", "account_label": "Claude Max #1", "node": "mbp", "auth_ok": true, "exhausted": false, "last_used": 1783299500.0},
+  {"provider": "openai-codex", "account_label": "ChatGPT Pro #1", "node": "mac-mini", "auth_ok": null, "exhausted": null, "last_used": null},
+  {"provider": "xai", "account_label": "Grok Heavy", "node": "mac-mini", "auth_ok": null, "exhausted": null, "last_used": null},
+  {"provider": "local-dgx", "account_label": "DGX local models", "node": "dgx-spark", "auth_ok": null, "exhausted": null, "last_used": null}
+]

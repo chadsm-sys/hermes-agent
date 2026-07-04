@@ -1,0 +1,5 @@
+[
+  {"node": "mbp", "kind": "cron", "id": "daily-brief", "title": "Daily brief", "state": "completed", "started_at": 1783290000.0, "ended_at": 1783290120.0},
+  {"node": "mbp", "kind": "session", "id": "sess-mock-1", "title": "Mission Control staging", "state": "running", "started_at": 1783298000.0, "ended_at": null},
+  {"node": "mac-mini", "kind": "cron", "id": "mock-research-sweep", "title": "Research sweep (mock)", "state": "failed", "started_at": 1783280000.0, "ended_at": 1783280060.0}
+]

@@ -1,0 +1,15 @@
+{
+  "name": "mission-control",
+  "label": "Mission Control",
+  "description": "Read-only fleet console for the Hermes estate: fleet health, jobs, approvals, opportunities. v0 = local mock data only.",
+  "icon": "radar",
+  "version": "0.1.0",
+  "tab": {
+    "path": "mission-control",
+    "position": "end"
+  },
+  "entry": "dashboard/dist/plugin.js",
+  "css": null,
+  "api": "dashboard/plugin_api.py",
+  "source": "user"
+}

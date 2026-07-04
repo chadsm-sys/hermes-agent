@@ -1,0 +1,5 @@
+[
+  {"id": "mbp", "label": "MacBook Pro", "role": "aggregator", "url": "http://127.0.0.1:0", "enabled": false, "read_only": true, "alive": true, "gateway_state": "running", "version": "0.17.0", "heartbeat_at": 1783300000.0, "latency_ms": 2},
+  {"id": "mac-mini", "label": "Mac mini (PRODUCTION)", "role": "production", "url": "https://REPLACE-mini:PORT", "enabled": false, "read_only": true, "alive": null, "gateway_state": "unknown", "version": null, "heartbeat_at": null, "latency_ms": null},
+  {"id": "dgx-spark", "label": "DGX Spark", "role": "lab", "url": "https://REPLACE-dgx:PORT", "enabled": false, "read_only": true, "alive": null, "gateway_state": "unknown", "version": null, "heartbeat_at": null, "latency_ms": null}
+]

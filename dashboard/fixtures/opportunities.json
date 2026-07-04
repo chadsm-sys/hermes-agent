@@ -1,0 +1,4 @@
+[
+  {"id": "opp-mock-1", "title": "Direct-contract rate sheet refresh (mock)", "confidence": 0.85, "tier": "quick", "source": "income-scout", "status": "new", "created_at": 1783295000.0, "payload": {}},
+  {"id": "opp-mock-2", "title": "DGX inference benchmarking service (mock)", "confidence": 0.6, "tier": "long", "source": "infra-scout", "status": "new", "created_at": 1783294000.0, "payload": {}}
+]
