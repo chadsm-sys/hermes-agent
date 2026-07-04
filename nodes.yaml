@@ -17,12 +17,15 @@ nodes:
   - id: mac-mini
     label: Mac mini (PRODUCTION)
     role: production
-    # Discovered 2026-07-04 (read-only recon): tailnet macs-mac-mini-1 =
-    # 100.118.113.115 (offline, last seen 14h); LAN macs-mac-mini.local =
-    # 10.0.0.162 (no ping response — asleep/off). PORT unknown until Chad
-    # checks the mini's dashboard/serve port. Do NOT enable until M0 passes.
-    url: http://macs-mac-mini-1.tailnet:REPLACE-PORT
-    enabled: false            # HARD GATE: requires Chad-provisioned token + M0 PASS
+    # M0 PASSED 2026-07-04: mini's Hermes (v0.18.0, gateway running) binds
+    # LOOPBACK-ONLY on 127.0.0.1:49170 — direct tailnet TCP is impossible by
+    # the mini's own design. Read-only transport = SSH tunnel (key-auth):
+    #   ssh -N -o RemoteCommand=none -o ExitOnForwardFailure=yes \
+    #       -L 127.0.0.1:49171:127.0.0.1:49170 mini
+    # /api/status is public; /api/system/stats is token-gated and degrades
+    # to null metrics until MC_MACMINI_TOKEN is provisioned by Chad.
+    url: http://127.0.0.1:49171
+    enabled: true             # M0 PASS + tunnel-only loopback URL; GET-only enforced in connector
     read_only: true           # never mutated by broker, enforced in code
     token_env: MC_MACMINI_TOKEN
 

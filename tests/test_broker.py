@@ -65,16 +65,18 @@ def test_fleet_summary_schema_and_disabled_node_safety():
 
 
 def test_real_registry_production_nodes_stay_gated():
-    """The shipped nodes.yaml must keep mac-mini and dgx-spark disabled +
-    read-only until Chad's M0 approval. (mbp loopback demo node is exempt.)"""
+    """Registry safety: DGX stays disabled until its own M0; every enabled
+    node must be loopback-only (local backend or SSH tunnel — the connector
+    never dials a remote address directly), and mac-mini stays read_only."""
     nodes = plugin_api._load_nodes()
     assert nodes, "nodes.yaml should be readable"
     by_id = {n["id"]: n for n in nodes}
-    for node_id in ("mac-mini", "dgx-spark"):
-        assert by_id[node_id]["enabled"] is False, f"{node_id} must stay disabled"
-        assert by_id[node_id]["read_only"] is True
-    assert by_id["mbp"]["url"].startswith("http://127.0.0.1"), \
-        "only loopback may be enabled without approval"
+    assert by_id["dgx-spark"]["enabled"] is False, "dgx-spark must stay disabled"
+    assert by_id["mac-mini"]["read_only"] is True
+    for node in nodes:
+        if node["enabled"]:
+            assert node["url"].startswith("http://127.0.0.1"), \
+                f"{node['id']}: enabled nodes must be loopback-only (tunnel or local)"
 
 
 def test_jobs_summary_counts_match_jobs():
