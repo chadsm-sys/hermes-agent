@@ -29,8 +29,11 @@ from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter()
 
-PLUGIN_VERSION = "0.1.0"
-MODE: Literal["mock"] = "mock"  # v0 is mock-only by construction
+PLUGIN_VERSION = "0.2.0"
+# Base mode for non-fleet endpoints (jobs/approvals/opportunities remain mock
+# in M2). fleet/summary reports "live-read-only" when at least one enabled
+# node was polled via the GET-only connector.
+MODE = "mock"
 
 _HERE = Path(__file__).resolve().parent
 _FIXTURES = _HERE / "fixtures"
@@ -74,13 +77,45 @@ async def health() -> dict[str, Any]:
 
 # ── Fleet ────────────────────────────────────────────────────────────────────
 
+def _load_nodes() -> Optional[list[dict[str, Any]]]:
+    """Node registry from nodes.yaml (plugin root). None on any read failure."""
+    try:
+        import yaml
+        raw = yaml.safe_load((_HERE.parent / "nodes.yaml").read_text(encoding="utf-8"))
+        nodes = raw.get("nodes") if isinstance(raw, dict) else None
+        return nodes if isinstance(nodes, list) else None
+    except Exception:
+        return None
+
+
 @router.get("/fleet/summary")
 async def fleet_summary() -> dict[str, Any]:
-    nodes = _load_fixture("fleet")
+    """Fleet cards from nodes.yaml. Enabled nodes are polled read-only via the
+    connector (GET-only, breaker-guarded); disabled nodes are NEVER contacted
+    and render from config alone. Falls back to the mock fixture when the
+    registry is unreadable."""
+    nodes = _load_nodes()
     if nodes is None:
-        return _envelope({"nodes": [], "degraded": True,
-                          "reason": "fixture missing/unreadable"})
-    return _envelope({"nodes": nodes})
+        fixture = _load_fixture("fleet")
+        if fixture is None:
+            return _envelope({"nodes": [], "degraded": True,
+                              "reason": "nodes.yaml and fixture unreadable"})
+        return _envelope({"nodes": fixture})
+
+    try:
+        import connector
+    except ImportError:
+        from . import connector  # type: ignore[no-redef]
+
+    cards = []
+    any_live = False
+    for node in nodes:
+        card = {k: node.get(k) for k in ("id", "label", "role", "url", "enabled", "read_only")}
+        card.update(connector.poll_node(node))
+        any_live = any_live or card["source"] == "live-read-only"
+        cards.append(card)
+    return {**_envelope({"nodes": cards}),
+            "mode": "live-read-only" if any_live else MODE}
 
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────

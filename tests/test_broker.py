@@ -130,17 +130,33 @@ def test_confidence_bounds_enforced():
 
 
 def test_missing_fixture_degrades_not_500(monkeypatch=None):
-    """Safe-failure: a missing fixture returns degraded empty data, never a 500."""
+    """Safe-failure: a missing fixture returns degraded empty data, never a 500.
+    fleet/summary is registry-first since M2, so its degrade path additionally
+    requires nodes.yaml to be unreadable."""
     client = make_client()
-    original = plugin_api._FIXTURES
+    original_fixtures = plugin_api._FIXTURES
+    original_load_nodes = plugin_api._load_nodes
     plugin_api._FIXTURES = Path("/nonexistent-mission-control-fixtures")
+    plugin_api._load_nodes = lambda: None
     try:
         for path in ("fleet/summary", "jobs/summary", "approvals/summary", "providers/summary"):
             resp = client.get(f"{PREFIX}/{path}")
             assert resp.status_code == 200, f"{path} should degrade, not error"
             assert resp.json().get("degraded") is True
     finally:
-        plugin_api._FIXTURES = original
+        plugin_api._FIXTURES = original_fixtures
+        plugin_api._load_nodes = original_load_nodes
+
+
+def test_fleet_disabled_nodes_render_without_contact():
+    """Registry-driven fleet: all-disabled registry yields cards with
+    source=configured-disabled and never flips the envelope to live mode."""
+    client = make_client()
+    body = client.get(f"{PREFIX}/fleet/summary").json()
+    assert body["mode"] == "mock", "all-disabled fleet must not report live mode"
+    for node in body["nodes"]:
+        assert node["enabled"] is False and node["read_only"] is True
+        assert node["source"] == "configured-disabled"
 
 
 def test_no_mutation_routes_against_remote_nodes():

@@ -14,7 +14,11 @@ nodes:
   - id: mac-mini
     label: Mac mini (PRODUCTION)
     role: production
-    url: https://REPLACE-mini-tailnet-host:PORT
+    # Discovered 2026-07-04 (read-only recon): tailnet macs-mac-mini-1 =
+    # 100.118.113.115 (offline, last seen 14h); LAN macs-mac-mini.local =
+    # 10.0.0.162 (no ping response — asleep/off). PORT unknown until Chad
+    # checks the mini's dashboard/serve port. Do NOT enable until M0 passes.
+    url: http://macs-mac-mini-1.tailnet:REPLACE-PORT
     enabled: false            # HARD GATE: requires Chad-provisioned token + M0 PASS
     read_only: true           # never mutated by broker, enforced in code
     token_env: MC_MACMINI_TOKEN

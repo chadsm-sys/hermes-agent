@@ -39,6 +39,47 @@
     return render(s.data);
   }
 
+  function fmtUptime(s) {
+    if (s == null) return null;
+    const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+    return d > 0 ? d + "d " + h + "h" : h + "h " + Math.floor((s % 3600) / 60) + "m";
+  }
+
+  function fmtAgo(ts) {
+    if (ts == null) return "never";
+    const s = Math.max(0, Date.now() / 1000 - ts);
+    return s < 90 ? Math.round(s) + "s ago" : Math.round(s / 60) + "m ago";
+  }
+
+  function metricRow(label, value) {
+    return value == null ? null : h("div", { style: { fontSize: "0.8rem", opacity: 0.75 } }, label + ": " + value);
+  }
+
+  function NodeCard(n) {
+    const live = n.source === "live-read-only";
+    const liveness = n.alive === true ? "online" : n.alive === false ? "offline" : "not connected";
+    const dot = n.alive === true ? "#2da44e" : n.alive === false ? "#c00" : "#888";
+    return h("div", {
+      key: n.id,
+      style: { border: "1px solid var(--color-border,#444)", borderRadius: 6, padding: "0.75rem" }
+    },
+      h("div", { style: { fontWeight: 600, display: "flex", alignItems: "center", gap: "0.4rem" } },
+        h("span", { style: { width: 8, height: 8, borderRadius: 4, background: dot, display: "inline-block" } }),
+        n.label),
+      h("div", { style: { fontSize: "0.8rem", opacity: 0.7 } },
+        n.role + " \u00b7 " + liveness + (n.breaker_open ? " \u00b7 breaker open" : "")),
+      h("div", { style: { fontSize: "0.8rem", opacity: 0.7 } },
+        live ? "source: live-read-only" : n.enabled ? "polling" : "disabled (awaiting approval)"),
+      metricRow("Hermes", n.version && "v" + n.version),
+      metricRow("gateway", n.gateway_state),
+      metricRow("uptime", fmtUptime(n.uptime_seconds)),
+      metricRow("CPU", n.cpu_percent != null ? n.cpu_percent + "%" : null),
+      metricRow("RAM", n.memory_percent != null ? n.memory_percent + "%" : null),
+      metricRow("disk", n.disk_percent != null ? n.disk_percent + "%" : null),
+      live && metricRow("heartbeat", fmtAgo(n.heartbeat_at)),
+      live && metricRow("last poll", fmtAgo(n.last_poll_at)));
+  }
+
   function MissionControl() {
     const fleet = useEndpoint("/fleet/summary");
     const jobs = useEndpoint("/jobs/summary");
@@ -53,19 +94,11 @@
           background: "var(--color-muted, rgba(255,200,0,0.08))",
           fontSize: "0.85rem"
         }
-      }, "READ-ONLY \u00b7 LOCAL MOCK DATA \u2014 Mission Control v0. No remote nodes are contacted."),
+      }, "READ-ONLY \u2014 Mission Control. Fleet cards for enabled nodes are live (GET-only polls); everything else is local mock data. No controls, no execution."),
 
       Section("Fleet", StatePanel(fleet, (d) =>
         h("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(240px,1fr))", gap: "0.75rem" } },
-          d.nodes.map((n) => h("div", {
-            key: n.id,
-            style: { border: "1px solid var(--color-border,#444)", borderRadius: 6, padding: "0.75rem" }
-          },
-            h("div", { style: { fontWeight: 600 } }, n.label),
-            h("div", { style: { fontSize: "0.8rem", opacity: 0.7 } },
-              n.role + " \u00b7 " + (n.alive === true ? "alive" : n.alive === false ? "down" : "not connected")),
-            h("div", { style: { fontSize: "0.8rem", opacity: 0.7 } },
-              n.enabled ? "enabled" : "disabled (awaiting approval)")))))),
+          d.nodes.map(NodeCard)))),
 
       Section("Jobs", StatePanel(jobs, (d) =>
         d.jobs.length === 0 ? h("div", { style: { opacity: 0.6 } }, "No jobs.") :
