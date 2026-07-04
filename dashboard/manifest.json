@@ -8,8 +8,8 @@
     "path": "mission-control",
     "position": "end"
   },
-  "entry": "dashboard/dist/plugin.js",
+  "entry": "dist/plugin.js",
   "css": null,
-  "api": "dashboard/plugin_api.py",
+  "api": "plugin_api.py",
   "source": "user"
 }
