@@ -497,7 +497,7 @@ class GraphStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (subject_kind, subject_id, kind, ref, quote[:500], session_id, self.now()),
             )
-        return cur.lastrowid
+        return int(cur.lastrowid or 0)
 
     def evidence_for(self, subject_kind: str, subject_id: int) -> List[Dict[str, Any]]:
         with self._lock:
