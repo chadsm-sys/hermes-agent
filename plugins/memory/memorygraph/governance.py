@@ -26,7 +26,7 @@ import difflib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .store import GraphStore, normalize_key, parse_ts
+from .store import GraphStore, normalize_key, normalize_ts, parse_ts
 
 
 @dataclass
@@ -122,7 +122,7 @@ class GovernanceEngine:
         # 2. Contradiction detection (exclusive = single-valued attribute)
         conflicts = [c for c in existing if c["exclusive"] or exclusive]
         if conflicts and (exclusive or any(c["exclusive"] for c in conflicts)):
-            new_from = valid_from or self.store.now()
+            new_from = normalize_ts(valid_from, self.store.now())
             newer = all(new_from >= c["valid_from"] for c in conflicts)
             if newer:
                 # Time-aware update: new value supersedes older ones.
@@ -286,6 +286,10 @@ class GovernanceEngine:
         return out
 
     # -- aging + promotion sweeps -----------------------------------------------
+    #
+    # Sweeps are O(active claims) full scans (promotion also does a per-claim
+    # evidence-count query). Fine for a personal knowledge graph running at
+    # session end; revisit with batched queries past a few thousand claims.
 
     def age_knowledge(self, now: str = "") -> Dict[str, int]:
         """Decay confidence by half-life since last reinforcement; demote decayed."""

@@ -121,6 +121,17 @@ GRAPH_MEMORY_SCHEMA: Dict[str, Any] = {
 }
 
 
+def _coerce_bool(raw: Any, default: bool = False) -> bool:
+    """Robust boolean coercion for tool args — bool("false") is True."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return default
+
+
 def _load_json_config(hermes_home: str) -> Dict[str, Any]:
     path = os.path.join(hermes_home, _CONFIG_FILENAME)
     try:
@@ -182,9 +193,15 @@ class MemoryGraphProvider(MemoryProvider):
         db_path = str(config.get("db_path") or os.path.join(self._hermes_home, _DB_FILENAME))
         policy = GovernancePolicy()
         try:
-            policy.half_life_days = float(config.get("half_life_days", policy.half_life_days))
-            policy.duplicate_similarity = float(
-                config.get("duplicate_similarity", policy.duplicate_similarity)
+            # Clamp to sane ranges: a zero/negative half-life would invert
+            # the decay curve; similarity must stay within [0, 1].
+            policy.half_life_days = max(
+                0.1, float(config.get("half_life_days", policy.half_life_days))
+            )
+            policy.duplicate_similarity = min(
+                1.0,
+                max(0.0, float(config.get("duplicate_similarity",
+                                          policy.duplicate_similarity))),
             )
         except (TypeError, ValueError):
             logger.warning("memorygraph: invalid numeric config value; using defaults")
@@ -212,7 +229,13 @@ class MemoryGraphProvider(MemoryProvider):
         if self._agent_context != "primary":
             return
         try:
-            result = self.engine.sweep()
+            # Hold the provider lock so shutdown() cannot close the store
+            # mid-sweep (MemoryManager drains background hooks with a
+            # bounded timeout before calling shutdown()).
+            with self._lock:
+                if self._engine is None:
+                    return
+                result = self._engine.sweep()
             logger.debug("memorygraph session-end sweep: %s", result)
         except Exception:
             logger.exception("memorygraph: session-end governance sweep failed")
@@ -353,7 +376,7 @@ class MemoryGraphProvider(MemoryProvider):
             str(attribute),
             str(value),
             confidence=float(args.get("confidence") or 0.6),
-            exclusive=bool(args.get("exclusive") or False),
+            exclusive=_coerce_bool(args.get("exclusive")),
             evidence=self._evidence_from_args(args),
         )
         return {
@@ -425,7 +448,7 @@ class MemoryGraphProvider(MemoryProvider):
         (claim_id,) = self._require(args, "claim_id")
         if args.get("helpful") is None:
             raise ValueError("'helpful' is required for this action")
-        claim = self.engine.feedback(int(claim_id), bool(args["helpful"]))
+        claim = self.engine.feedback(int(claim_id), _coerce_bool(args["helpful"]))
         if claim is None:
             raise ValueError(f"claim {claim_id} not found")
         return {"claim": claim}
