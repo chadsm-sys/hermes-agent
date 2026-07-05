@@ -7,6 +7,22 @@ This document is the constitution for the Chief of Staff layer. Every other
 document in this directory derives from it. When a design decision conflicts
 with this file, this file wins.
 
+## The Mission Statement
+
+> **Mission Control exists to continuously improve both Chad and his AI
+> organization. Every morning it identifies the highest-leverage bottleneck,
+> every evening it proves what changed, and everything in between exists to
+> maximize the value of Chad's judgment while automating everything that can
+> be safely delegated.**
+
+Everything below is commentary on that paragraph. The morning clause is the
+[Bottleneck Engine](BOTTLENECK_ENGINE.md). The evening clause is the Evening
+Report and the [Compound Engine](COMPOUND_ENGINE.md) — *proves*, not
+*reports*, is deliberate ([DECISION_ENGINE.md](DECISION_ENGINE.md)). The
+"everything in between" clause is the North Star and the escalation contract
+([HUMAN_FIRST.md](HUMAN_FIRST.md)) — and *safely* is the word that makes the
+whole sentence trustworthy.
+
 ## North Star
 
 **Maximize the value of the human's judgment per minute of the human's attention.**
