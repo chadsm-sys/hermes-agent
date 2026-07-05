@@ -368,3 +368,34 @@ def test_loader_discovers_memorygraph():
     provider = load_memory_provider("memorygraph")
     assert provider is not None
     assert provider.name == "memorygraph"
+
+
+def test_bool_args_coerce_string_forms(provider):
+    # bool("false") is True — tool args may arrive as strings.
+    result = call(provider, action="remember", entity="Chad",
+                  entity_type="person", attribute="employer",
+                  value="Facility A", exclusive="false")
+    assert result["claim"]["exclusive"] == 0
+
+    result = call(provider, action="remember", entity="Chad",
+                  entity_type="person", attribute="status",
+                  value="active CRNA", exclusive="true")
+    assert result["claim"]["exclusive"] == 1
+
+    r = call(provider, action="remember", entity="X", attribute="fact",
+             value="v", confidence=0.5)
+    fb = call(provider, action="feedback", claim_id=r["claim"]["id"],
+              helpful="false")  # string "false" must mean unhelpful
+    assert fb["claim"]["confidence"] == pytest.approx(0.35)
+
+
+def test_config_clamps_invalid_ranges(tmp_path):
+    with open(tmp_path / "memorygraph.json", "w", encoding="utf-8") as f:
+        json.dump({"half_life_days": -5, "duplicate_similarity": 3.0}, f)
+    p = MemoryGraphProvider()
+    p.initialize("s", hermes_home=str(tmp_path))
+    try:
+        assert p._engine.policy.half_life_days == 0.1
+        assert p._engine.policy.duplicate_similarity == 1.0
+    finally:
+        p.shutdown()

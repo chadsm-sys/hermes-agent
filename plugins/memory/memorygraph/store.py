@@ -137,6 +137,11 @@ CREATE TABLE IF NOT EXISTS meta (
 
 _KEY_RE = re.compile(r"[^a-z0-9]+")
 
+# Confidence bump when an identical open relationship is re-asserted.
+# Mirrors GovernancePolicy.reinforce_delta for claims; kept here because
+# the store is policy-free by design.
+_REL_REINFORCE_DELTA = 0.1
+
 
 def normalize_key(text: str) -> str:
     """Normalize a name/value into a stable comparison key."""
@@ -150,6 +155,22 @@ def utcnow_iso() -> str:
 def parse_ts(ts: str) -> datetime:
     """Parse a stored ISO-8601 UTC timestamp back into a datetime."""
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+
+def normalize_ts(ts: str, fallback: str) -> str:
+    """Return ``ts`` if it is a valid stored-format timestamp, else ``fallback``.
+
+    Timestamp ordering elsewhere relies on lexicographic comparison of the
+    fixed ``%Y-%m-%dT%H:%M:%SZ`` format, so caller-supplied ``valid_from``
+    values must be validated at the write boundary.
+    """
+    if not ts:
+        return fallback
+    try:
+        parse_ts(ts)
+        return ts
+    except ValueError:
+        return fallback
 
 
 def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -335,7 +356,7 @@ class GraphStore:
                 (src_id, dst_id, rel_key),
             ).fetchone()
             if row:
-                new_conf = min(1.0, row["confidence"] + 0.1)
+                new_conf = min(1.0, row["confidence"] + _REL_REINFORCE_DELTA)
                 self._conn.execute(
                     "UPDATE relationships SET confidence = ?, updated_at = ? WHERE id = ?",
                     (new_conf, ts, row["id"]),
@@ -347,7 +368,7 @@ class GraphStore:
                     "(src_id, dst_id, rel_type, confidence, valid_from, valid_to, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, NULL, ?, ?)",
                     (src_id, dst_id, rel_key, max(0.0, min(1.0, confidence)),
-                     valid_from or ts, ts, ts),
+                     normalize_ts(valid_from, ts), ts, ts),
                 )
                 rel_id = cur.lastrowid
                 self.log_event("relationship_created", "relationship", rel_id,
@@ -416,7 +437,7 @@ class GraphStore:
                 "VALUES (?, ?, ?, ?, ?, 'candidate', 'active', ?, 0, ?, ?, ?, ?, NULL, NULL)",
                 (entity_id, normalize_key(attribute) or "note", value.strip(),
                  normalize_key(value), max(0.0, min(1.0, confidence)),
-                 1 if exclusive else 0, ts, ts, ts, valid_from or ts),
+                 1 if exclusive else 0, ts, ts, ts, normalize_ts(valid_from, ts)),
             )
             claim_id = cur.lastrowid
         self.log_event("claim_created", "claim", claim_id,

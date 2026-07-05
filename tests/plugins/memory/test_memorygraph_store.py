@@ -231,3 +231,16 @@ def test_persistence_across_reopen(tmp_path, clock):
     s2 = GraphStore(path, now=clock)
     assert s2.resolve_entity("persist me") is not None
     s2.close()
+
+
+def test_normalize_ts_validates_format(store, clock):
+    from plugins.memory.memorygraph.store import normalize_ts
+
+    assert normalize_ts("2026-07-01T00:00:00Z", "FB") == "2026-07-01T00:00:00Z"
+    assert normalize_ts("", "FB") == "FB"
+    assert normalize_ts("2026-07-01 00:00:00", "FB") == "FB"
+    assert normalize_ts("2026-07-01T00:00:00.123Z", "FB") == "FB"
+    # Write-boundary enforcement: bad valid_from falls back to now()
+    e = store.upsert_entity("X")
+    c = store.insert_claim(e["id"], "a", "v", valid_from="not-a-timestamp")
+    assert c["valid_from"] == clock()
