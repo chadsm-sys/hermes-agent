@@ -1,0 +1,7 @@
+name: memorygraph
+version: 0.1.0
+description: "Governed knowledge graph memory — typed entities and time-aware relationships with evidence links, confidence tracking, contradiction/duplicate detection, knowledge aging and promotion. Local SQLite, no credentials."
+hooks:
+  - on_memory_write
+  - on_session_end
+  - on_session_switch
