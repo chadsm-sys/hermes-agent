@@ -145,6 +145,20 @@ class MemoryGraphProvider(MemoryProvider):
         self._prefetch_cache: Dict[str, str] = {}
         self._lock = threading.Lock()
 
+    @property
+    def store(self) -> GraphStore:
+        """Initialized store accessor — narrows Optional for callers."""
+        if self._store is None:
+            raise ValueError("memorygraph is not initialized")
+        return self._store
+
+    @property
+    def engine(self) -> GovernanceEngine:
+        """Initialized governance engine accessor."""
+        if self._engine is None:
+            raise ValueError("memorygraph is not initialized")
+        return self._engine
+
     # -- identity / availability ------------------------------------------------
 
     @property
@@ -184,7 +198,7 @@ class MemoryGraphProvider(MemoryProvider):
     def shutdown(self) -> None:
         with self._lock:
             if self._store is not None:
-                self._store.close()
+                self.store.close()
                 self._store = None
                 self._engine = None
 
@@ -198,7 +212,7 @@ class MemoryGraphProvider(MemoryProvider):
         if self._agent_context != "primary":
             return
         try:
-            result = self._engine.sweep()
+            result = self.engine.sweep()
             logger.debug("memorygraph session-end sweep: %s", result)
         except Exception:
             logger.exception("memorygraph: session-end governance sweep failed")
@@ -209,7 +223,7 @@ class MemoryGraphProvider(MemoryProvider):
         if self._store is None:
             return ""
         try:
-            stats = self._store.stats()
+            stats = self.store.stats()
         except Exception:
             return ""
         active = sum(stats["active_claims_by_tier"].values())
@@ -234,7 +248,7 @@ class MemoryGraphProvider(MemoryProvider):
         if self._store is None or not self._prefetch_enabled or not query:
             return ""
         try:
-            hits = self._store.search(query, limit=5)
+            hits = self.store.search(query, limit=5)
         except Exception:
             logger.exception("memorygraph: prefetch search failed")
             return ""
@@ -273,9 +287,9 @@ class MemoryGraphProvider(MemoryProvider):
         try:
             entity_name = "User" if target == "user" else "Hermes Notes"
             entity_type = "person" if target == "user" else "concept"
-            entity = self._store.upsert_entity(entity_name, entity_type)
+            entity = self.store.upsert_entity(entity_name, entity_type)
             session_id = str((metadata or {}).get("session_id") or self._session_id)
-            self._engine.assert_claim(
+            self.engine.assert_claim(
                 entity["id"], "note", content.strip(), confidence=0.6,
                 evidence={
                     "kind": "builtin_memory",
@@ -331,10 +345,10 @@ class MemoryGraphProvider(MemoryProvider):
 
     def _action_remember(self, args: Dict[str, Any]) -> Dict[str, Any]:
         entity_name, attribute, value = self._require(args, "entity", "attribute", "value")
-        entity = self._store.upsert_entity(
+        entity = self.store.upsert_entity(
             str(entity_name), str(args.get("entity_type") or "concept")
         )
-        result = self._engine.assert_claim(
+        result = self.engine.assert_claim(
             entity["id"],
             str(attribute),
             str(value),
@@ -351,84 +365,84 @@ class MemoryGraphProvider(MemoryProvider):
 
     def _action_link(self, args: Dict[str, Any]) -> Dict[str, Any]:
         src_name, dst_name, rel_type = self._require(args, "src", "dst", "rel_type")
-        src = self._store.upsert_entity(str(src_name), str(args.get("entity_type") or "concept"))
-        dst = self._store.upsert_entity(str(dst_name))
-        rel = self._store.add_relationship(
+        src = self.store.upsert_entity(str(src_name), str(args.get("entity_type") or "concept"))
+        dst = self.store.upsert_entity(str(dst_name))
+        rel = self.store.add_relationship(
             src["id"], dst["id"], str(rel_type),
             confidence=float(args.get("confidence") or 0.6),
         )
-        self._store.add_evidence("relationship", rel["id"], **self._evidence_from_args(args))
+        self.store.add_evidence("relationship", rel["id"], **self._evidence_from_args(args))
         return {"relationship": rel, "src": src["name"], "dst": dst["name"]}
 
     def _action_unlink(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (rel_id,) = self._require(args, "relationship_id")
-        ok = self._store.end_relationship(int(rel_id))
+        ok = self.store.end_relationship(int(rel_id))
         return {"ended": ok, "relationship_id": int(rel_id)}
 
     def _action_about(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (entity_name,) = self._require(args, "entity")
-        entity = self._store.resolve_entity(str(entity_name))
+        entity = self.store.resolve_entity(str(entity_name))
         if not entity:
             return {"found": False, "entity": str(entity_name)}
-        claims = self._store.claims_for(entity["id"])
+        claims = self.store.claims_for(entity["id"])
         for claim in claims:
-            claim["evidence_count"] = self._store.evidence_count("claim", claim["id"])
+            claim["evidence_count"] = self.store.evidence_count("claim", claim["id"])
         return {
             "found": True,
             "entity": entity,
             "claims": sorted(claims, key=lambda c: (c["tier"] != "core",
                                                     c["tier"] != "established",
                                                     -float(c["confidence"]))),
-            "relationships": self._store.relationships_for(entity["id"]),
+            "relationships": self.store.relationships_for(entity["id"]),
         }
 
     def _action_query(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (query,) = self._require(args, "query")
         limit = int(args.get("limit") or 10)
-        return {"results": self._store.search(str(query), limit=limit)}
+        return {"results": self.store.search(str(query), limit=limit)}
 
     def _action_timeline(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (entity_name,) = self._require(args, "entity")
-        entity = self._store.resolve_entity(str(entity_name))
+        entity = self.store.resolve_entity(str(entity_name))
         if not entity:
             return {"found": False, "entity": str(entity_name)}
-        claims = self._store.claims_for(
+        claims = self.store.claims_for(
             entity["id"], attribute=str(args.get("attribute") or ""), include_history=True
         )
         return {"found": True, "entity": entity["name"], "timeline": claims}
 
     def _action_contradictions(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"groups": self._engine.find_contradictions()}
+        return {"groups": self.engine.find_contradictions()}
 
     def _action_resolve(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (claim_id,) = self._require(args, "claim_id")
-        return self._engine.resolve_contradiction(int(claim_id))
+        return self.engine.resolve_contradiction(int(claim_id))
 
     def _action_duplicates(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"groups": self._engine.find_duplicates()}
+        return {"groups": self.engine.find_duplicates()}
 
     def _action_feedback(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (claim_id,) = self._require(args, "claim_id")
         if args.get("helpful") is None:
             raise ValueError("'helpful' is required for this action")
-        claim = self._engine.feedback(int(claim_id), bool(args["helpful"]))
+        claim = self.engine.feedback(int(claim_id), bool(args["helpful"]))
         if claim is None:
             raise ValueError(f"claim {claim_id} not found")
         return {"claim": claim}
 
     def _action_forget(self, args: Dict[str, Any]) -> Dict[str, Any]:
         (claim_id,) = self._require(args, "claim_id")
-        ok = self._engine.retract(int(claim_id), reason="user request")
+        ok = self.engine.retract(int(claim_id), reason="user request")
         return {"retracted": ok, "claim_id": int(claim_id)}
 
     def _action_sweep(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        return self._engine.sweep()
+        return self.engine.sweep()
 
     def _action_stats(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        stats = self._store.stats()
+        stats = self.store.stats()
         stats["recent_governance_events"] = [
             {"ts": e["ts"], "event": e["event"], "subject_id": e["subject_id"]}
-            for e in self._store.recent_events(10)
+            for e in self.store.recent_events(10)
         ]
         return stats
 
