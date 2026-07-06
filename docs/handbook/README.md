@@ -12,6 +12,7 @@ framework carrying his personal Chief of Staff layer.
 | [TESTING_GUIDE.md](TESTING_GUIDE.md) | Test-suite map, how to run tests, CI gates, conventions, determinism enforcement |
 | [DEBUGGING_GUIDE.md](DEBUGGING_GUIDE.md) | Observability, logging, failure recovery, common failure modes and how to diagnose them |
 | [MEMORY_MONITOR_VERIFICATION.md](MEMORY_MONITOR_VERIFICATION.md) | Verified finding: `gateway/memory_monitor.py` is unused in production (TRUE_UNUSED) |
+| [UNWIRED_FEATURES_REGISTER.md](UNWIRED_FEATURES_REGISTER.md) | Top 10 documented-but-unwired features, with evidence and smallest corrections |
 
 Documentation only — nothing in this directory changes runtime behavior.
 Where these documents conflict with `docs/chief-of-staff/MISSION.md`,
