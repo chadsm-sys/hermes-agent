@@ -4,11 +4,11 @@ Long-running tests that exercise the Kanban kernel under adversarial
 conditions. **Not run by `scripts/run_tests.sh`** because they can
 take 30+ seconds each and spawn real subprocesses.
 
-Run manually:
+These are `__main__`-executable scripts, not pytest modules (they define
+no `test_*` functions and are excluded from pytest collection by
+`conftest.py`). Run them directly:
 
 ```bash
-./venv/bin/python -m pytest tests/stress/ -v -s
-# or individual files:
 ./venv/bin/python tests/stress/test_concurrency.py
 ./venv/bin/python tests/stress/test_subprocess_e2e.py
 ./venv/bin/python tests/stress/test_property_fuzzing.py

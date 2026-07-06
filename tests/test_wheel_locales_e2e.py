@@ -34,7 +34,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(300)  # overrides the global --timeout=30; cold-CI wheel build + venv + pip can exceed it
 def test_installed_wheel_renders_i18n_strings(tmp_path):
     # 1. Build the wheel from the current tree.
     wheel_dir = tmp_path / "wheel"
@@ -92,7 +91,6 @@ def test_installed_wheel_renders_i18n_strings(tmp_path):
 
 
 @pytest.mark.integration
-@pytest.mark.timeout(300)  # overrides the global --timeout=30; cold-CI sdist build can exceed it
 def test_built_sdist_ships_locale_catalogs(tmp_path):
     """The sdist must carry locales/ too.
 

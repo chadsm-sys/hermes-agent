@@ -8,9 +8,9 @@ Override the image with ``HERMES_TEST_IMAGE`` env var to point at a pre-built
 image (faster local iteration); otherwise the ``built_image`` fixture builds
 the repo's Dockerfile once per session.
 
-Docker tests need longer timeouts than the suite default (30s), so every
-test under this directory is granted a 180s default via
-``pytest.mark.timeout`` applied at collection time.
+There is no per-test pytest timeout in this suite (pytest-timeout is not a
+dependency); the only wall-clock cap is the per-file kill in
+``scripts/run_tests_parallel.py``.
 """
 from __future__ import annotations
 
@@ -38,16 +38,14 @@ def _docker_available() -> bool:
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
-    """Apply docker-suite policy: timeout bump + skip on missing docker."""
+    """Apply docker-suite policy: skip on missing docker."""
     docker_ok = _docker_available()
     skip_docker = pytest.mark.skip(
         reason="Docker not available or daemon not running",
     )
-    extend_timeout = pytest.mark.timeout(180)
     for item in items:
         if "tests/docker/" not in str(item.fspath).replace(os.sep, "/"):
             continue
-        item.add_marker(extend_timeout)
         if not docker_ok:
             item.add_marker(skip_docker)
 
