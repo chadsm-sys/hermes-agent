@@ -14,6 +14,7 @@ framework carrying his personal Chief of Staff layer.
 | [MEMORY_MONITOR_VERIFICATION.md](MEMORY_MONITOR_VERIFICATION.md) | Verified finding: `gateway/memory_monitor.py` is unused in production (TRUE_UNUSED) |
 | [UNWIRED_FEATURES_REGISTER.md](UNWIRED_FEATURES_REGISTER.md) | Top 10 documented-but-unwired features, with evidence and smallest corrections |
 | [UPSTREAM_PR_PLAN.md](UPSTREAM_PR_PLAN.md) | Remediation plan: classifications, 4 reviewable upstream PRs, maintainer summary |
+| [PREPARED_PRS.md](PREPARED_PRS.md) | Ready-to-open PR bodies for branches A-C, PR D maintainer question, submission order |
 
 Documentation only — nothing in this directory changes runtime behavior.
 Where these documents conflict with `docs/chief-of-staff/MISSION.md`,
