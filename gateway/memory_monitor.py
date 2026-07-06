@@ -24,8 +24,10 @@ Design notes (parity with the Cline port):
     optional; when neither works we emit a single WARNING and disable
     the monitor rather than crashing the gateway.
 
-Config: ``logging.memory_monitor`` in ``config.yaml`` — see
-``hermes_cli/config.py`` for the defaults block.
+Not wired into gateway startup yet: no production code path calls
+``start_memory_monitoring()`` and no config key controls it. To get the
+``[MEMORY]`` series today, call ``start_memory_monitoring()`` explicitly
+(e.g. from a debug shell or a temporary patch).
 """
 
 from __future__ import annotations

@@ -1,3 +1,7 @@
+# RELEASE-TIME TEMPLATE — not installable as committed. The url pins an old
+# release and the sha256 is a placeholder; both must be updated to the current
+# release's semver-named sdist asset (attached by scripts/release.py) before
+# publishing this formula. `brew install` against this file as-is will fail.
 class HermesAgent < Formula
   include Language::Python::Virtualenv
 

@@ -10,10 +10,12 @@ flows through, regardless of where it came from:
   * ``blueprint``   — the user installed a skill that carries a ``blueprint:`` block
                    (see ``tools/blueprints.py``); installing it registers a
                    suggestion instead of auto-scheduling.
-  * ``usage``    — the background self-improvement review noticed a recurring
-                   ask that a scheduled job would serve.
-  * ``integration`` — the user connected an account (Gmail, GitHub, ...) and
-                   the obvious automations for that surface are offered.
+  * ``usage``    — RESERVED, no producer yet: intended for a background
+                   self-improvement review that notices a recurring ask a
+                   scheduled job would serve.
+  * ``integration`` — RESERVED, no producer yet: intended for offering the
+                   obvious automations when the user connects an account
+                   (Gmail, GitHub, ...).
 
 Accepting a suggestion just calls the existing ``cron.jobs.create_job`` with
 the stored ``job_spec`` — there is NO second job engine. Suggestions never
