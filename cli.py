@@ -5730,7 +5730,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Get terminal config from environment (which was set from cli-config.yaml)
         terminal_env = os.getenv("TERMINAL_ENV", "local")
         terminal_cwd = os.getenv("TERMINAL_CWD", os.getcwd())
-        terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "60")
+        terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "180")
         
         user_config_path = _hermes_home / 'config.yaml'
         project_config_path = Path(__file__).parent / 'cli-config.yaml'
@@ -13522,7 +13522,7 @@ def main(
         provider: Inference provider ("auto", "openrouter", "nous", "openai-codex", "zai", "kimi-coding", "minimax", "minimax-cn")
         api_key: API key for authentication
         base_url: Base URL for the API
-        max_turns: Maximum tool-calling iterations (default: 60)
+        max_turns: Maximum tool-calling iterations (default: 90)
         verbose: Enable verbose logging
         compact: Use compact display mode
         list_tools: List available tools and exit
