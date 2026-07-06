@@ -62,10 +62,12 @@ websockets, grpc, …) are pinned to WARNING.
    counts, and finish reasons; `session_search`/FTS5 or plain `sqlite3`
    both work. Sessions rotate on context compression — follow
    `parent_session_id` lineage to walk a long conversation.
-5. **Memory leaks / RSS growth:** grep `[MEMORY]` for the
-   `rss=… gc=… threads=… uptime=…` time series emitted every 5 minutes
-   by `gateway/memory_monitor.py` (baseline at start, snapshot at
-   shutdown so last-RSS-before-exit is always logged).
+5. **Memory leaks / RSS growth:** `gateway/memory_monitor.py` can emit
+   a `[MEMORY] rss=… gc=… threads=… uptime=…` time series (baseline at
+   start, snapshot at shutdown) — but note it is **not wired into any
+   production path**: nothing calls `start_memory_monitoring()`, so the
+   series only appears if you start it manually (see
+   [MEMORY_MONITOR_VERIFICATION.md](MEMORY_MONITOR_VERIFICATION.md)).
 
 For deeper telemetry, register an observer plugin against the
 `hermes.observer.v1` contract (`docs/observability/README.md`) — hooks

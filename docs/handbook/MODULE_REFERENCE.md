@@ -219,8 +219,10 @@ dedup) and 34 Telegram files.
 
 **Future improvements.** `run.py` (799 KB) and `slash_commands.py`
 (177 KB) are the largest refactor targets; `memory_monitor`'s
-`start_memory_monitoring` appears config-gated with no production
-call site found — verify wiring. Streaming edit cadence is
+`start_memory_monitoring` is **verified unused in production** — no
+call site, and the config key its docstring claims does not exist
+(see [MEMORY_MONITOR_VERIFICATION.md](MEMORY_MONITOR_VERIFICATION.md)).
+Streaming edit cadence is
 per-platform tuned by hand; a shared pacing model would reduce drift.
 
 ## 6. TUI stack — `ui-tui/`, `tui_gateway/`, `apps/desktop/`
