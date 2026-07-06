@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0",
+  "graph_version": "0.1.0-seed",
+  "generated_for": "hermes-agent",
+  "repo_version": "0.16.0",
+  "config_version": 29,
+  "commit": "da9f2dc",
+  "generated_at": null,
+  "_note": "Hand-authored VERIFIED SEED. Not the full graph. Every node/edge below passed a GRAPH_DRIFT_REPORT.md probe. Demonstrates all 14 node types and all 12 edge types so a future generator has a schema target. See GRAPH_SCHEMA.md.",
+  "nodes": [
+    { "id": "subsystem:agent-core", "type": "Subsystem", "name": "Agent core", "path": "run_agent.py", "symbol": "run_agent.py::AIAgent", "summary": "Conversation loop, tool orchestration, dispatch.", "owner": "core", "attrs": { "modules": ["run_agent.py", "model_tools.py", "toolsets.py", "tools/registry.py"], "config_keys": ["agent", "delegation", "compression"] }, "source": "AGENTS.md; run_agent.py:320" },
+    { "id": "subsystem:gateway", "type": "Subsystem", "name": "Messaging gateway", "path": "gateway/", "symbol": "gateway/run.py::GatewayRunner", "summary": "~20 platform adapters, per-session agents, watchers.", "owner": "gateway", "attrs": {}, "source": "gateway/run.py:2130" },
+
+    { "id": "service:gateway-runner", "type": "Service", "name": "GatewayRunner", "path": "gateway/run.py", "symbol": "gateway/run.py::start_gateway", "summary": "Own process; hosts cron/kanban/curator/watchers.", "owner": "gateway", "attrs": { "lock": "gateway.lock", "pid": "gateway.pid" }, "source": "gateway/run.py:16304" },
+    { "id": "service:cron-ticker", "type": "Service", "name": "Cron ticker", "path": "gateway/run.py", "symbol": "gateway/run.py::_start_cron_ticker", "summary": "Daemon thread inside gateway, 60s tick.", "owner": "cron", "attrs": { "interval_s": 60 }, "source": "gateway/run.py:16209" },
+    { "id": "service:curator", "type": "Service", "name": "Curator", "path": "agent/curator.py", "symbol": "agent/curator.py::maybe_run_curator", "summary": "Skill maintenance; polled hourly, runs ~weekly.", "owner": "skills", "attrs": { "gate": "interval_hours default 7d", "scope": "created_by=agent skills only" }, "source": "agent/curator.py" },
+    { "id": "service:dashboard", "type": "Service", "name": "Dashboard web server", "path": "hermes_cli/web_server.py", "symbol": "hermes_cli/web_server.py", "summary": "FastAPI SPA + PTY-embedded TUI.", "owner": "dashboard", "attrs": { "port": 9119, "host": "127.0.0.1" }, "source": "hermes_cli/subcommands/dashboard.py:26" },
+    { "id": "service:tui-gateway", "type": "Service", "name": "tui_gateway", "path": "tui_gateway/server.py", "symbol": "tui_gateway/server.py::dispatch", "summary": "JSON-RPC backend for TUI/desktop/dashboard chat.", "owner": "tui", "attrs": { "transports": ["stdio", "websocket"] }, "source": "tui_gateway/server.py" },
+
+    { "id": "entrypoint:hermes", "type": "EntryPoint", "name": "hermes", "path": "hermes_cli/main.py", "symbol": "hermes_cli.main:main", "summary": "Primary multi-subcommand CLI.", "owner": "cli", "attrs": { "kind": "console_script" }, "source": "pyproject.toml:277" },
+    { "id": "entrypoint:hermes-acp", "type": "EntryPoint", "name": "hermes-acp", "path": "acp_adapter/entry.py", "symbol": "acp_adapter.entry:main", "summary": "ACP stdio server for editors.", "owner": "core", "attrs": { "kind": "console_script", "transport": "stdio-jsonrpc" }, "source": "pyproject.toml:279" },
+
+    { "id": "cli:gateway", "type": "CLI", "name": "hermes gateway", "path": "hermes_cli/gateway.py", "symbol": "hermes_cli/gateway.py::gateway_command", "summary": "Gateway lifecycle (run/setup/install/start/stop/status).", "owner": "gateway", "attrs": {}, "source": "hermes_cli/main.py:2332" },
+    { "id": "cli:cron", "type": "CLI", "name": "hermes cron", "path": "hermes_cli/cron.py", "symbol": "hermes_cli/cron.py", "summary": "Cron job CRUD + one-shot tick.", "owner": "cron", "attrs": {}, "source": "hermes_cli/main.py" },
+    { "id": "cli:model", "type": "CLI", "name": "hermes model", "path": "hermes_cli/model_switch.py", "symbol": "hermes_cli/model_switch.py", "summary": "Choose provider/model.", "owner": "providers", "attrs": {}, "source": "hermes_cli/subcommands/model.py" },
+
+    { "id": "plugin:memory-honcho", "type": "Plugin", "name": "honcho memory provider", "path": "plugins/memory/honcho/", "symbol": "plugins/memory/honcho/__init__.py", "summary": "Cross-session dialectic user modeling.", "owner": "memory", "attrs": { "kind": "exclusive", "env": ["HONCHO_API_KEY"] }, "source": "plugins/memory/honcho/plugin.yaml" },
+
+    { "id": "scheduler:cron", "type": "Scheduler", "name": "Cron scheduler", "path": "cron/scheduler.py", "symbol": "cron/scheduler.py::tick", "summary": "Fires due agent jobs; fresh AIAgent per job.", "owner": "cron", "attrs": { "lock": "cron/.tick.lock", "inactivity_timeout_s": 600 }, "source": "cron/scheduler.py:1970" },
+    { "id": "scheduler:kanban-dispatcher", "type": "Scheduler", "name": "Kanban dispatcher", "path": "gateway/kanban_watchers.py", "symbol": "gateway/kanban_watchers.py::_kanban_dispatcher_watcher", "summary": "Spawns worker profiles for ready tasks.", "owner": "kanban", "attrs": { "interval_key": "kanban.dispatch_interval_seconds", "failure_limit": 2 }, "source": "gateway/run.py:5383" },
+
+    { "id": "serviceunit:systemd-gateway", "type": "ServiceUnit", "name": "systemd gateway unit", "path": "hermes_cli/gateway.py", "symbol": "hermes_cli/gateway.py::generate_systemd_unit", "summary": "Restart=always; SIGUSR1 drain reload.", "owner": "gateway", "attrs": { "restart": "always", "restart_sec": 5 }, "source": "hermes_cli/gateway.py:2387" },
+    { "id": "serviceunit:s6-dashboard", "type": "ServiceUnit", "name": "s6 dashboard service", "path": "docker/s6-rc.d/dashboard/", "symbol": "docker/s6-rc.d/dashboard/run", "summary": "Gated on HERMES_DASHBOARD; finish 125 = stay down.", "owner": "packaging", "attrs": { "gate_env": "HERMES_DASHBOARD" }, "source": "docker/s6-rc.d/dashboard/run" },
+
+    { "id": "config:agent", "type": "Config", "name": "agent (config.yaml)", "path": "hermes_cli/config.py", "symbol": "DEFAULT_CONFIG.agent", "summary": "Core agent-loop behavior.", "owner": "core", "attrs": { "section": "agent", "secrets_only": false, "keys": ["max_turns", "gateway_timeout", "api_max_retries"] }, "source": "hermes_cli/config.py:817" },
+    { "id": "config:kanban", "type": "Config", "name": "kanban (config.yaml)", "path": "hermes_cli/config.py", "symbol": "DEFAULT_CONFIG.kanban", "summary": "Dispatcher loop config.", "owner": "kanban", "attrs": { "section": "kanban", "keys": ["dispatch_in_gateway", "dispatch_interval_seconds", "failure_limit"] }, "source": "hermes_cli/config.py:2115" },
+    { "id": "config:model", "type": "Config", "name": "model (config.yaml)", "path": "hermes_cli/config.py", "symbol": "DEFAULT_CONFIG.model", "summary": "Default provider/model selection.", "owner": "providers", "attrs": { "section": "model", "default": "anthropic/claude-opus-4.6" }, "source": "cli-config.yaml.example" },
+
+    { "id": "api:tui-jsonrpc", "type": "API", "name": "tui_gateway JSON-RPC", "path": "tui_gateway/server.py", "symbol": "tui_gateway/server.py::dispatch", "summary": "session.*, prompt.*, slash.exec, events.", "owner": "tui", "attrs": { "protocol": "json-rpc-2.0" }, "source": "tui_gateway/server.py:845" },
+    { "id": "api:dashboard-rest", "type": "API", "name": "dashboard REST + WS", "path": "hermes_cli/web_server.py", "symbol": "hermes_cli/web_server.py", "summary": "~200 /api/* routes + /api/ws + /api/pty.", "owner": "dashboard", "attrs": { "ws": ["/api/ws", "/api/pty", "/api/pub"] }, "source": "hermes_cli/web_server.py:10366" },
+
+    { "id": "provider:nous", "type": "Provider", "name": "Nous Portal", "path": "plugins/model-providers/nous/", "symbol": "plugins/model-providers/nous/__init__.py", "summary": "Nous Research Portal inference.", "owner": "providers", "attrs": { "api_mode": "chat_completions", "auth_type": "oauth_device_code", "base_url": "inference.nousresearch.com/v1" }, "source": "plugins/model-providers/nous/__init__.py" },
+    { "id": "provider:anthropic", "type": "Provider", "name": "Anthropic", "path": "plugins/model-providers/anthropic/", "symbol": "plugins/model-providers/anthropic/__init__.py", "summary": "Claude via Messages API.", "owner": "providers", "attrs": { "api_mode": "anthropic_messages", "auth_type": "api_key", "env": ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] }, "source": "plugins/model-providers/anthropic/__init__.py" },
+
+    { "id": "model:claude-opus-4.6", "type": "Model", "name": "claude-opus-4.6", "path": null, "symbol": null, "summary": "Default model in cli-config.yaml.example.", "owner": "providers", "attrs": { "provider": "anthropic" }, "source": "cli-config.yaml.example" },
+
+    { "id": "tool:terminal", "type": "Tool", "name": "terminal", "path": "tools/terminal_tool.py", "symbol": "tools/terminal_tool.py::terminal", "summary": "Shell exec across pluggable backends.", "owner": "core", "attrs": { "toolset": "terminal", "gate": "check_terminal_requirements" }, "source": "tools/terminal_tool.py" },
+    { "id": "tool:delegate_task", "type": "Tool", "name": "delegate_task", "path": "tools/delegate_tool.py", "symbol": "tools/delegate_tool.py::delegate_task", "summary": "Spawn child subagents (leaf/orchestrator).", "owner": "core", "attrs": { "toolset": "delegation", "max_spawn_depth": 1 }, "source": "tools/delegate_tool.py:2044" },
+
+    { "id": "storage:state-db", "type": "Storage", "name": "state.db", "path": "hermes_state.py", "symbol": "hermes_state.py::SessionDB", "summary": "SQLite sessions/messages + FTS5.", "owner": "core", "attrs": { "engine": "sqlite", "fts": ["messages_fts", "messages_fts_trigram"] }, "source": "hermes_state.py:509" },
+    { "id": "storage:kanban-db", "type": "Storage", "name": "kanban.db", "path": "hermes_cli/kanban_db.py", "symbol": "hermes_cli/kanban_db.py", "summary": "Multi-agent board (single-writer).", "owner": "kanban", "attrs": { "engine": "sqlite-wal" }, "source": "hermes_cli/kanban_db.py" },
+
+    { "id": "dependency:openai", "type": "Dependency", "name": "openai", "path": "pyproject.toml", "symbol": null, "summary": "OpenAI SDK; core inference client.", "owner": "core", "attrs": { "pin": "==2.24.0", "kind": "pypi" }, "source": "pyproject.toml" },
+    { "id": "dependency:docker-daemon", "type": "Dependency", "name": "Docker daemon", "path": null, "symbol": null, "summary": "External daemon for the docker terminal backend.", "owner": "core", "attrs": { "kind": "external-service" }, "source": "tools/environments/docker.py" }
+  ],
+  "edges": [
+    { "src": "entrypoint:hermes", "type": "calls", "dst": "cli:gateway", "evidence": "hermes_cli/main.py::cmd_gateway", "source": "hermes_cli/main.py" },
+    { "src": "entrypoint:hermes", "type": "calls", "dst": "cli:cron", "evidence": "hermes_cli/main.py::cmd_cron", "source": "hermes_cli/main.py" },
+    { "src": "entrypoint:hermes", "type": "calls", "dst": "cli:model", "evidence": "hermes_cli/main.py::cmd_model", "source": "hermes_cli/main.py" },
+    { "src": "entrypoint:hermes-acp", "type": "calls", "dst": "subsystem:agent-core", "evidence": "acp_adapter/server.py::HermesACPAgent", "source": "acp_adapter/entry.py" },
+    { "src": "cli:gateway", "type": "calls", "dst": "service:gateway-runner", "evidence": "hermes_cli/gateway.py::run_gateway -> start_gateway", "source": "hermes_cli/gateway.py:3991" },
+    { "src": "cli:cron", "type": "calls", "dst": "scheduler:cron", "evidence": "hermes cron tick -> tick()", "source": "cron/scheduler.py" },
+    { "src": "service:gateway-runner", "type": "calls", "dst": "subsystem:agent-core", "cardinality": "1:N", "evidence": "gateway/run.py::_run_agent", "source": "gateway/run.py:13571" },
+    { "src": "api:tui-jsonrpc", "type": "calls", "dst": "subsystem:agent-core", "evidence": "tui_gateway/server.py::_make_agent", "source": "tui_gateway/server.py:3286" },
+    { "src": "api:dashboard-rest", "type": "calls", "dst": "service:tui-gateway", "condition": "/api/ws", "evidence": "web_server.py -> tui_gateway.ws.handle_ws", "source": "hermes_cli/web_server.py" },
+
+    { "src": "subsystem:gateway", "type": "spawns", "dst": "service:cron-ticker", "evidence": "gateway/run.py::_start_cron_ticker thread", "source": "gateway/run.py:16700" },
+    { "src": "scheduler:cron", "type": "spawns", "dst": "subsystem:agent-core", "cardinality": "1:N", "condition": "per due job", "evidence": "cron/scheduler.py::run_job", "source": "cron/scheduler.py:1306" },
+    { "src": "service:cron-ticker", "type": "spawns", "dst": "service:curator", "condition": "hourly (CURATOR_EVERY)", "evidence": "agent/curator.py::maybe_run_curator", "source": "gateway/run.py:16290" },
+    { "src": "tool:delegate_task", "type": "spawns", "dst": "subsystem:agent-core", "cardinality": "1:N", "condition": "child subagent", "evidence": "tools/delegate_tool.py::_build_child_agent", "source": "tools/delegate_tool.py:963" },
+    { "src": "service:dashboard", "type": "spawns", "dst": "service:tui-gateway", "condition": "/api/pty PTY", "evidence": "web_server.py::pty_ws -> hermes --tui", "source": "hermes_cli/web_server.py:10366" },
+
+    { "src": "service:dashboard", "type": "imports", "dst": "service:tui-gateway", "evidence": "web_server imports tui_gateway.ws", "source": "hermes_cli/web_server.py" },
+    { "src": "subsystem:agent-core", "type": "imports", "dst": "dependency:openai", "evidence": "run_agent.py imports openai", "source": "run_agent.py" },
+
+    { "src": "tool:terminal", "type": "registers-into", "dst": "subsystem:agent-core", "evidence": "tools/terminal_tool.py::registry.register", "source": "tools/registry.py:234" },
+    { "src": "plugin:memory-honcho", "type": "registers-into", "dst": "subsystem:agent-core", "condition": "one active provider", "evidence": "agent/memory_manager.py::add_provider", "source": "plugins/memory/__init__.py" },
+
+    { "src": "entrypoint:hermes", "type": "reads-config", "dst": "config:agent", "evidence": "startup load_config", "source": "hermes_cli/main.py:526" },
+    { "src": "scheduler:cron", "type": "reads-config", "dst": "config:agent", "evidence": "cron reads agent.disabled_toolsets", "source": "cron/scheduler.py" },
+    { "src": "service:curator", "type": "reads-config", "dst": "config:agent", "condition": "curator.* section", "evidence": "agent/curator.py::is_enabled", "source": "agent/curator.py" },
+    { "src": "scheduler:kanban-dispatcher", "type": "reads-config", "dst": "config:kanban", "evidence": "kanban.dispatch_interval_seconds", "source": "gateway/kanban_watchers.py" },
+    { "src": "cli:model", "type": "reads-config", "dst": "config:model", "evidence": "hermes model reads/writes model section", "source": "hermes_cli/model_switch.py" },
+
+    { "src": "scheduler:cron", "type": "delivers-to", "dst": "service:gateway-runner", "condition": "uses live adapters", "evidence": "cron/scheduler.py::_deliver_result", "source": "cron/scheduler.py" },
+
+    { "src": "scheduler:kanban-dispatcher", "type": "gated-by", "dst": "config:kanban", "condition": "kanban.dispatch_in_gateway", "evidence": "default true", "source": "gateway/run.py:5383" },
+    { "src": "tool:terminal", "type": "gated-by", "dst": "dependency:docker-daemon", "condition": "terminal.backend=docker", "evidence": "check_terminal_requirements", "source": "tools/terminal_tool.py:2468" },
+    { "src": "model:claude-opus-4.6", "type": "gated-by", "dst": "provider:anthropic", "condition": "reachable only via provider", "evidence": "provider profile", "source": "plugins/model-providers/anthropic/__init__.py" },
+
+    { "src": "service:gateway-runner", "type": "stores-in", "dst": "storage:state-db", "evidence": "gateway SessionStore -> SessionDB", "source": "gateway/session.py:701" },
+
+    { "src": "serviceunit:systemd-gateway", "type": "supervises", "dst": "service:gateway-runner", "evidence": "ExecStart gateway run; Restart=always", "source": "hermes_cli/gateway.py:2387" },
+    { "src": "serviceunit:s6-dashboard", "type": "supervises", "dst": "service:dashboard", "evidence": "s6-rc longrun", "source": "docker/s6-rc.d/dashboard/run" },
+
+    { "src": "service:gateway-runner", "type": "starts-before", "dst": "service:cron-ticker", "evidence": "cron thread started after runner.start()", "source": "gateway/run.py:16689" },
+
+    { "src": "provider:anthropic", "type": "fails-to", "dst": "subsystem:agent-core", "condition": "provider down/429/bad key", "evidence": "sanitized error reply; fallback_model", "source": "run_agent.py" },
+    { "src": "provider:nous", "type": "fails-to", "dst": "subsystem:agent-core", "condition": "account-wide 429", "evidence": "agent/nous_rate_guard.py breaker", "source": "agent/nous_rate_guard.py" },
+    { "src": "dependency:docker-daemon", "type": "fails-to", "dst": "tool:terminal", "condition": "daemon down", "evidence": "docker backend hidden by check_fn", "source": "tools/environments/docker.py" },
+
+    { "src": "scheduler:kanban-dispatcher", "type": "owns", "dst": "storage:kanban-db", "condition": "single-writer invariant", "evidence": "embedded XOR standalone dispatcher", "source": "hermes_cli/kanban_db.py" }
+  ]
+}
