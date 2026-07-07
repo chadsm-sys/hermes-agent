@@ -6897,6 +6897,7 @@ def run_daemon(
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
+    spawn_fn=None,
 ) -> None:
     """Run the dispatcher in a loop until interrupted.
 
@@ -6904,6 +6905,10 @@ def run_daemon(
     on SIGINT / SIGTERM so ``hermes kanban daemon`` is systemd-friendly.
     ``stop_event`` (a :class:`threading.Event`) and ``on_tick`` (a
     callable receiving the :class:`DispatchResult`) are test hooks.
+    ``spawn_fn`` is forwarded to :func:`dispatch_once` on every tick
+    (``None`` = the default spawn), so alternate worker lanes — e.g. the
+    Claude Code CLI lane in :mod:`hermes_cli.claude_code_spawn` — plug into
+    the long-lived daemon the same way they plug into a single tick.
     """
     import signal
     import threading
@@ -6930,6 +6935,7 @@ def run_daemon(
             with contextlib.closing(connect()) as conn:
                 res = dispatch_once(
                     conn,
+                    spawn_fn=spawn_fn,
                     max_spawn=max_spawn,
                     failure_limit=failure_limit,
                 )

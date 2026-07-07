@@ -2137,9 +2137,12 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    from hermes_cli.claude_code_spawn import resolve_spawn_fn
+
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn,
+            spawn_fn=resolve_spawn_fn(),
             dry_run=args.dry_run,
             max_spawn=max_spawn,
             max_in_progress=max_in_progress,
@@ -2330,12 +2333,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         except Exception:
             return False
 
+    from hermes_cli.claude_code_spawn import resolve_spawn_fn
+
     try:
         kb.run_daemon(
             interval=args.interval,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             on_tick=_on_tick,
+            spawn_fn=resolve_spawn_fn(),
         )
     finally:
         if pidfile:
