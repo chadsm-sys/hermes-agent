@@ -1,8 +1,22 @@
 # CTO HANDOFF — Olympus, Year Five
 
-Status: design fiction — a letter from 2031, written 2026-07-07, to
-stress-test today's architecture against its own future. Nothing in this
-document is wired. Everything in it is meant to be argued with.
+Status: **narrative companion — non-normative.** Design fiction: a
+letter from 2031, written 2026-07-07, to stress-test today's
+architecture against its own future.
+
+This document is a reflective artifact, not a governing specification.
+It holds no constitutional status — where it appears to disagree with
+[MISSION.md](../chief-of-staff/MISSION.md) or its six children, the
+constitution wins, always. Its future events are fiction; no
+implementation requirement may be derived from them. It is preserved
+because it explains the *spirit* of Olympus in a way a specification
+cannot:
+
+- the written trail matters;
+- authority remains external;
+- PAUSE has economic value;
+- reports must stay truthful even when unread;
+- walls exist even when the system is correct.
 
 > Mission Control is the **Executive Brain**. Hermes is the **Executive
 > Assistant**. Chad is the **Executive**.
