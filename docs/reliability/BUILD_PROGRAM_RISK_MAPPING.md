@@ -302,4 +302,115 @@ Honorable mentions in the same tier: HB-03 (the reviewer flatlines and nothing m
 
 ---
 
+## Appendix A — Full 100-scenario grading table
+
+Grades: **M** = materially mitigated (credit 1.0), **P** = partially (0.5), **U** = untouched (0). Weight 3 = Top-25 member. "Earliest" = first mission providing the final grade (earlier partial contributor in parentheses). Grades reflect the completed 25-mission program.
+
+| ID | Wt | Grade | Earliest | Basis (one line) |
+|---|---|---|---|---|
+| OP-01 | 1 | M | M7 (P: M2) | Classifier holds cleanly; router pages only four classes; queue *is* containment |
+| OP-02 | 1 | P | M2 | Graceful-starvation doctrine; runway/expiry instruments absent |
+| OP-03 | 3 | P | M19 | Coach judgment preview; approval-latency trend absent |
+| OP-04 | 1 | P | M7 | One-question rule limits blast radius; send-staging absent |
+| OP-05 | 1 | P | M2 | Do-nothing default safe; post-call rule is Chad's to author |
+| OP-06 | 3 | M | M12 (P: M3) | Four-class deny-by-default router; M25 makes the dose measurable |
+| OP-07 | 1 | M | M7 (P: M1) | Contradiction classifies NEEDS_CHAD; MC owns the plan |
+| OP-08 | 1 | P | M15 | confidence_changes proxy; instruction ledger/expiry absent |
+| OP-09 | 1 | P | M17 | Governed stores make hand-edits foreign writes; reconciliation manual |
+| OP-10 | 1 | M | M23 (P: M18) | Daily packet = dead-man switch once adapters are live |
+| MC-01 | 1 | M | M18 | Fail-loud store, `.corrupt-<ts>` backup, refuse-to-dispatch |
+| MC-02 | 1 | P | M18 | Ritual machinery exists; scheduler liveness monitoring absent |
+| MC-03 | 1 | P | M18 | Mission IDs make duplicates detectable; idempotent dispatch not evidenced |
+| MC-04 | 1 | P | M18 (M10) | Evening reconciliation net + evidence-paired transitions; staleness rule absent |
+| MC-05 | 1 | M | M18 (P: M7) | Resume-plan required at classification; waiting_for_you surfaces age |
+| MC-06 | 1 | P | M13 | Ranked order exists; preemption at resource contention absent |
+| MC-07 | 1 | M | M10 | Formal RESOLVE-with-reason path; wedge is containment working |
+| MC-08 | 1 | U | — | Ritual timing is an operator value; no mission touches it |
+| MC-09 | 3 | P | M15 | Both-days/≥2-obs resist fictions; close-of-books re-verification absent |
+| MC-10 | 1 | M | M14 (P: M5) | ONE recommendation regardless of queue depth |
+| MC-11 | 1 | M | M8 (P: M6) | All-or-nothing parse + major-match versioning; live exposure at M23 |
+| MC-12 | 1 | P | M18 | Mission IDs blunt re-dispatch; mandatory reconciliation mode absent |
+| HM-01 | 1 | U | — | Worktree/commit discipline is Hermes ops practice, not a program mission |
+| HM-02 | 1 | U | — | Boot health checks not in program |
+| HM-03 | 1 | U | — | Disk thresholds/high-water stop not in program (feed channel exists, instrument doesn't) |
+| HM-04 | 3 | U | — | Evidence-retention-as-governed-data policy not in program |
+| HM-05 | 1 | U | — | Scheduled fsck not in program |
+| HM-06 | 1 | U | — | Worktree janitor not in program |
+| HM-07 | 1 | P | M7 | Failure-ceiling is a named PAUSE reason; the ceilings themselves unbuilt |
+| HM-08 | 1 | U | — | Scope-vs-mission review gate is HB machinery, outside program |
+| HM-09 | 1 | U | — | Environment manifest/smoke checks not in program |
+| HM-10 | 1 | P | M2 | Auth storm ⇒ wait loudly; never self-repair credentials |
+| HM-11 | 1 | P | M10 | UNKNOWN first-class makes "the host is lying" representable |
+| HM-12 | 1 | U | — | Manifest diffing not in program |
+| HB-01 | 1 | U | — | Review-queue-age metric not in program |
+| HB-02 | 1 | U | — | Transactional-verdict machinery outside program |
+| HB-03 | 3 | U | — | Finding-rate alarm and canary defects not in program |
+| HB-04 | 1 | P | M6 | Fail-loud schema validation shortens the fester window |
+| HB-05 | 1 | P | M21 | Current-contracts doc is the reviewer-context refresh source |
+| HB-06 | 3 | P | M4 | Deterministic spine is the only uncorrelated layer; review correlation untouched |
+| HB-07 | 3 | U | — | Merge-audit invariant not in program |
+| HB-08 | 1 | U | — | Review-duration baselines not in program |
+| HB-09 | 1 | U | — | Fresh-context-per-review hygiene outside program |
+| TE-01 | 1 | M | M15 (P: M11) | ≥2-days rule + evidence-gated promotion + recorder provenance |
+| TE-02 | 1 | M | M16 | Contradiction flagged, never auto-resolved, both records persist |
+| TE-03 | 1 | P | M16 | Fail-loud open; recomputable-from-evidence; trust floor unbuilt |
+| TE-04 | 3 | U | — | Demotion-replay-forward on restore not in program |
+| TE-05 | 1 | P | M11 | Closed allowlist bounds recorders; idempotent event identity unbuilt; M22/M24 widen surface |
+| TE-06 | 1 | P | M15 | New claims honest; no decay/re-validation for old promotions |
+| TE-07 | 3 | P | M16 (M11) | Provenance makes circular chains findable; enforcement absent; **M24 worsens** |
+| TE-08 | 1 | P | M2 | Authority-never-inferred backstop; scope audit unbuilt |
+| TE-09 | 1 | U | — | NTP/timestamp sanity not in program |
+| TE-10 | 1 | U | — | Read-after-write/restart-diff verification not in program |
+| CF-01 | 3 | P | M2 (M7) | Conservative defaults + reproducible deterministic classifier; recognition gap remains |
+| CF-02 | 1 | M | M25 (P: M12) | Pooled deferrals + measured attention ledger enable the meta-packet |
+| CF-03 | 3 | P | M7 | Classification events exist; coverage audit unbuilt |
+| CF-04 | 1 | P | M7 | One-question discipline; subject-identity sequencing unbuilt |
+| CF-05 | 3 | P | M2 | Defaults never spend/send/bind; default-execution-rate metric unbuilt |
+| CF-06 | 1 | M | M23 (P: M12) | waiting_for_you from mission state, delivery-independent, now live |
+| CF-07 | 1 | U | — | Answered-but-holding audit not in program |
+| CF-08 | 3 | U | — | Effect-level classification at the last hop not in program |
+| CF-09 | 1 | P | M18 | PAUSE surfacing is a producer feature; conservation check unbuilt |
+| IS-01 | 1 | M | M17 | Priors + confidence machinery + human-evidence gate; never chases |
+| IS-02 | 1 | M | M17 | Ingest dedup with reject/flag/allow policy |
+| IS-03 | 1 | P | M17 | Per-type priors; source-concentration metric unbuilt |
+| IS-04 | 1 | P | M17 (M22) | Lifecycle expiry + receipts at presentation; age trigger unbuilt |
+| IS-05 | 3 | P | M17 | Three gates + pursuit packet; source-citation fields unbuilt |
+| IS-06 | 1 | P | M17 (M13) | Clamping + why_chosen receipts; plausibility bands unbuilt |
+| IS-07 | 1 | M | M17 | Atomic writes, fail-loud versioning, corrupt-backup convention |
+| IS-08 | 1 | M | M17 | Exact fingerprints reject replays loudly |
+| IS-09 | 1 | M | M17 | ALLOWED_TRANSITIONS terminal states; reasons recorded |
+| IS-10 | 1 | P | M17 (M3) | Legible determinism + weights-are-values; portfolio reporting unbuilt |
+| EW-01 | 3 | P | M22 | Forbidden-source rejection exercised live at the MC inbox boundary only |
+| EW-02 | 3 | U | — | Opaque-format default-deny not in program |
+| EW-03 | 3 | U | — | Per-case contexts, citation-per-assertion not in program |
+| EW-04 | 3 | U | — | Routing pins/egress logs not in program; M21 §10 excludes the gateway |
+| EW-05 | 1 | P | M22 (M21) | Boundary-rejection pattern exists and is named; dispatch-time scan unbuilt |
+| EW-06 | 3 | P | M16 | Faithful provenance makes case-rooted claims findable; recording-disable unbuilt |
+| EW-07 | 1 | U | — | Matter-close destruction process not in program |
+| EW-08 | 1 | U | — | Codename-at-intake discipline not in program |
+| EW-09 | 3 | U | — | Custody-chain audit not in program |
+| EW-10 | 3 | P | M2 | Division of labor is the defensible posture; methodology/records unbuilt |
+| IN-01 | 1 | U | — | Key-expiry horizon feed uninstrumented |
+| IN-02 | 1 | U | — | Backoff/PAUSE-on-external-block is ops practice, not a program mission |
+| IN-03 | 1 | P | M4 | Deterministic spine keeps governance alive through provider outage |
+| IN-04 | 3 | U | — | Canary tasks/outcome baselines not in program |
+| IN-05 | 1 | U | — | Queue-and-reconcile drill outside program |
+| IN-06 | 1 | U | — | Backup/restore testing not in program |
+| IN-07 | 1 | U | — | NTP monitoring not in program |
+| IN-08 | 1 | U | — | Layered connectivity probe not in program |
+| IN-09 | 1 | P | M2 | Credentials constitutionally human; wait loudly; horizons unbuilt |
+| IN-10 | 1 | P | M13 | Ranked order enables priority shedding; shedding policy unbuilt |
+| IN-11 | 1 | U | — | Storm-window recognition not in program |
+| IN-12 | 1 | U | — | Outside-in probes not in program |
+| OR-01 | 3 | P | M5 (M14) | Bottleneck discipline is the containment; mission-mix metric unbuilt |
+| OR-02 | 3 | P | M21 | Seams/invariants written with change control; parity audit unbuilt |
+| OR-03 | 1 | P | M21 | The contract is a dated map of the seams; rehearsal program absent |
+| OR-04 | 1 | M | M21 (P: M1) | Roles + enumerated mutation boundaries + one-writer-per-store, real |
+| OR-05 | 3 | P | M25 | Attention data exists; nothing measures the reader |
+| OR-06 | 3 | U | — | The continuity document is outside what Olympus can write |
+
+Cross-check: 19 M (Σ weight 21), 44 P (Σ weight 72), 37 U. Score = 21 + 0.5×72 = **57.0 / 152 = 37.5%**, matching Section 3.
+
+---
+
 *Lane 5, design-only. Mission numbers M1–M18 are reconstructions and labeled INFERRED throughout; cite them as such. No code was modified and no implementation tasks were generated.*

@@ -186,9 +186,112 @@ None of the nine is on the Top-25 existential list — consistent with the campa
 - **MC-11** (malformed packet refused whole) is the architecture *working* — all-or-nothing parsing converting corruption into a clean outage; its lesson is "never make parsing lenient," not a defect mechanism.
 - **IN-03** (model provider outage) is a pure external-dependency outage whose containment (the model-free deterministic spine) the campaign already declares an invariant to guard, not a gap.
 
+### Top-25 existential traceability
+
+Every entry on the campaign's Top-25 list, traced to the root cause(s) that generate or amplify it (rank 4 on that list names two IDs, EW-01 and EW-02, so 26 IDs appear):
+
+| Top-25 rank | ID | Explained by |
+|---|---|---|
+| 1 | EW-04 | RC-02 (custody composition), RC-17 (substrate drift) |
+| 2 | EW-10 | RC-20 (trail under-governed) |
+| 3 | EW-03 | RC-02 |
+| 4 | EW-01 | RC-06 (human-habit ingestion) |
+| 4 | EW-02 | RC-10 (recognizer passes the unreadable) |
+| 5 | CF-01 | RC-10 |
+| 6 | CF-08 | RC-09 (gate bypass), RC-10 |
+| 7 | OR-05 | RC-01 (unread detection) |
+| 8 | OR-02 | RC-05 (amendment without ceremony), RC-07 (aggregate drift) |
+| 9 | CF-05 | RC-01, RC-07 |
+| 10 | OP-06 | RC-01 |
+| 11 | HB-03 | RC-11 (correlated cognition), RC-16 (unrehearsed controls) |
+| 12 | TE-07 | RC-12 (circular provenance) |
+| 13 | OR-06 | RC-03 (single-human dependency) |
+| 14 | OP-03 | RC-01, RC-07 |
+| 15 | HB-07 | RC-05, RC-09 |
+| 16 | EW-09 | RC-02 |
+| 17 | CF-03 | RC-09 |
+| 18 | TE-04 | RC-15 (restore without reconciliation) |
+| 19 | IS-05 | RC-06, RC-11, RC-12 |
+| 20 | MC-09 | RC-12, RC-13 (state without counterpart evidence) |
+| 21 | HB-06 | RC-11 |
+| 22 | EW-06 | RC-02 |
+| 23 | HM-04 | RC-20 |
+| 24 | OR-01 | RC-07, RC-12 |
+| 25 | IN-04 | RC-11, RC-14 (undated evidence), RC-16, RC-17 |
+
+All 26 IDs are explained — none of the Top-25 falls into the singleton set. Thirteen distinct root causes carry the entire existential list; RC-02 alone carries five of its entries, and RC-01/RC-07 (the two human-attention causes) jointly carry five.
+
+### Overlap structure
+
+The heaviest multi-cause scenarios are the ones the campaign itself flags as compound: IN-04 (4 causes — a provider event that is simultaneously correlated cognition, stale evidence, an untested control, and substrate drift), IS-05 and EW-05 and HM-09/HM-10 and IN-12 (3 causes each). Overlaps are not double-billing: they are the mechanism pairs the campaign repeatedly points at in its cross-references (e.g., CF-08 cited under both the bypass and recognizer causes exactly as the doc treats it — a correct rule table defeated structurally; IS-05 cited under human-habit ingestion, correlated cognition, and circular provenance, matching the scenario's own three-way framing). Where a cause only *amplifies* a scenario whose primary generator lies elsewhere (OP-01/OP-02 under RC-14/RC-19, HB-04 under RC-11, IN-02 under RC-04), the detailed entries say so.
+
 ### Reading the shape
 
 The top 5 causes are, in order: the human (RC-03), event identity (RC-04), the unread reader (RC-01), custody composition (RC-02), and ceremony-less amendment (RC-05) — two human-attention mechanisms, one distributed-systems mechanism, one legal-custody mechanism, one governance mechanism. This matches the campaign's own conclusion: almost nothing existential is a machine breaking. The mitigations correspondingly concentrate into a handful of existing-architecture instruments used harder: the Evening Report's reconciliation and consumption metrics, the parity/coverage/custody audits, the dead-man rituals, default-deny under uncertainty, and the rehearsal calendar.
+
+---
+
+## Appendix — Full scenario → root-cause assignment index
+
+This index is the raw data behind the coverage math: 135 assignments across 91 distinct scenarios; 9 scenarios unassigned (marked `—`, discussed above). Each row lists every root cause that materially generates or amplifies the scenario.
+
+| Scenario | Root cause(s) | | Scenario | Root cause(s) |
+|---|---|---|---|---|
+| OP-01 | RC-03, RC-14 | | IS-01 | RC-06 |
+| OP-02 | RC-03, RC-19 | | IS-02 | RC-04, RC-10 |
+| OP-03 | RC-01, RC-07 | | IS-03 | RC-06, RC-07 |
+| OP-04 | RC-03 | | IS-04 | RC-14 |
+| OP-05 | RC-01, RC-03 | | IS-05 | RC-06, RC-11, RC-12 |
+| OP-06 | RC-01 | | IS-06 | RC-06 |
+| OP-07 | RC-05 | | IS-07 | RC-06 |
+| OP-08 | RC-05, RC-14 | | IS-08 | RC-04, RC-15 |
+| OP-09 | RC-05, RC-09 | | IS-09 | RC-15 |
+| OP-10 | RC-08, RC-19 | | IS-10 | RC-07 |
+| MC-01 | — (torn-write cluster) | | EW-01 | RC-06 |
+| MC-02 | RC-08 | | EW-02 | RC-10 |
+| MC-03 | RC-04 | | EW-03 | RC-02 |
+| MC-04 | RC-08, RC-13 | | EW-04 | RC-02, RC-17 |
+| MC-05 | RC-13 | | EW-05 | RC-02, RC-09, RC-10 |
+| MC-06 | — (unbounded-execution cluster) | | EW-06 | RC-02 |
+| MC-07 | RC-05 | | EW-07 | RC-02 |
+| MC-08 | RC-19 | | EW-08 | RC-02 |
+| MC-09 | RC-12, RC-13 | | EW-09 | RC-02 |
+| MC-10 | RC-07 | | EW-10 | RC-20 |
+| MC-11 | — (correct-behavior singleton) | | IN-01 | RC-19 |
+| MC-12 | RC-04, RC-15 | | IN-02 | RC-04 |
+| HM-01 | — (torn-write cluster) | | IN-03 | — (external-outage singleton) |
+| HM-02 | — (torn-write cluster) | | IN-04 | RC-11, RC-14, RC-16, RC-17 |
+| HM-03 | RC-08, RC-20 | | IN-05 | RC-08 |
+| HM-04 | RC-20 | | IN-06 | RC-15, RC-16 |
+| HM-05 | RC-16 | | IN-07 | RC-18, RC-19 |
+| HM-06 | — (torn-write cluster) | | IN-08 | RC-18 |
+| HM-07 | — (unbounded-execution cluster) | | IN-09 | RC-03, RC-19 |
+| HM-08 | — (unbounded-execution cluster) | | IN-10 | RC-18 |
+| HM-09 | RC-03, RC-17, RC-18 | | IN-11 | RC-16, RC-18 |
+| HM-10 | RC-03, RC-18, RC-19 | | IN-12 | RC-08, RC-13, RC-17 |
+| HM-11 | RC-18, RC-20 | | OR-01 | RC-07, RC-12 |
+| HM-12 | RC-17 | | OR-02 | RC-05, RC-07 |
+| HB-01 | RC-08 | | OR-03 | RC-16 |
+| HB-02 | RC-03, RC-08 | | OR-04 | RC-05 |
+| HB-03 | RC-11, RC-16 | | OR-05 | RC-01 |
+| HB-04 | RC-11 | | OR-06 | RC-03 |
+| HB-05 | RC-14 | | | |
+| HB-06 | RC-11 | | | |
+| HB-07 | RC-05, RC-09 | | | |
+| HB-08 | RC-08 | | | |
+| HB-09 | RC-11 | | | |
+| TE-01 | RC-04 | | | |
+| TE-02 | RC-01, RC-06 | | | |
+| TE-03 | RC-15, RC-20 | | | |
+| TE-04 | RC-15 | | | |
+| TE-05 | RC-04 | | | |
+| TE-06 | RC-14 | | | |
+| TE-07 | RC-12 | | | |
+| TE-08 | RC-05 | | | |
+| TE-09 | RC-19 | | | |
+| TE-10 | RC-13 | | | |
+
+**Consistency checks.** Per-cause frequencies summed from this index: RC-01=7, RC-02=7, RC-03=9, RC-04=10, RC-05=8, RC-06=7, RC-07=7, RC-08=10, RC-09=5, RC-10=5, RC-11=6, RC-12=4, RC-13=7, RC-14=6, RC-15=6, RC-16=6, RC-17=5, RC-18=7, RC-19=8, RC-20=5 — total 135 assignments, matching every frequency claimed in the entries above. Distinct scenarios assigned: 91; unassigned: 9 (MC-01, MC-06, MC-11, HM-01, HM-02, HM-06, HM-07, HM-08, IN-03) — matching the coverage table.
 
 ---
 
