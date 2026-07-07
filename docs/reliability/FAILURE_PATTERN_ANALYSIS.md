@@ -6,6 +6,12 @@
 
 **Method.** Each of the 100 scenarios was assigned to the underlying mechanism(s) that generate or materially amplify it. Mechanisms were then scored **frequency × impact**, where frequency = count of scenarios generated/amplified, and impact = worst-case impact class the cause feeds (Existential=5, Critical=4, High=3, Medium=2, per the campaign's own scale); ties broken first by number of Top-25 existential entries touched, then by highest Top-25 rank reached. A scenario may appear under multiple root causes; the coverage math at the end counts distinct scenarios (union), and states the multi-counting explicitly.
 
+**Contents.**
+(a) Summary table — rank, root cause, frequency, Top-25 touched, five-word mitigation.
+(b) Detailed entries — mechanism, scenario IDs, worst-case impact, smallest covering mitigation.
+(c) Coverage check — top-5/10/20 union coverage, Top-25 traceability, overlap structure, unexplained singletons.
+Appendix — full scenario → root-cause assignment index (the raw data behind the coverage math).
+
 ---
 
 ## (a) Summary table
