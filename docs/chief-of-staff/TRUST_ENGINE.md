@@ -1,5 +1,12 @@
 # TRUST_ENGINE — The Olympus Trust Engine
 
+Version: **1 — FROZEN as delivered, 2026-07-07.** Candidate
+constitutional governance document for Olympus. Amendments to this
+document require **operational evidence** — ledger entries, pilot
+findings, or MBP audit results demonstrating that the design mismeasures
+reality. Theoretical improvement is not a valid reason to change it.
+The validation pilot is [TRUST_ENGINE_PILOT.md](TRUST_ENGINE_PILOT.md).
+
 Status: **canonical design — nothing in this document is wired.** No code,
 no schema migration, no runtime path. This is the design for how Olympus
 earns, measures, loses, and rebuilds Chad's trust over years of operation.
