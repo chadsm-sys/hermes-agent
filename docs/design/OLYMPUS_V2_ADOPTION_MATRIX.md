@@ -3,6 +3,14 @@
 Status: **research / compatibility assessment only** (2026-07-07).
 Companion to `olympus-v2-reference-architecture.md` (same directory).
 
+> **Executive disposition (Chad, 2026-07-07): accepted as a research
+> appendix — not the governing implementation baseline.** The Build
+> Program remains authoritative. Of this matrix, the only takeaways
+> carried into v1 are the §8 ordering facts: consider D3 and R3 before
+> wiring milestone 1, and R4 before wiring milestone 2. All
+> EVIDENCE-FIRST items remain gated on the §7 checklist; nothing else
+> is adopted, scheduled, or reprioritized by this acceptance.
+
 This document classifies every **Replace**, **Merge**, **Delete**, and
 **Delay** recommendation from the Olympus v2 proposal against the Olympus
 v1 program as it actually stands: doctrine merged, Opportunity Scout and

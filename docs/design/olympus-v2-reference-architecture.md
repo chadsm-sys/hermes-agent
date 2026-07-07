@@ -3,6 +3,15 @@
 Status: **design only** (2026-07-07). No code, no implementation tasks.
 Author role: Chief Systems Architect, redesigning from first principles.
 
+> **Executive disposition (Chad, 2026-07-07): accepted as a research
+> appendix — not the governing implementation baseline.** The Build
+> Program remains authoritative. This branch is preserved as a strategic
+> reference until v1 operational evidence exists. The only actionable
+> takeaways carried into v1: consider D3 and R3 before wiring
+> milestone 1, and R4 before wiring milestone 2. No Build Program
+> reordering without evidence; no v1 architecture replacement; no v2
+> implementation start.
+
 This document answers one question:
 
 > *"If you started over today, knowing everything you've learned from the
