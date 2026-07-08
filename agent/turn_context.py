@@ -69,6 +69,7 @@ def build_turn_context(
     task_id: Optional[str],
     stream_callback,
     persist_user_message: Optional[str],
+    process_notification_event: Optional[dict] = None,
     *,
     restore_or_build_system_prompt,
     install_safe_stdio,
@@ -328,6 +329,7 @@ def build_turn_context(
             model=agent.model,
             platform=getattr(agent, "platform", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            process_notification_event=process_notification_event,
         )
         _ctx_parts: list[str] = []
         for r in _pre_results:

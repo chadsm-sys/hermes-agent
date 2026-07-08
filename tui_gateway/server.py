@@ -5971,13 +5971,17 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     sid_key = session.get("session_key") or ""
                     if sid_key:
                         try:
-                            goals_cfg = _load_cfg().get("goals") or {}
+                            cfg = _load_cfg()
+                            goals_cfg = cfg.get("goals") or {}
+                            council_cfg = cfg.get("council") or {}
                             goal_max_turns = int(goals_cfg.get("max_turns", 20) or 20)
                         except Exception:
                             goal_max_turns = 20
+                            council_cfg = {}
                         goal_mgr = GoalManager(
                             session_id=sid_key,
                             default_max_turns=goal_max_turns,
+                            council_config=council_cfg,
                         )
                         if goal_mgr.is_active():
                             decision = goal_mgr.evaluate_after_turn(
@@ -8216,11 +8220,14 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4001, "no session key")
 
         try:
-            goals_cfg = _load_cfg().get("goals") or {}
+            cfg = _load_cfg()
+            goals_cfg = cfg.get("goals") or {}
+            council_cfg = cfg.get("council") or {}
             max_turns = int(goals_cfg.get("max_turns", 20) or 20)
         except Exception:
             max_turns = 20
-        mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
+            council_cfg = {}
+        mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns, council_config=council_cfg)
 
         lower = arg.strip().lower()
         if not arg.strip() or lower == "status":

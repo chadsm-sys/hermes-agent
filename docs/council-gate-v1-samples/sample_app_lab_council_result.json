@@ -1,0 +1,21 @@
+{
+  "artifact_path": null,
+  "confidence": "HIGH",
+  "created_at": "2026-06-17T23:13:11+00:00",
+  "decision": "pass",
+  "distribution_or_monetization_concerns": [],
+  "evidence_gaps": [],
+  "final_recommendation": "Mock Council approval for APPLAB_CANDIDATE.",
+  "findings": [],
+  "optional_suggestions": [],
+  "primary_risks": [],
+  "raw_output": "",
+  "required_fixes": [],
+  "review_id": "sample-app-lab-council",
+  "reviewer": "mock",
+  "reviewer_model_or_adapter": "mock",
+  "safety_concerns": [],
+  "scope_creep_detected": false,
+  "summary": "Mock Council approval for APPLAB_CANDIDATE.",
+  "verdict": "APPROVE"
+}

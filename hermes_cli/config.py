@@ -811,6 +811,20 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "council": {
+        "enabled": False,
+        "mode": "manual",
+        "live_model_enabled": False,
+        "command_enabled": False,
+        "allow_mock_unsafe": False,
+        "persist_raw_request_unsafe": False,
+        "command": [],
+        "timeout_seconds": 60,
+        "max_revisions": 1,
+        "triggers": ["plan", "scope", "delivery", "done"],
+        "require_for_gates": [],
+        "artifact_dir": "~/.hermes/council",
+    },
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.
     # None/0 = unbounded.
     "max_concurrent_sessions": None,
@@ -4119,7 +4133,7 @@ def check_config_version() -> Tuple[int, int]:
 # Fields that are valid at root level of config.yaml
 _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
-    "fallback_providers", "credential_pool_strategies", "toolsets",
+    "fallback_providers", "credential_pool_strategies", "toolsets", "council",
     "agent", "terminal", "display", "compression", "delegation",
     "auxiliary", "custom_providers", "context", "memory", "gateway",
     "sessions", "streaming", "updates", "mcp_servers",
@@ -4425,8 +4439,10 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     # The new Anthropic auth flow no longer uses this env var.
     if current_ver < 9:
         try:
-            old_token = get_env_value("ANTHROPIC_TOKEN")
-            if old_token:
+            old_anthropic_value = (
+                get_env_value("ANTHROPIC_TOKEN")
+            )
+            if old_anthropic_value:
                 save_env_value("ANTHROPIC_TOKEN", "")
                 if not quiet:
                     print("  ✓ Cleared ANTHROPIC_TOKEN from .env (no longer used)")
@@ -5652,7 +5668,7 @@ def _sanitize_env_lines(lines: list) -> list:
 
     Handles two known corruption patterns:
     1. Concatenated KEY=VALUE pairs on a single line (missing newline between
-       entries, e.g. ``ANTHROPIC_API_KEY=sk-...OPENAI_BASE_URL=https://...``).
+       entries, e.g. ``ANTHROPIC_API_KEY -> redacted; OPENAI_BASE_URL -> https://...``).
     2. Stale ``KEY=***`` placeholder entries left by incomplete setup runs.
 
     Uses a known-keys set (OPTIONAL_ENV_VARS + _EXTRA_ENV_KEYS) so we only
@@ -6091,8 +6107,10 @@ def show_config():
         print(f"  Image:        {terminal.get('singularity_image', 'docker://nikolaik/python-nodejs:python3.11-nodejs20')}")
     elif terminal.get('backend') == 'modal':
         print(f"  Modal image:  {terminal.get('modal_image', 'nikolaik/python-nodejs:python3.11-nodejs20')}")
-        modal_token = get_env_value('MODAL_TOKEN_ID')
-        print(f"  Modal token:  {'configured' if modal_token else '(not set)'}")
+        modal_auth_value = (
+            get_env_value('MODAL_TOKEN_ID')
+        )
+        print(f"  Modal auth:  {'configured' if modal_auth_value else '(not set)'}")
     elif terminal.get('backend') == 'daytona':
         print(f"  Daytona image: {terminal.get('daytona_image', 'nikolaik/python-nodejs:python3.11-nodejs20')}")
         daytona_key = get_env_value('DAYTONA_API_KEY')
@@ -6156,11 +6174,15 @@ def show_config():
     print()
     print(color("◆ Messaging Platforms", Colors.CYAN, Colors.BOLD))
     
-    telegram_token = get_env_value('TELEGRAM_BOT_TOKEN')
-    discord_token = get_env_value('DISCORD_BOT_TOKEN')
+    telegram_auth_value = (
+        get_env_value('TELEGRAM_BOT_TOKEN')
+    )
+    discord_auth_value = (
+        get_env_value('DISCORD_BOT_TOKEN')
+    )
     
-    print(f"  Telegram:     {'configured' if telegram_token else color('not configured', Colors.DIM)}")
-    print(f"  Discord:      {'configured' if discord_token else color('not configured', Colors.DIM)}")
+    print(f"  Telegram:     {'configured' if telegram_auth_value else color('not configured', Colors.DIM)}")
+    print(f"  Discord:      {'configured' if discord_auth_value else color('not configured', Colors.DIM)}")
     
     # Skill config
     try:
@@ -6549,9 +6571,11 @@ def _inject_platform_plugin_env_vars() -> None:
                 # Heuristic: anything named *TOKEN, *SECRET, *KEY, *PASSWORD
                 # is a password field unless explicitly overridden.
                 name_upper = name.upper()
-                is_secret = bool(meta.get("password") or meta.get("secret"))
-                if not is_secret and not meta.get("password") is False:
-                    is_secret = any(
+                sensitive_flag = (
+                    bool(meta.get("password") or meta.get("secret"))
+                )
+                if not sensitive_flag and not meta.get("password") is False:
+                    sensitive_flag = any(
                         name_upper.endswith(suf)
                         for suf in ("_TOKEN", "_SECRET", "_KEY", "_PASSWORD", "_JSON")
                     )
@@ -6562,7 +6586,7 @@ def _inject_platform_plugin_env_vars() -> None:
                     ),
                     "prompt": meta.get("prompt") or name,
                     "url": meta.get("url") or None,
-                    "password": is_secret,
+                    "password": sensitive_flag,
                     "category": meta.get("category") or "messaging",
                 }
     except Exception:

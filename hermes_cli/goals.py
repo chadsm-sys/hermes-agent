@@ -40,6 +40,44 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _load_runtime_council_config() -> Dict[str, Any]:
+    """Load Council config from the active Hermes runtime config.
+
+    GoalManager is constructed by CLI and gateway runtime paths. If callers do
+    not inject a Council config explicitly, load it here so Council enforcement
+    is not test-only/manual-only wiring.
+    """
+
+    try:
+        from hermes_cli.config import load_config
+
+        loaded = load_config()
+        if isinstance(loaded, dict) and isinstance(loaded.get("council"), dict):
+            return dict(loaded["council"])
+    except Exception as exc:  # pragma: no cover - fail closed by disabled config
+        logger.debug("goal manager: could not load runtime council config: %s", exc)
+    return {}
+
+
+def _council_trigger_enabled(council_config: Dict[str, Any], checkpoint: str) -> bool:
+    """Return whether a Council checkpoint is enabled by trigger config.
+
+    The goal loop's implemented delivery checkpoint is reached when the judge
+    says ``done``. Treat ``delivery`` and ``done`` as aliases so the documented
+    default trigger activates the actual enforcement point.
+    """
+
+    configured = council_config.get("triggers") or []
+    if isinstance(configured, dict):
+        triggers = {str(trigger).strip().lower() for trigger, enabled in configured.items() if enabled}
+    else:
+        triggers = {str(trigger).strip().lower() for trigger in configured}
+    checkpoint = str(checkpoint or "").strip().lower()
+    if checkpoint == "done":
+        return bool(triggers.intersection({"done", "delivery", "delivery_review"}))
+    return checkpoint in triggers
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Constants & defaults
 # ──────────────────────────────────────────────────────────────────────
@@ -485,9 +523,16 @@ class GoalManager:
       feed back into ``run_conversation``.
     """
 
-    def __init__(self, session_id: str, *, default_max_turns: int = DEFAULT_MAX_TURNS):
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        default_max_turns: int = DEFAULT_MAX_TURNS,
+        council_config: Optional[Dict[str, Any]] = None,
+    ):
         self.session_id = session_id
         self.default_max_turns = int(default_max_turns or DEFAULT_MAX_TURNS)
+        self.council_config = dict(council_config) if council_config is not None else _load_runtime_council_config()
         self._state: Optional[GoalState] = load_goal(session_id)
 
     # --- introspection ------------------------------------------------
@@ -667,6 +712,32 @@ class GoalManager:
             state.consecutive_parse_failures = 0
 
         if verdict == "done":
+            if self.council_config.get("enabled") and _council_trigger_enabled(self.council_config, "done"):
+                from hermes_cli.council.gate import review_goal_turn
+
+                council_result = review_goal_turn(
+                    state.goal,
+                    last_response,
+                    council_config=self.council_config,
+                )
+                if council_result.decision != "pass":
+                    state.status = "active"
+                    state.last_verdict = "council_needs_revision"
+                    state.last_reason = council_result.summary
+                    save_goal(self.session_id, state)
+                    return {
+                        "status": "active",
+                        "should_continue": True,
+                        "continuation_prompt": (
+                            "[Council review requires revision before marking this goal done]\n"
+                            f"Council decision: {council_result.decision}\n"
+                            f"Summary: {council_result.summary}\n\n"
+                            "Address the required Council fixes, then report completion again."
+                        ),
+                        "verdict": "council_needs_revision",
+                        "reason": council_result.summary,
+                        "message": f"↻ Council review requires revision: {council_result.summary}",
+                    }
             state.status = "done"
             save_goal(self.session_id, state)
             return {

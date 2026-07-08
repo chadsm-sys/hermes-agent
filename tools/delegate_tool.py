@@ -1482,6 +1482,7 @@ def _run_single_child(
     # Without this, the parent's _last_activity_ts freezes when delegate_task
     # starts and the gateway eventually kills the agent for "no activity".
     _heartbeat_stop = threading.Event()
+    _heartbeat_started = threading.Event()
     # Stale detection: track the child's (tool, iteration) pair across
     # heartbeat cycles. If neither advances, count the cycle as stale.
     # Different thresholds for idle vs in-tool (see _HEARTBEAT_STALE_CYCLES_*).
@@ -1490,6 +1491,7 @@ def _run_single_child(
     _stale_count = [0]
 
     def _heartbeat_loop():
+        _heartbeat_started.set()
         while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
             if parent_agent is None:
                 continue
@@ -1590,6 +1592,11 @@ def _run_single_child(
 
     try:
         _heartbeat_thread.start()
+        # Ensure the heartbeat worker is actually scheduled before the child
+        # enters long-running work. Without this, short test intervals can miss
+        # most of the child's runtime on a busy interpreter, and production can
+        # lose the first keepalive window under startup contention.
+        _heartbeat_started.wait(timeout=1.0)
         if child_progress_cb:
             try:
                 child_progress_cb("subagent.start", preview=goal)

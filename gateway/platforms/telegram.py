@@ -17,6 +17,7 @@ import tempfile
 import html as _html
 import re
 from datetime import datetime, timezone
+from time import monotonic as _monotonic
 from typing import Dict, List, Optional, Set, Any
 
 logger = logging.getLogger(__name__)
@@ -459,6 +460,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
+        self._polling_conflict_last_seen: Optional[float] = None
         self._polling_network_error_count: int = 0
         self._polling_error_callback_ref = None
         # After sustained reconnect storms the PTB httpx pool can return
@@ -1448,10 +1450,19 @@ class TelegramAdapter(BasePlatformAdapter):
         # nor fatal — messages are silently dropped.  We schedule another
         # retry attempt instead of returning silently, and only escalate to
         # fatal after all retries are exhausted.
+        MAX_CONFLICT_RETRIES = 5
+        STABLE_CONFLICT_RESET_SECONDS = 120
+
+        now = _monotonic()
+        if (
+            self._polling_conflict_last_seen is None
+            or now - self._polling_conflict_last_seen > STABLE_CONFLICT_RESET_SECONDS
+        ):
+            self._polling_conflict_count = 0
+        self._polling_conflict_last_seen = now
         self._polling_conflict_count += 1
 
-        MAX_CONFLICT_RETRIES = 5
-        # Delay grows with each attempt: 15s, 25s, 35s, 45s, 55s.
+        # Delay grows with each attempt: 20s, 30s, 40s, 50s, 60s.
         # Telegram server-side getUpdates sessions typically expire within
         # 30s; the increasing back-off ensures we clear that window without
         # hammering the API on fast-restart loops.
@@ -1487,7 +1498,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     "[%s] Telegram polling resumed after conflict retry %d/%d",
                     self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
                 )
-                self._polling_conflict_count = 0  # reset counter on success
+                # Do not reset the conflict streak immediately: PTB can report
+                # start_polling() success while Telegram still terminates the
+                # next long-poll with another 409. The timestamp window above
+                # resets the streak after polling stays quiet long enough.
                 return
             except Exception as retry_err:
                 logger.warning(
@@ -1529,7 +1543,7 @@ class TelegramAdapter(BasePlatformAdapter):
             "[%s] %s Original error: %s",
             self.name, message, error,
         )
-        self._set_fatal_error("telegram_polling_conflict", message, retryable=False)
+        self._set_fatal_error("telegram_polling_conflict", message, retryable=True)
         try:
             if self._app and self._app.updater:
                 await self._app.updater.stop()
@@ -1873,7 +1887,7 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return False
         
-        if not self.config.token:
+        if not self.config.token.strip():
             logger.error("[%s] No bot token configured", self.name)
             return False
         
@@ -2042,15 +2056,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 from urllib.parse import urlparse
                 webhook_path = urlparse(webhook_url).path or "/telegram"
 
-                await self._app.updater.start_webhook(
-                    listen="0.0.0.0",
-                    port=webhook_port,
-                    url_path=webhook_path,
-                    webhook_url=webhook_url,
-                    secret_token=webhook_secret,
-                    allowed_updates=Update.ALL_TYPES,
-                    drop_pending_updates=True,
-                )
+                webhook_kwargs = {
+                    "listen": "0.0.0.0",
+                    "port": webhook_port,
+                    "url_path": webhook_path,
+                    "webhook_url": webhook_url,
+                    "allowed_updates": Update.ALL_TYPES,
+                    "drop_pending_updates": True,
+                }
+                webhook_kwargs["secret_token"] = webhook_secret
+                await self._app.updater.start_webhook(**webhook_kwargs)
                 self._webhook_mode = True
                 logger.info(
                     "[%s] Webhook server listening on 0.0.0.0:%d%s",

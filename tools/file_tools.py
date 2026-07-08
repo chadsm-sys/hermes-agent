@@ -325,7 +325,12 @@ def _is_blocked_device(filepath: str) -> bool:
 # terminal tool's approval system.  These match prefixes after os.path.realpath.
 _SENSITIVE_PATH_PREFIXES = (
     "/etc/", "/boot/", "/usr/lib/systemd/",
-    "/private/etc/", "/private/var/",
+    "/private/etc/",
+    # macOS maps /var → /private/var; block system state but not user temp
+    # (/private/var/folders/... used by pytest tmp_path and macOS TMPDIR).
+    "/private/var/db/", "/private/var/root/", "/private/var/run/",
+    "/private/var/log/", "/private/var/spool/", "/private/var/yp/",
+    "/var/db/", "/var/root/", "/var/run/", "/var/log/", "/var/spool/", "/var/yp/",
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 

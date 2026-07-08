@@ -3291,7 +3291,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return False
         try:
             from hermes_cli.goals import GoalManager
-            return GoalManager(session_id=session_id).is_active()
+            from hermes_cli.config import load_config
+
+            cfg = load_config() or {}
+            goals_cfg = cfg.get("goals") or {}
+            council_cfg = cfg.get("council") or {}
+            max_turns = int(goals_cfg.get("max_turns", 20) or 20)
+            return GoalManager(
+                session_id=session_id,
+                default_max_turns=max_turns,
+                council_config=council_cfg,
+            ).is_active()
         except Exception as exc:
             logger.debug("goal continuation: active-state recheck failed: %s", exc)
             return False
@@ -9769,6 +9779,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             return 20
 
+    def _goal_council_config_from_config(self) -> Dict[str, Any]:
+        """Resolve Council config for gateway GoalManager construction."""
+        try:
+            council_cfg = (
+                (self.config or {}).get("council", {})
+                if isinstance(self.config, dict)
+                else getattr(self.config, "council", {}) or {}
+            )
+            if not council_cfg:
+                from hermes_cli.config import load_config
+
+                council_cfg = (load_config() or {}).get("council") or {}
+            return dict(council_cfg)
+        except Exception:
+            return {}
+
     def _get_goal_manager_for_event(self, event: "MessageEvent"):
         """Return a GoalManager bound to the session for this gateway event.
 
@@ -9789,7 +9815,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not sid:
             return None, None
         max_turns = self._goal_max_turns_from_config()
-        return GoalManager(session_id=sid, default_max_turns=max_turns), session_entry
+        council_cfg = self._goal_council_config_from_config()
+        return GoalManager(session_id=sid, default_max_turns=max_turns, council_config=council_cfg), session_entry
 
 
 
@@ -9884,7 +9911,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         max_turns = self._goal_max_turns_from_config()
 
-        mgr = GoalManager(session_id=sid, default_max_turns=max_turns)
+        mgr = GoalManager(
+            session_id=sid,
+            default_max_turns=max_turns,
+            council_config=self._goal_council_config_from_config(),
+        )
         if not mgr.is_active():
             return
 
