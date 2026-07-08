@@ -54,11 +54,56 @@ class TestForegroundTimeoutCap:
         with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
              patch("tools.terminal_tool._start_cleanup_thread"):
 
-            result = json.loads(terminal_tool(command="nohup sleep 60 &"))
+            result = json.loads(terminal_tool(
+                command="nohup pnpm dev > /tmp/sg-server.log 2>&1 &",
+            ))
 
         assert result["exit_code"] == -1
         assert "background=true" in result["error"]
         assert "nohup" in result["error"].lower()
+
+    def test_background_wrapper_guard_precedes_generic_needs_chad(self):
+        """Hard shell-wrapper guidance must win before generic approval doctrine."""
+        from tools.terminal_tool import terminal_tool
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"), \
+             patch("agent.decision_policy.evaluate_terminal_command") as evaluate:
+
+            result = json.loads(terminal_tool(
+                command="nohup pnpm dev > /tmp/sg-server.log 2>&1 &",
+            ))
+
+        evaluate.assert_not_called()
+        assert result["exit_code"] == -1
+        assert result["status"] == "error"
+        assert "background=true" in result["error"]
+        assert result.get("decision_packet") is None
+
+    def test_generic_needs_chad_still_applies_after_hard_guards(self):
+        """Ordinary commands still pass through the approval/doctrine preflight."""
+        from types import SimpleNamespace
+
+        from agent.decision_packet import DecisionPacket
+        from tools.terminal_tool import terminal_tool
+
+        packet = DecisionPacket(
+            reason="approval required",
+            proposed_action="run command",
+            why_this_is_a_fork="external effect",
+            safest_default="do not run",
+        )
+        decision = SimpleNamespace(needs_chad=True, packet=packet)
+
+        with patch("tools.terminal_tool._get_env_config", return_value=_make_env_config()), \
+             patch("tools.terminal_tool._start_cleanup_thread"), \
+             patch("agent.decision_policy.evaluate_terminal_command", return_value=decision):
+
+            result = json.loads(terminal_tool(command="curl https://example.com"))
+
+        assert result["exit_code"] == -1
+        assert result["status"] == "needs_chad"
+        assert result["decision_packet"]["reason"] == "approval required"
 
     def test_foreground_rejects_long_lived_server_command(self):
         """Foreground dev server commands should be redirected to background mode."""

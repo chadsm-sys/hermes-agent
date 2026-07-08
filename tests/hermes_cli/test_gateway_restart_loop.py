@@ -9,7 +9,7 @@ Covers:
 import json
 import os
 from argparse import Namespace
-from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -328,6 +328,20 @@ class TestTerminalToolGatewayLifecycleGuard:
         assert result["exit_code"] == 1
         assert "Blocked" in result["error"]
 
+    def test_gateway_lifecycle_guard_precedes_generic_needs_chad(self, monkeypatch):
+        """The in-gateway lifecycle block is a hard guard, not an approval fork."""
+        import tools.terminal_tool as tt
+        self._patch_env(monkeypatch, self._make_fake_env(), inside_gateway=True)
+
+        with patch("agent.decision_policy.evaluate_terminal_command") as evaluate:
+            result = json.loads(tt.terminal_tool(command="systemctl restart hermes-gateway"))
+
+        evaluate.assert_not_called()
+        assert result["exit_code"] == 1
+        assert result["status"] == "error"
+        assert "Blocked" in result["error"]
+        assert result.get("decision_packet") is None
+
     def test_force_true_cannot_bypass_block(self, monkeypatch):
         import tools.terminal_tool as tt
         self._patch_env(monkeypatch, self._make_fake_env(), inside_gateway=True)
@@ -373,17 +387,17 @@ class TestTerminalToolGatewayLifecycleGuard:
 
         self._patch_env(monkeypatch, _FakeEnv(), inside_gateway=False)
         monkeypatch.setattr(tt, "_check_all_guards", lambda cmd, env, **kwargs: {"approved": True})
-        import agent.decision_policy as dp
-        monkeypatch.setattr(
-            dp,
-            "evaluate_terminal_command",
-            lambda *args, **kwargs: SimpleNamespace(needs_chad=False),
-        )
 
-        result = json.loads(tt.terminal_tool(command="systemctl restart hermes-gateway"))
+        from types import SimpleNamespace
+        with patch(
+            "agent.decision_policy.evaluate_terminal_command",
+            return_value=SimpleNamespace(needs_chad=False, packet=None),
+        ):
+            result = json.loads(tt.terminal_tool(command="systemctl restart hermes-gateway"))
 
         # Outside the gateway the lifecycle guard doesn't block — the normal
-        # approval flow handles it (here mocked as approved).
+        # approval/doctrine flow handles it (here mocked as allowed), then
+        # legacy guards allow execution.
         assert result["exit_code"] == 0
         assert calls == ["systemctl restart hermes-gateway"]
 
