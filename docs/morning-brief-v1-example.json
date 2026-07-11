@@ -1,0 +1,199 @@
+{
+  "active_work": [
+    {
+      "chad_needs_to_care": "No",
+      "current_stage": "fixture validation",
+      "expected_finish": "07:15 EDT",
+      "last_heartbeat": "2026-07-11T06:57:00-04:00",
+      "percent_complete": "70%",
+      "risk": "LOW",
+      "running_time": "18m",
+      "title": "Read-only report QA"
+    }
+  ],
+  "as_of": "2026-07-11T07:00:00-04:00",
+  "daily_timeline": {
+    "completed": [
+      {
+        "time": "05:42",
+        "title": "Revenue packet validated"
+      }
+    ],
+    "running": [
+      {
+        "time": "06:42",
+        "title": "Read-only report QA"
+      }
+    ],
+    "today": [
+      {
+        "time": "07:00",
+        "title": "Morning review"
+      }
+    ],
+    "upcoming": [
+      {
+        "time": "09:00",
+        "title": "Clinical work"
+      }
+    ],
+    "waiting": [
+      {
+        "time": "UNKNOWN",
+        "title": "Owner approval"
+      }
+    ],
+    "yesterday": [
+      {
+        "time": "17:00",
+        "title": "Evidence packet completed"
+      }
+    ]
+  },
+  "data_freshness": [
+    {
+      "freshness": "PASS",
+      "name": "github_snapshot",
+      "observed_at": "2026-07-11T06:55:00-04:00",
+      "path": "fixtures/github/2026-07-11.json"
+    },
+    {
+      "freshness": "PASS",
+      "name": "mission_snapshot",
+      "observed_at": "2026-07-11T06:58:00-04:00",
+      "path": "fixtures/morning_brief/healthy_day.json"
+    }
+  ],
+  "evidence_references": [
+    "evidence/revenue-packet.md",
+    "evidence/tests.txt"
+  ],
+  "executive_summary": {
+    "approvals_required": 1,
+    "blocked": 0,
+    "completed_overnight": 1,
+    "critical_issues": 0,
+    "estimated_review_minutes": 4,
+    "priorities": [
+      "Approve revenue validation packet",
+      "Review reliability PR",
+      "Protect family schedule"
+    ],
+    "running_work": 1
+  },
+  "failures": [],
+  "fleet_health": [
+    {
+      "certification_status": "N/A",
+      "cpu": "18%",
+      "last_heartbeat": "2026-07-11T06:59:00-04:00",
+      "memory": "42%",
+      "name": "Mac mini",
+      "network": "PASS",
+      "status": "PASS",
+      "storage": "31%",
+      "tailscale": "PASS",
+      "temperature": "UNKNOWN",
+      "ups": "CONNECTED"
+    },
+    {
+      "certification_status": "N/A",
+      "cpu": "UNKNOWN",
+      "last_heartbeat": "2026-07-11T06:51:00-04:00",
+      "memory": "UNKNOWN",
+      "name": "MacBook Pro",
+      "network": "PASS",
+      "status": "PASS",
+      "storage": "UNKNOWN",
+      "tailscale": "PASS",
+      "temperature": "UNKNOWN",
+      "ups": "N/A"
+    },
+    {
+      "certification_status": "PASS",
+      "cpu": "12%",
+      "last_heartbeat": "2026-07-11T06:56:00-04:00",
+      "memory": "24%",
+      "name": "Spark 1",
+      "network": "PASS",
+      "status": "PASS",
+      "storage": "8%",
+      "tailscale": "PASS",
+      "temperature": "41 C",
+      "ups": "CONNECTED"
+    },
+    {
+      "certification_status": "PASS",
+      "cpu": "9%",
+      "last_heartbeat": "2026-07-11T06:56:00-04:00",
+      "memory": "20%",
+      "name": "Spark 2",
+      "network": "PASS",
+      "status": "PASS",
+      "storage": "7%",
+      "tailscale": "PASS",
+      "temperature": "39 C",
+      "ups": "CONNECTED"
+    }
+  ],
+  "github": {
+    "blocked_prs": [],
+    "failed_ci": [],
+    "open_prs": [
+      {
+        "number": 12,
+        "repository": "hermes-agent",
+        "status": "PASS",
+        "title": "Morning brief renderer"
+      }
+    ],
+    "ready_to_merge": [],
+    "repositories_needing_attention": [
+      "hermes-agent"
+    ]
+  },
+  "integrity_report": {
+    "conflicting_state": [],
+    "duplicate_jobs": [],
+    "missing_evidence": [],
+    "stale_reports": [],
+    "unknown_state": []
+  },
+  "needs_chad": [
+    {
+      "explanation": "The packet is draft-only and evidence-backed. Approval permits manual review and sending; Hermes will not send it automatically.",
+      "reason": "Outbound contact requires owner approval",
+      "recommended_button": "APPROVE",
+      "risk": "LOW",
+      "title": "Approve manual buyer outreach packet"
+    }
+  ],
+  "overall_health": "PASS",
+  "overnight_wins": [
+    {
+      "completion_time": "2026-07-11T05:42:00-04:00",
+      "evidence_path": "evidence/revenue-packet.md",
+      "repository": "smith-ai-systems",
+      "title": "Revenue packet validated",
+      "verification_status": "PASS",
+      "why_it_matters": "Creates a buyer-proof cash action"
+    }
+  ],
+  "recommended_actions": [
+    {
+      "approval_required": "Yes",
+      "expected_benefit": "Unlocks one buyer-proof cash action",
+      "impact": "HIGH",
+      "rank": 1,
+      "return_on_investment": "High",
+      "risk": "LOW",
+      "time_required": "5 minutes",
+      "title": "Review buyer outreach packet"
+    }
+  ],
+  "schema_version": 1,
+  "source_paths": [
+    "fixtures/github/2026-07-11.json",
+    "fixtures/morning_brief/healthy_day.json"
+  ]
+}
