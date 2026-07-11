@@ -1,0 +1,150 @@
+schema_version: 1
+manifest_id: hermes-trustworthy-briefing-v1
+owner: Hermes runtime operator
+purpose: Canonical source contract for the primary daily operating briefing
+output:
+  max_characters: 6000
+  target_read_time_seconds: 180
+  section_limits:
+    ACTIVE GATES: 5
+    RUNNING WORK: 5
+    BLOCKED OR DEGRADED LANES: 5
+    PRS OR CHANGES NEEDING REVIEW: 5
+    HEALTH / FAMILY: 2
+    MONEY: 2
+  required_order:
+    - OLYMPUS / HERMES STATUS
+    - ACTIVE GATES
+    - RUNNING WORK
+    - BLOCKED OR DEGRADED LANES
+    - PRS OR CHANGES NEEDING REVIEW
+    - TODAY'S BEST APPROVAL
+    - ONE RECOMMENDED ACTION
+    - HEALTH / FAMILY
+    - MONEY
+sources:
+  - name: operator_readiness
+    purpose: Current Mac and Hermes operator-readiness gate
+    owner: mac-mini-operator-readiness-gate
+    location: ~/Library/Mobile Documents/com~apple~CloudDocs/Hermes Operator/Reports/mac-operator-test-*.json
+    retrieval:
+      method: json_file
+      glob: ~/Library/Mobile Documents/com~apple~CloudDocs/Hermes Operator/Reports/mac-operator-test-*.json
+      adapter: operator_readiness
+    required: true
+    freshness_threshold_seconds: 90000
+    failure_behavior: DEGRADE
+    evidence_class: TEST_VERIFIED
+    fallback_behavior: Report UNKNOWN; do not inherit the previous status
+    authoritative: true
+  - name: gateway_health
+    purpose: Current Hermes gateway runtime health
+    owner: Hermes gateway
+    location: http://127.0.0.1:8642/health
+    retrieval:
+      method: http_json
+      url: http://127.0.0.1:8642/health
+      timeout_seconds: 3
+    required: true
+    freshness_threshold_seconds: 60
+    failure_behavior: DEGRADE
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Report runtime UNKNOWN and STOP runtime-dependent work
+    authoritative: true
+  - name: gateway_state
+    purpose: Last recorded gateway platform and agent state
+    owner: Hermes gateway
+    location: ~/.hermes/gateway_state.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/gateway_state.json
+      adapter: gateway_state
+    required: false
+    freshness_threshold_seconds: 300
+    failure_behavior: SUPPRESS
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Suppress platform detail; do not override the live health probe
+    authoritative: false
+  - name: cron_jobs
+    purpose: Scheduled job definitions and last outcomes
+    owner: Hermes cron scheduler
+    location: ~/.hermes/cron/jobs.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/cron/jobs.json
+      adapter: cron_jobs
+    required: true
+    freshness_threshold_seconds: 900
+    failure_behavior: DEGRADE
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Report scheduler UNKNOWN; do not claim jobs are running
+    authoritative: true
+  - name: kanban_missions
+    purpose: Canonical active mission, worker, lane, and blocker state
+    owner: Hermes Kanban dispatcher
+    location: ~/.hermes/kanban/boards/*/kanban.db
+    retrieval:
+      method: kanban_sqlite_copy_ro
+      glob: ~/.hermes/kanban/boards/*/kanban.db
+    required: true
+    freshness_threshold_seconds: 86400
+    failure_behavior: DEGRADE
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Report mission state UNKNOWN; no autonomous-work recommendation
+    authoritative: true
+  - name: action_inbox
+    purpose: Pending approvals, human decisions, and awaiting replies
+    owner: Hermes action inbox
+    location: ~/.hermes/action-inbox/queue.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/action-inbox/queue.json
+      adapter: action_inbox
+    required: true
+    freshness_threshold_seconds: 86400
+    failure_behavior: DEGRADE
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Report approval state UNKNOWN; do not say Chad is not required
+    authoritative: true
+  - name: pr_review_packet
+    purpose: Current PRs already classified as requiring operator judgment
+    owner: Repository review poller
+    location: ~/.hermes/state/pr_poll_latest.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/state/pr_poll_latest.json
+      adapter: pr_poll
+    required: false
+    freshness_threshold_seconds: 21600
+    failure_behavior: SUPPRESS
+    evidence_class: RUNTIME_OBSERVED
+    fallback_behavior: Suppress PR recommendations; never infer merge readiness
+    authoritative: true
+  - name: health_family_packet
+    purpose: Only current-day health or family constraints explicitly configured for briefing
+    owner: Operator-approved health/family adapter
+    location: ~/.hermes/state/health_family_brief_latest.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/state/health_family_brief_latest.json
+      adapter: health
+    required: false
+    freshness_threshold_seconds: 43200
+    failure_behavior: SUPPRESS
+    evidence_class: DOCUMENTED
+    fallback_behavior: Suppress section
+    authoritative: false
+  - name: money_packet
+    purpose: Only active-today, actionable money decisions
+    owner: Operator-approved money adapter
+    location: ~/.hermes/state/money_brief_latest.json
+    retrieval:
+      method: json_file
+      path: ~/.hermes/state/money_brief_latest.json
+      adapter: money
+    required: false
+    freshness_threshold_seconds: 43200
+    failure_behavior: SUPPRESS
+    evidence_class: DOCUMENTED
+    fallback_behavior: Suppress section; never revive stale leads
+    authoritative: false
