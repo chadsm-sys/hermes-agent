@@ -18,6 +18,8 @@ STATUSES = {"PASS", "WARN", "FAIL", "UNKNOWN"}
 RISKS = {"LOW", "MEDIUM", "HIGH", "UNKNOWN"}
 DECISIONS = {"APPROVE", "WAIT", "REJECT"}
 FLEET_ORDER = ("Mac mini", "MacBook Pro", "Spark 1", "Spark 2")
+RISK_PRIORITY = {"HIGH": 1, "UNKNOWN": 2, "MEDIUM": 3, "LOW": 4}
+INVALID_INPUT_EXIT = 2
 
 
 def _text(value: Any, default: str = "UNKNOWN") -> str:
@@ -42,6 +44,76 @@ def _time_key(value: Any) -> str:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
     except ValueError:
         return ""
+
+
+def _object(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field} must be an object")
+    return value
+
+
+def _list(value: Any, field: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    return value
+
+
+def _objects(value: Any, field: str) -> list[dict[str, Any]]:
+    rows = _list(value, field)
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"{field}[{index}] must be an object")
+    return rows
+
+
+def _integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    return value
+
+
+def _validate_snapshot(snapshot: dict[str, Any]) -> None:
+    for field in (
+        "sources",
+        "overnight_wins",
+        "active_work",
+        "needs_chad",
+        "failures",
+        "fleet_health",
+        "recommended_actions",
+    ):
+        _objects(snapshot.get(field, []), field)
+    for field in ("priorities", "evidence_references"):
+        _list(snapshot.get(field, []), field)
+    for field, default in (("blocked_count", 0), ("estimated_review_minutes", 5)):
+        _integer(snapshot.get(field, default), field)
+    github = _object(snapshot.get("github", {}), "github")
+    for field in (
+        "open_prs",
+        "ready_to_merge",
+        "blocked_prs",
+        "failed_ci",
+        "repositories_needing_attention",
+    ):
+        rows = _list(github.get(field, []), f"github.{field}")
+        if field == "open_prs":
+            for index, row in enumerate(rows):
+                _object(row, f"github.open_prs[{index}]")
+                _integer(row.get("number", 0), f"github.open_prs[{index}].number")
+    timeline = _object(snapshot.get("timeline", {}), "timeline")
+    for field in ("yesterday", "today", "upcoming", "completed", "running", "waiting"):
+        _objects(timeline.get(field, []), f"timeline.{field}")
+    integrity = _object(snapshot.get("integrity", {}), "integrity")
+    for field in (
+        "missing_evidence",
+        "stale_reports",
+        "duplicate_jobs",
+        "conflicting_state",
+        "unknown_state",
+    ):
+        _list(integrity.get(field, []), f"integrity.{field}")
+    for index, row in enumerate(snapshot.get("recommended_actions", [])):
+        _integer(row.get("rank", 999), f"recommended_actions[{index}].rank")
 
 
 def load_snapshot(path: Path) -> dict[str, Any]:
@@ -101,6 +173,8 @@ def _integrity(
 
 
 def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Build a report; identical valid snapshots always produce identical output."""
+    _validate_snapshot(snapshot)
     freshness = _freshness(snapshot)
     integrity = _integrity(snapshot, freshness)
     wins = sorted(
@@ -113,8 +187,10 @@ def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
     )
     active = sorted(
         snapshot.get("active_work", []),
-        key=lambda row: (_risk(row.get("risk")), _text(row.get("title"))),
-        reverse=True,
+        key=lambda row: (
+            RISK_PRIORITY[_risk(row.get("risk"))],
+            _text(row.get("title")),
+        ),
     )
     approvals = sorted(
         snapshot.get("needs_chad", []),
@@ -141,6 +217,28 @@ def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
     fleet_by_name = {
         _text(row.get("name")): row for row in snapshot.get("fleet_health", [])
     }
+    additional_fleet = []
+    for name in sorted(set(fleet_by_name) - set(FLEET_ORDER)):
+        row = dict(fleet_by_name[name])
+        row["name"] = name
+        for field in (
+            "status",
+            "cpu",
+            "memory",
+            "storage",
+            "temperature",
+            "ups",
+            "network",
+            "tailscale",
+            "last_heartbeat",
+            "certification_status",
+        ):
+            row[field] = (
+                _status(row.get(field)) if field == "status" else _text(row.get(field))
+            )
+        additional_fleet.append(row)
+        integrity["unknown_state"].append(f"Unexpected fleet entry: {name}")
+    integrity["unknown_state"] = sorted(set(integrity["unknown_state"]))
     fleet = []
     for name in FLEET_ORDER:
         row = dict(fleet_by_name.get(name, {}))
@@ -202,6 +300,7 @@ def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
         "needs_chad": approvals,
         "failures": failures,
         "fleet_health": fleet,
+        "additional_fleet": additional_fleet,
         "github": {
             "open_prs": sorted(
                 github.get("open_prs", []),
@@ -243,6 +342,11 @@ def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def _items(values: list[Any], empty: str = "None.") -> list[str]:
     return [f"- {_text(value)}" for value in values] or [f"- {empty}"]
+
+
+def _table_cell(value: Any) -> str:
+    """Escape untrusted snapshot text rendered inside a Markdown table."""
+    return _text(value).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def render_markdown(report: dict[str, Any]) -> str:
@@ -323,7 +427,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             "| "
             + " | ".join(
-                _text(row.get(key))
+                _table_cell(row.get(key))
                 for key in (
                     "name",
                     "status",
@@ -340,6 +444,34 @@ def render_markdown(report: dict[str, Any]) -> str:
             )
             + " |"
         )
+    if report["additional_fleet"]:
+        lines.extend([
+            "",
+            "### Additional supplied fleet entries (unrecognized)",
+            "| Host | Status | CPU | Memory | Storage | Temp | UPS | Network | Tailscale | Last heartbeat | Certification |",
+            "|---|---|---|---|---|---|---|---|---|---|---|",
+        ])
+        for row in report["additional_fleet"]:
+            lines.append(
+                "| "
+                + " | ".join(
+                    _table_cell(row.get(key))
+                    for key in (
+                        "name",
+                        "status",
+                        "cpu",
+                        "memory",
+                        "storage",
+                        "temperature",
+                        "ups",
+                        "network",
+                        "tailscale",
+                        "last_heartbeat",
+                        "certification_status",
+                    )
+                )
+                + " |"
+            )
     lines.extend([
         "",
         "## 7. GitHub",
@@ -404,6 +536,16 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _create_output(path: Path, rendered: str) -> None:
+    if path.is_symlink():
+        raise ValueError(f"output path is a symlink: {path}")
+    try:
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(rendered)
+    except FileExistsError as error:
+        raise ValueError(f"output path already exists: {path}") from error
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -416,16 +558,19 @@ def main() -> int:
         help="Write output to a new/local artifact instead of stdout",
     )
     args = parser.parse_args()
-    report = build_report(load_snapshot(args.snapshot))
-    rendered = (
-        render_markdown(report)
-        if args.format == "markdown"
-        else json.dumps(report, indent=2, sort_keys=True) + "\n"
-    )
-    if args.output:
-        args.output.write_text(rendered, encoding="utf-8")
-    else:
-        print(rendered, end="")
+    try:
+        report = build_report(load_snapshot(args.snapshot))
+        rendered = (
+            render_markdown(report)
+            if args.format == "markdown"
+            else json.dumps(report, indent=2, sort_keys=True) + "\n"
+        )
+        if args.output:
+            _create_output(args.output, rendered)
+        else:
+            print(rendered, end="")
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        parser.exit(INVALID_INPUT_EXIT, f"error: {error}\n")
     return 0
 
 
