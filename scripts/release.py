@@ -1556,6 +1556,7 @@ AUTHOR_MAP = {
     "sunsky.lau@gmail.com": "liuhao1024",  # PR #45494 salvage (claim session slot before auto-resume task; #45456)
     "andrewdmwalker@gmail.com": "capt-marbles",  # PR #38440 salvage (resolve xAI OAuth credentials across profiles; #43589)
     "chadsm@umich.edu": "chadsm-sys",  # memorygraph provider (Memory Graph v2)
+    "chadsm1985@gmail.com": "chadsm-sys",
 }
 
 
