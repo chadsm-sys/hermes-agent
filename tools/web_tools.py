@@ -972,6 +972,32 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
+        # ── Website blocklist policy gate (security.website_blocklist) ──
+        # Enforced here in the shared dispatcher so *every* extract provider
+        # (tavily, exa, parallel, firecrawl) honors the blocklist — not just
+        # firecrawl. Firecrawl keeps its own per-URL + post-redirect re-check;
+        # URLs blocked here never reach any provider so that check is a no-op.
+        from tools.website_policy import check_website_access
+        policy_allowed_urls: List[str] = []
+        for url in safe_urls:
+            blocked = check_website_access(url)
+            if blocked:
+                logger.info(
+                    "Blocked web_extract for %s by rule %s",
+                    blocked.get("host", url),
+                    blocked.get("rule", ""),
+                )
+                ssrf_blocked.append({
+                    "url": url, "title": "", "content": "",
+                    "error": blocked.get(
+                        "message",
+                        "Blocked: URL is disallowed by the website blocklist policy",
+                    ),
+                })
+            else:
+                policy_allowed_urls.append(url)
+        safe_urls = policy_allowed_urls
+
         # Dispatch only safe URLs to the configured backend
         if not safe_urls:
             results = []

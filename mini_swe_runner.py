@@ -367,25 +367,33 @@ class MiniSWERunner:
                     
                     trajectory.append({"from": "gpt", "value": content.rstrip()})
                     
+                    # Map tool_call_id -> tool name so each response is labeled
+                    # by the call it answers rather than by positional order
+                    # (tool responses may arrive out of order or be partial).
+                    tool_name_by_id = {
+                        tc.get("id", ""): tc["function"]["name"]
+                        for tc in msg["tool_calls"]
+                    }
+
                     # Collect subsequent tool responses
                     tool_responses = []
                     j = i + 1
                     while j < len(messages) and messages[j]["role"] == "tool":
                         tool_msg = messages[j]
                         tool_content = tool_msg["content"]
-                        
+
                         # Try to parse as JSON
                         try:
                             if tool_content.strip().startswith(("{", "[")):
                                 tool_content = json.loads(tool_content)
                         except (json.JSONDecodeError, AttributeError):
                             pass
-                        
+
+                        tool_call_id = tool_msg.get("tool_call_id", "")
                         tool_response = "<tool_response>\n"
                         tool_response += json.dumps({
-                            "tool_call_id": tool_msg.get("tool_call_id", ""),
-                            "name": msg["tool_calls"][len(tool_responses)]["function"]["name"] \
-                                if len(tool_responses) < len(msg["tool_calls"]) else "unknown",
+                            "tool_call_id": tool_call_id,
+                            "name": tool_name_by_id.get(tool_call_id, "unknown"),
                             "content": tool_content
                         }, ensure_ascii=False)
                         tool_response += "\n</tool_response>"

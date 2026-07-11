@@ -7757,7 +7757,15 @@ def _resolve_update_branch(args) -> str:
     ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
     the same answer.
     """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    import re
+    branch = (getattr(args, "branch", None) or "main").strip() or "main"
+    # Reject branch names that could be parsed as git options (e.g.
+    # ``--upload-pack=...``) or otherwise malformed refs, so a crafted
+    # ``--branch`` value can't inject git arguments into the fetch.
+    if not re.match(r"^[A-Za-z0-9._/-]+$", branch) or branch.startswith("-"):
+        print(f"✗ Invalid branch name: {branch!r}")
+        sys.exit(1)
+    return branch
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):

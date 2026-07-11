@@ -7,6 +7,7 @@ without risk of circular imports.
 import os
 import sys
 import sysconfig
+import threading
 from contextvars import ContextVar, Token
 from pathlib import Path
 
@@ -436,6 +437,7 @@ def is_termux() -> bool:
     return bool(os.getenv("TERMUX_VERSION") or "com.termux/files/usr" in prefix)
 
 
+_detection_lock = threading.Lock()
 _wsl_detected: bool | None = None
 
 
@@ -449,11 +451,14 @@ def is_wsl() -> bool:
     global _wsl_detected
     if _wsl_detected is not None:
         return _wsl_detected
-    try:
-        with open("/proc/version", "r", encoding="utf-8") as f:
-            _wsl_detected = "microsoft" in f.read().lower()
-    except Exception:
-        _wsl_detected = False
+    with _detection_lock:
+        if _wsl_detected is not None:
+            return _wsl_detected
+        try:
+            with open("/proc/version", "r", encoding="utf-8") as f:
+                _wsl_detected = "microsoft" in f.read().lower()
+        except Exception:
+            _wsl_detected = False
     return _wsl_detected
 
 
@@ -470,22 +475,25 @@ def is_container() -> bool:
     global _container_detected
     if _container_detected is not None:
         return _container_detected
-    if os.path.exists("/.dockerenv"):
-        _container_detected = True
-        return True
-    if os.path.exists("/run/.containerenv"):
-        _container_detected = True
-        return True
-    try:
-        with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
-            cgroup = f.read()
-            if "docker" in cgroup or "podman" in cgroup or "/lxc/" in cgroup:
-                _container_detected = True
-                return True
-    except OSError:
-        pass
-    _container_detected = False
-    return False
+    with _detection_lock:
+        if _container_detected is not None:
+            return _container_detected
+        if os.path.exists("/.dockerenv"):
+            _container_detected = True
+            return True
+        if os.path.exists("/run/.containerenv"):
+            _container_detected = True
+            return True
+        try:
+            with open("/proc/1/cgroup", "r", encoding="utf-8") as f:
+                cgroup = f.read()
+                if "docker" in cgroup or "podman" in cgroup or "/lxc/" in cgroup:
+                    _container_detected = True
+                    return True
+        except OSError:
+            pass
+        _container_detected = False
+        return False
 
 
 # ─── Well-Known Paths ─────────────────────────────────────────────────────────

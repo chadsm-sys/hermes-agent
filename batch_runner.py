@@ -261,7 +261,8 @@ def _process_single_prompt(
     """
     prompt = prompt_data["prompt"]
     task_id = f"task_{prompt_index}"
-    
+    env_overrides_registered = False
+
     # Per-prompt container image override: if the dataset row has an 'image' field,
     # register it for this task's sandbox. Works with Docker, Modal, Singularity, and Daytona.
     container_image = prompt_data.get("image") or prompt_data.get("docker_image")
@@ -310,6 +311,7 @@ def _process_single_prompt(
         if prompt_data.get("cwd"):
             overrides["cwd"] = prompt_data["cwd"]
         register_task_env_overrides(task_id, overrides)
+        env_overrides_registered = True
         if config.get("verbose"):
             print(f"   Prompt {prompt_index}: Using container image {container_image}")
     
@@ -395,6 +397,16 @@ def _process_single_prompt(
                 "timestamp": datetime.now().isoformat()
             }
         }
+
+    finally:
+        # Avoid leaking the module-global per-task env override registered
+        # above (one entry per image/cwd-bearing prompt for the worker's life).
+        if env_overrides_registered:
+            try:
+                from tools.terminal_tool import clear_task_env_overrides
+                clear_task_env_overrides(task_id)
+            except Exception:
+                pass
 
 
 def _process_batch_worker(args: Tuple) -> Dict[str, Any]:
@@ -753,11 +765,7 @@ class BatchRunner:
                     for line in f:
                         try:
                             entry = json.loads(line.strip())
-                            
-                            # Skip failed entries - we want to retry these
-                            if entry.get("failed", False):
-                                continue
-                            
+
                             # Extract the human/user prompt from conversations
                             conversations = entry.get("conversations", [])
                             for msg in conversations:

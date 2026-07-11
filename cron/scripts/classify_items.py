@@ -183,7 +183,13 @@ def main() -> int:
     for i, item in enumerate(items):
         s = scores.get(i)
         score = s.get("score") if isinstance(s, dict) else None
-        if isinstance(score, int) and score >= args.threshold:
+        # Accept LLM-emitted floats like 7.0 as well as ints, but exclude bool
+        # (a subclass of int) so a stray True/False can't read as a score.
+        if (
+            isinstance(score, (int, float))
+            and not isinstance(score, bool)
+            and score >= args.threshold
+        ):
             surfaced.append((i, item, s))
 
     if not surfaced:
