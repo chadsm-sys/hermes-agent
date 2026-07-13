@@ -2268,6 +2268,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
         self._kanban_notifier_profile = self._active_profile_name()
+        # Canonical Olympus authorization is injected by the embedding Mission
+        # Control issuer.  No gateway/dashboard/plugin caller assertion is a
+        # substitute; an unbound verifier disables every governed Telegram
+        # operation fail closed.
+        self._olympus_authority_verifier = None
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
         self._teams_pipeline_runtime_error: Optional[str] = None

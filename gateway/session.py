@@ -34,12 +34,23 @@ _OLYMPUS_SELECTION_KEYS = {
     "root_task_id",
     "mission_id",
     "agent_id",
+    "authority_id",
+    "authority_revision",
+    "authority_source",
+    "lease_id",
+    "lease_revision",
+    "lease_source",
+    "scope_digest",
+    "bot_id",
+    "profile",
+    "caller_fingerprint",
 }
 _OLYMPUS_TASK_ID_RE = re.compile(r"^t_[0-9a-f]+$")
 _OLYMPUS_MISSION_ID_RE = re.compile(
     r"^M-20[0-9]{6}-[a-z0-9][a-z0-9-]{0,39}$"
 )
 _OLYMPUS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_OLYMPUS_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def normalize_olympus_selection(value: Any) -> Dict[str, Any]:
@@ -57,13 +68,23 @@ def normalize_olympus_selection(value: Any) -> Dict[str, Any]:
         raise ValueError(
             "Olympus selection contains unknown field(s): " + ", ".join(unknown)
         )
-    if value.get("schema_version") != 1:
-        raise ValueError("Olympus selection schema_version must be 1")
+    if value.get("schema_version") != 2:
+        raise ValueError("Olympus selection schema_version must be 2")
 
     board = str(value.get("board") or "default").strip().lower()
     root_task_id = str(value.get("root_task_id") or "").strip()
     mission_id = str(value.get("mission_id") or "").strip()
     agent_id = str(value.get("agent_id") or "").strip().lower()
+    authority_id = str(value.get("authority_id") or "").strip()
+    authority_source = str(value.get("authority_source") or "").strip()
+    lease_id = str(value.get("lease_id") or "").strip()
+    lease_source = str(value.get("lease_source") or "").strip()
+    bot_id = str(value.get("bot_id") or "").strip()
+    profile = str(value.get("profile") or "").strip().lower()
+    scope_digest = str(value.get("scope_digest") or "").strip().lower()
+    caller_fingerprint = str(
+        value.get("caller_fingerprint") or ""
+    ).strip().lower()
     if not _OLYMPUS_NAME_RE.fullmatch(board):
         raise ValueError("Olympus selection board is invalid")
     if not _OLYMPUS_TASK_ID_RE.fullmatch(root_task_id):
@@ -72,12 +93,47 @@ def normalize_olympus_selection(value: Any) -> Dict[str, Any]:
         raise ValueError("Olympus selection mission_id is invalid")
     if not _OLYMPUS_NAME_RE.fullmatch(agent_id):
         raise ValueError("Olympus selection agent_id is invalid")
+    if not _OLYMPUS_NAME_RE.fullmatch(profile):
+        raise ValueError("Olympus selection profile is invalid")
+    for field_name, field_value in (
+        ("authority_id", authority_id),
+        ("authority_source", authority_source),
+        ("lease_id", lease_id),
+        ("lease_source", lease_source),
+        ("bot_id", bot_id),
+    ):
+        if not field_value or len(field_value) > 512:
+            raise ValueError(f"Olympus selection {field_name} is invalid")
+    authority_revision = value.get("authority_revision")
+    lease_revision = value.get("lease_revision")
+    if isinstance(authority_revision, bool) or not isinstance(
+        authority_revision, int
+    ) or authority_revision < 1:
+        raise ValueError("Olympus selection authority_revision is invalid")
+    if isinstance(lease_revision, bool) or not isinstance(
+        lease_revision, int
+    ) or lease_revision < 1:
+        raise ValueError("Olympus selection lease_revision is invalid")
+    if not _OLYMPUS_DIGEST_RE.fullmatch(scope_digest):
+        raise ValueError("Olympus selection scope_digest is invalid")
+    if not _OLYMPUS_DIGEST_RE.fullmatch(caller_fingerprint):
+        raise ValueError("Olympus selection caller_fingerprint is invalid")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "board": board,
         "root_task_id": root_task_id,
         "mission_id": mission_id,
         "agent_id": agent_id,
+        "authority_id": authority_id,
+        "authority_revision": authority_revision,
+        "authority_source": authority_source,
+        "lease_id": lease_id,
+        "lease_revision": lease_revision,
+        "lease_source": lease_source,
+        "scope_digest": scope_digest,
+        "bot_id": bot_id,
+        "profile": profile,
+        "caller_fingerprint": caller_fingerprint,
     }
 
 
