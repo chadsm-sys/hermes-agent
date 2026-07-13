@@ -231,6 +231,7 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
         "summary": r.summary,
         "metadata": r.metadata,
         "error": r.error,
+        "olympus_context": r.olympus_context,
     }
 
 
@@ -592,6 +593,7 @@ class CreateTaskBody(BaseModel):
     skills: Optional[list[str]] = None
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
+    olympus_context: Optional[dict] = None
 
 
 @router.post("/tasks")
@@ -616,6 +618,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             skills=payload.skills,
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
+            olympus_context=payload.olympus_context,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -816,6 +819,7 @@ class UpdateTaskBody(BaseModel):
     # complete --summary ... --metadata ...``.
     summary: Optional[str] = None
     metadata: Optional[dict] = None
+    olympus_context: Optional[dict] = None
 
 
 @router.patch("/tasks/{task_id}")
@@ -826,6 +830,20 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+
+        # --- Olympus authority context ----------------------------------
+        # The kernel refuses clearing and terminal-state rewrites. A renewal
+        # or revocation is persisted before any later claim/start/heartbeat/
+        # completion transition can observe it; run snapshots stay immutable.
+        if payload.olympus_context is not None:
+            try:
+                ok = kanban_db.update_task_olympus_context(
+                    conn, task_id, payload.olympus_context
+                )
+            except kanban_db.OlympusContextError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+            if not ok:
+                raise HTTPException(status_code=404, detail="task not found")
 
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:

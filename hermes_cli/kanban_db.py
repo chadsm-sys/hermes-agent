@@ -103,6 +103,402 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 
+# Olympus does not get a second task, run, lease, or authority store inside
+# Hermes.  Instead, an Olympus-authored task carries one versioned context
+# document in the existing Kanban row.  The same immutable snapshot is copied
+# onto every run so retries remain attributable even after Olympus renews or
+# revokes the task's current lease reference.
+OLYMPUS_CONTEXT_VERSION = 1
+VALID_OLYMPUS_AUTHORITY_STATUSES = {"active", "revoked"}
+VALID_OLYMPUS_LEASE_STATUSES = {"active", "revoked"}
+VALID_OLYMPUS_RISKS = {"low", "medium", "high", "critical"}
+OLYMPUS_CONTEXT_KEYS = {
+    "schema_version",
+    "goal_id",
+    "program_id",
+    "milestone_id",
+    "mission_id",
+    "workstream_id",
+    "authority",
+    "lease",
+    "risk",
+    "agent_id",
+    "review_status",
+    "evidence_refs",
+}
+OLYMPUS_AUTHORITY_KEYS = {"ref", "mission_id", "status", "expires_at"}
+OLYMPUS_LEASE_KEYS = {"ref", "mission_id", "holder", "status", "expires_at"}
+
+
+class OlympusContextError(ValueError):
+    """A fail-closed Olympus context validation error.
+
+    ``reason`` is stable and intentionally safe for task events and operator
+    diagnostics.  The raw context is never included in the exception or event.
+    """
+
+    def __init__(self, reason: str, message: str):
+        self.reason = reason
+        super().__init__(message)
+
+
+def _olympus_required_text(
+    value: Any,
+    *,
+    reason: str,
+    field_name: str,
+) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise OlympusContextError(reason, f"{field_name} is required")
+    cleaned = value.strip()
+    if len(cleaned) > 512:
+        raise OlympusContextError(
+            "olympus_context_invalid", f"{field_name} exceeds 512 characters"
+        )
+    return cleaned
+
+
+def _olympus_required_epoch(
+    value: Any,
+    *,
+    reason: str,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise OlympusContextError(reason, f"{field_name} must be a positive epoch")
+    return int(value)
+
+
+def _reject_unknown_olympus_keys(
+    value: dict[str, Any], *, allowed: set[str], field_name: str
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise OlympusContextError(
+            "olympus_context_invalid",
+            f"{field_name} contains unknown field(s): {', '.join(unknown)}",
+        )
+
+
+def normalize_olympus_context(context: Any) -> dict[str, Any]:
+    """Validate and canonicalize the versioned Olympus task context.
+
+    This is deliberately a reference contract, not a second authority or lease
+    engine.  Olympus owns issuance and revocation; Hermes persists the explicit
+    current references and independently refuses claim/start when they are
+    absent, foreign, revoked, or expired.
+    """
+    if not isinstance(context, dict):
+        raise OlympusContextError(
+            "olympus_context_invalid", "olympus_context must be an object"
+        )
+    if context.get("schema_version") != OLYMPUS_CONTEXT_VERSION:
+        raise OlympusContextError(
+            "olympus_context_invalid",
+            f"olympus_context.schema_version must be {OLYMPUS_CONTEXT_VERSION}",
+        )
+    _reject_unknown_olympus_keys(
+        context, allowed=OLYMPUS_CONTEXT_KEYS, field_name="olympus_context"
+    )
+
+    normalized: dict[str, Any] = {"schema_version": OLYMPUS_CONTEXT_VERSION}
+    for key in (
+        "goal_id",
+        "program_id",
+        "milestone_id",
+        "mission_id",
+        "workstream_id",
+    ):
+        normalized[key] = _olympus_required_text(
+            context.get(key),
+            reason=f"olympus_{key}_missing",
+            field_name=f"olympus_context.{key}",
+        )
+
+    authority = context.get("authority")
+    if not isinstance(authority, dict):
+        raise OlympusContextError(
+            "olympus_authority_missing", "olympus_context.authority is required"
+        )
+    _reject_unknown_olympus_keys(
+        authority,
+        allowed=OLYMPUS_AUTHORITY_KEYS,
+        field_name="olympus_context.authority",
+    )
+    authority_status = _olympus_required_text(
+        authority.get("status"),
+        reason="olympus_authority_status_missing",
+        field_name="olympus_context.authority.status",
+    ).lower()
+    if authority_status not in VALID_OLYMPUS_AUTHORITY_STATUSES:
+        raise OlympusContextError(
+            "olympus_authority_status_invalid",
+            "olympus_context.authority.status must be active or revoked",
+        )
+    normalized["authority"] = {
+        "ref": _olympus_required_text(
+            authority.get("ref"),
+            reason="olympus_authority_missing",
+            field_name="olympus_context.authority.ref",
+        ),
+        "mission_id": _olympus_required_text(
+            authority.get("mission_id"),
+            reason="olympus_authority_mission_missing",
+            field_name="olympus_context.authority.mission_id",
+        ),
+        "status": authority_status,
+        "expires_at": _olympus_required_epoch(
+            authority.get("expires_at"),
+            reason="olympus_authority_expiry_missing",
+            field_name="olympus_context.authority.expires_at",
+        ),
+    }
+
+    lease = context.get("lease")
+    if not isinstance(lease, dict):
+        raise OlympusContextError(
+            "olympus_lease_missing", "olympus_context.lease is required"
+        )
+    _reject_unknown_olympus_keys(
+        lease,
+        allowed=OLYMPUS_LEASE_KEYS,
+        field_name="olympus_context.lease",
+    )
+    lease_status = _olympus_required_text(
+        lease.get("status"),
+        reason="olympus_lease_status_missing",
+        field_name="olympus_context.lease.status",
+    ).lower()
+    if lease_status not in VALID_OLYMPUS_LEASE_STATUSES:
+        raise OlympusContextError(
+            "olympus_lease_status_invalid",
+            "olympus_context.lease.status must be active or revoked",
+        )
+    normalized["lease"] = {
+        "ref": _olympus_required_text(
+            lease.get("ref"),
+            reason="olympus_lease_missing",
+            field_name="olympus_context.lease.ref",
+        ),
+        "mission_id": _olympus_required_text(
+            lease.get("mission_id"),
+            reason="olympus_lease_mission_missing",
+            field_name="olympus_context.lease.mission_id",
+        ),
+        "holder": _olympus_required_text(
+            lease.get("holder"),
+            reason="olympus_lease_holder_missing",
+            field_name="olympus_context.lease.holder",
+        ),
+        "status": lease_status,
+        "expires_at": _olympus_required_epoch(
+            lease.get("expires_at"),
+            reason="olympus_lease_expiry_missing",
+            field_name="olympus_context.lease.expires_at",
+        ),
+    }
+
+    risk = _olympus_required_text(
+        context.get("risk"),
+        reason="olympus_risk_missing",
+        field_name="olympus_context.risk",
+    ).lower()
+    if risk not in VALID_OLYMPUS_RISKS:
+        raise OlympusContextError(
+            "olympus_risk_invalid",
+            f"olympus_context.risk must be one of {sorted(VALID_OLYMPUS_RISKS)}",
+        )
+    normalized["risk"] = risk
+    normalized["agent_id"] = _olympus_required_text(
+        context.get("agent_id"),
+        reason="olympus_agent_missing",
+        field_name="olympus_context.agent_id",
+    )
+    normalized["review_status"] = _olympus_required_text(
+        context.get("review_status"),
+        reason="olympus_review_status_missing",
+        field_name="olympus_context.review_status",
+    )
+
+    evidence_refs = context.get("evidence_refs")
+    if not isinstance(evidence_refs, (list, tuple)):
+        raise OlympusContextError(
+            "olympus_evidence_refs_missing",
+            "olympus_context.evidence_refs must be a list",
+        )
+    normalized_refs: list[str] = []
+    seen_refs: set[str] = set()
+    for value in evidence_refs:
+        ref = _olympus_required_text(
+            value,
+            reason="olympus_evidence_ref_invalid",
+            field_name="olympus_context.evidence_refs[]",
+        )
+        if ref not in seen_refs:
+            seen_refs.add(ref)
+            normalized_refs.append(ref)
+        if len(normalized_refs) > 100:
+            raise OlympusContextError(
+                "olympus_evidence_ref_invalid",
+                "olympus_context.evidence_refs exceeds 100 entries",
+            )
+    normalized["evidence_refs"] = normalized_refs
+    return normalized
+
+
+def _serialize_olympus_context(context: Any) -> str:
+    return json.dumps(
+        normalize_olympus_context(context),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _decode_olympus_context(raw: Any) -> Optional[dict[str, Any]]:
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {"_invalid": True}
+    except Exception:
+        return {"_invalid": True}
+
+
+def _olympus_trace(context: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded, non-secret subset safe for events and summaries."""
+    return {
+        "goal_id": context["goal_id"],
+        "program_id": context["program_id"],
+        "milestone_id": context["milestone_id"],
+        "mission_id": context["mission_id"],
+        "workstream_id": context["workstream_id"],
+        "authority_ref": context["authority"]["ref"],
+        "lease_ref": context["lease"]["ref"],
+        "lease_holder": context["lease"]["holder"],
+        "risk": context["risk"],
+        "agent_id": context["agent_id"],
+        "review_status": context["review_status"],
+        "evidence_refs": list(context["evidence_refs"]),
+    }
+
+
+def _require_current_olympus_context(
+    raw: Any,
+    *,
+    assignee: Optional[str],
+    now: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    """Return a current context, or raise with a stable denial reason.
+
+    ``None`` is the explicit legacy compatibility path: ordinary Kanban tasks
+    continue to claim exactly as before.  Once a row carries Olympus context,
+    malformed or stale state never falls back to that legacy path.
+    """
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as exc:
+        raise OlympusContextError(
+            "olympus_context_invalid", "olympus_context is not valid JSON"
+        ) from exc
+    context = normalize_olympus_context(parsed)
+    current = int(time.time()) if now is None else int(now)
+    mission_id = context["mission_id"]
+    authority = context["authority"]
+    lease = context["lease"]
+    if authority["mission_id"] != mission_id:
+        raise OlympusContextError(
+            "olympus_authority_foreign_mission",
+            "authority mission does not match task mission",
+        )
+    if authority["status"] != "active":
+        raise OlympusContextError(
+            "olympus_authority_revoked", "authority reference is revoked"
+        )
+    if authority["expires_at"] <= current:
+        raise OlympusContextError(
+            "olympus_authority_expired", "authority reference is expired"
+        )
+    if lease["mission_id"] != mission_id:
+        raise OlympusContextError(
+            "olympus_lease_foreign_mission",
+            "lease mission does not match task mission",
+        )
+    if lease["status"] != "active":
+        raise OlympusContextError("olympus_lease_revoked", "lease is revoked")
+    if lease["expires_at"] <= current:
+        raise OlympusContextError("olympus_lease_expired", "lease is expired")
+    if assignee is None or context["agent_id"] != assignee:
+        raise OlympusContextError(
+            "olympus_agent_mismatch",
+            "task assignee does not match Olympus agent identity",
+        )
+    return context
+
+
+def _require_matching_olympus_run_context(
+    raw: Any,
+    *,
+    task_context: Optional[dict[str, Any]],
+    assignee: Optional[str],
+    now: int,
+) -> Optional[dict[str, Any]]:
+    """Validate the immutable attempt snapshot against current task scope."""
+    if task_context is None:
+        if raw is not None:
+            raise OlympusContextError(
+                "olympus_run_context_mismatch",
+                "legacy task unexpectedly carries a governed run context",
+            )
+        return None
+    run_context = _require_current_olympus_context(
+        raw, assignee=assignee, now=now
+    )
+    if run_context is None or any(
+        run_context[key] != task_context[key]
+        for key in (
+            "goal_id",
+            "program_id",
+            "milestone_id",
+            "mission_id",
+            "workstream_id",
+            "agent_id",
+        )
+    ):
+        raise OlympusContextError(
+            "olympus_run_context_mismatch",
+            "active run authority does not match the task mission scope",
+        )
+    return run_context
+
+
+def derive_olympus_child_context(
+    parent_context: Any,
+    *,
+    agent_id: str,
+    workstream_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Derive a governed child-task context without changing authority."""
+    context = normalize_olympus_context(parent_context)
+    derived = dict(context)
+    derived["authority"] = dict(context["authority"])
+    derived["lease"] = dict(context["lease"])
+    derived["evidence_refs"] = list(context["evidence_refs"])
+    derived["agent_id"] = _olympus_required_text(
+        agent_id,
+        reason="olympus_agent_missing",
+        field_name="agent_id",
+    )
+    if workstream_id is not None:
+        derived["workstream_id"] = _olympus_required_text(
+            workstream_id,
+            reason="olympus_workstream_id_missing",
+            field_name="workstream_id",
+        )
+    return normalize_olympus_context(derived)
+
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
 # call ``heartbeat_claim(task_id)`` periodically. In practice most kanban
@@ -801,6 +1197,10 @@ class Task:
     # set the env var. Lets clients render a per-session board without
     # relying on tenant + time-window heuristics.
     session_id: Optional[str] = None
+    # Versioned Olympus authority context. NULL is the explicit legacy path;
+    # a present-but-invalid document stays visibly invalid and is denied by
+    # every governed claim/start gate rather than silently becoming legacy.
+    olympus_context: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -876,6 +1276,10 @@ class Task:
             session_id=(
                 row["session_id"] if "session_id" in keys else None
             ),
+            olympus_context=(
+                _decode_olympus_context(row["olympus_context"])
+                if "olympus_context" in keys else None
+            ),
         )
 
 
@@ -906,6 +1310,7 @@ class Run:
     summary: Optional[str]
     metadata: Optional[dict]
     error: Optional[str]
+    olympus_context: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -930,6 +1335,10 @@ class Run:
             summary=row["summary"],
             metadata=meta,
             error=row["error"],
+            olympus_context=(
+                _decode_olympus_context(row["olympus_context"])
+                if "olympus_context" in row.keys() else None
+            ),
         )
 
 
@@ -1037,7 +1446,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- for tasks created from the CLI, dashboard, or any path that doesn't
     -- set the env var. Indexed so per-session list queries stay cheap on
     -- larger boards.
-    session_id           TEXT
+    session_id           TEXT,
+    -- Versioned Olympus goal/program/mission, authority, lease, risk,
+    -- agent, review, and evidence references. NULL preserves ordinary Kanban
+    -- compatibility; any non-NULL value is fail-closed at claim/start.
+    olympus_context      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1089,7 +1502,10 @@ CREATE TABLE IF NOT EXISTS task_runs (
     --          gave_up | reclaimed | (null while still running)
     summary             TEXT,
     metadata            TEXT,
-    error               TEXT
+    error               TEXT,
+    -- Immutable Olympus task-context snapshot at the start of this attempt.
+    -- Later lease renewal/revocation updates the task row, not history.
+    olympus_context     TEXT
 );
 
 -- Files attached to a task (PDFs, images, source documents). The blob
@@ -1693,6 +2109,26 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "session_id", "session_id TEXT"
         )
 
+    if "olympus_context" not in cols:
+        # NULL is the only legacy/ungoverned representation. No backfill is
+        # attempted: Hermes must never infer Olympus authority from an old
+        # task's title, tenant, branch, assignee, or mere existence.
+        _add_column_if_missing(
+            conn, "tasks", "olympus_context", "olympus_context TEXT"
+        )
+
+    runs_table_exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+    ).fetchone() is not None
+    if runs_table_exists:
+        run_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        }
+        if "olympus_context" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "olympus_context", "olympus_context TEXT"
+            )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -1748,7 +2184,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         with write_txn(conn):
             inflight = conn.execute(
                 "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
-                "       max_runtime_seconds, last_heartbeat_at, started_at "
+                "       max_runtime_seconds, last_heartbeat_at, started_at, "
+                "       olympus_context "
                 "FROM tasks "
                 "WHERE status = 'running' AND current_run_id IS NULL"
             ).fetchall()
@@ -1760,14 +2197,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         task_id, profile, status,
                         claim_lock, claim_expires, worker_pid,
                         max_runtime_seconds, last_heartbeat_at,
-                        started_at
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                        started_at, olympus_context
+                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"], row["assignee"], row["claim_lock"],
                         row["claim_expires"], row["worker_pid"],
                         row["max_runtime_seconds"], row["last_heartbeat_at"],
-                        started,
+                        started, row["olympus_context"],
                     ),
                 )
                 # CAS: only install the pointer if nothing else claimed
@@ -1846,7 +2283,7 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        " error TEXT)",
+        " error TEXT, olympus_context TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
@@ -2072,6 +2509,7 @@ def create_task(
     initial_status: str = "running",
     session_id: Optional[str] = None,
     board: Optional[str] = None,
+    olympus_context: Optional[dict[str, Any]] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2114,6 +2552,72 @@ def create_task(
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
     parents = tuple(p for p in parents if p)
+
+    # Resolve Olympus context before the idempotency fast path so a repeated
+    # key cannot silently alias two missions or downgrade a governed task into
+    # an ordinary Kanban task. Governed children inherit their parent's mission
+    # context when callers use the existing parent relationship and omit an
+    # explicit context; no second mission/task registry is introduced.
+    normalized_olympus: Optional[dict[str, Any]] = None
+    if olympus_context is not None:
+        normalized_olympus = normalize_olympus_context(olympus_context)
+    if parents:
+        placeholders = ",".join("?" * len(parents))
+        parent_rows = conn.execute(
+            f"SELECT id, olympus_context FROM tasks WHERE id IN ({placeholders})",
+            parents,
+        ).fetchall()
+        governed_parents = [r for r in parent_rows if r["olympus_context"] is not None]
+        if normalized_olympus is None and governed_parents:
+            if len(governed_parents) != len(parent_rows):
+                raise OlympusContextError(
+                    "olympus_parent_context_mixed",
+                    "cannot infer authority from mixed Olympus and legacy parents",
+                )
+            if assignee is None:
+                raise OlympusContextError(
+                    "olympus_agent_missing",
+                    "a governed child task requires an explicit assignee",
+                )
+            parent_contexts = [
+                normalize_olympus_context(json.loads(r["olympus_context"]))
+                for r in governed_parents
+            ]
+            hierarchy_keys = (
+                "goal_id", "program_id", "milestone_id", "mission_id"
+            )
+            first = parent_contexts[0]
+            if any(
+                any(ctx[key] != first[key] for key in hierarchy_keys)
+                for ctx in parent_contexts[1:]
+            ):
+                raise OlympusContextError(
+                    "olympus_parent_context_conflict",
+                    "governed parents do not share one Olympus mission hierarchy",
+                )
+            normalized_olympus = derive_olympus_child_context(
+                first, agent_id=assignee
+            )
+        elif normalized_olympus is not None and governed_parents:
+            hierarchy_keys = (
+                "goal_id", "program_id", "milestone_id", "mission_id"
+            )
+            for row in governed_parents:
+                parent_context = normalize_olympus_context(
+                    json.loads(row["olympus_context"])
+                )
+                if any(
+                    normalized_olympus[key] != parent_context[key]
+                    for key in hierarchy_keys
+                ):
+                    raise OlympusContextError(
+                        "olympus_parent_context_conflict",
+                        "child context does not match its Olympus parent mission",
+                    )
+    olympus_json = (
+        _serialize_olympus_context(normalized_olympus)
+        if normalized_olympus is not None else None
+    )
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
     # (preserving order). Refuse commas inside a single name so we don't
@@ -2167,12 +2671,17 @@ def create_task(
     # insert, at which point both rows exist but the next lookup stabilises.
     if idempotency_key:
         row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "SELECT id, olympus_context FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' "
             "ORDER BY created_at DESC LIMIT 1",
             (idempotency_key,),
         ).fetchone()
         if row:
+            if row["olympus_context"] != olympus_json:
+                raise OlympusContextError(
+                    "olympus_idempotency_context_conflict",
+                    "idempotency key already belongs to a different authority context",
+                )
             return row["id"]
 
     now = int(time.time())
@@ -2236,8 +2745,9 @@ def create_task(
                         id, title, body, assignee, status, priority,
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
-                        skills, max_retries, goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        skills, max_retries, goal_mode, goal_max_turns, session_id,
+                        olympus_context
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -2259,6 +2769,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        olympus_json,
                     ),
                 )
                 for pid in parents:
@@ -2278,6 +2789,10 @@ def create_task(
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                         "goal_mode": bool(goal_mode) or None,
+                        "olympus": (
+                            _olympus_trace(normalized_olympus)
+                            if normalized_olympus is not None else None
+                        ),
                     },
                 )
             return task_id
@@ -2305,6 +2820,76 @@ def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> l
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
+
+
+def update_task_olympus_context(
+    conn: sqlite3.Connection,
+    task_id: str,
+    context: dict[str, Any],
+) -> bool:
+    """Renew, revoke, or enrich a governed task's explicit context.
+
+    The first non-NULL context opts a legacy task into Olympus governance.
+    Once present it cannot be cleared. Updating the task never rewrites an
+    active or historical run: each attempt keeps the immutable snapshot
+    captured at claim/start. This lets Olympus revoke an in-flight lease
+    immediately (future heartbeat/completion fails closed) and lets a retry
+    receive a renewed reference without corrupting attempt history.
+    """
+    normalized = normalize_olympus_context(context)
+    encoded = _serialize_olympus_context(normalized)
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status, claim_lock, claim_expires, current_run_id, "
+            "olympus_context FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        if row["status"] in {"done", "archived"}:
+            raise OlympusContextError(
+                "olympus_context_update_forbidden",
+                "Olympus context cannot change after terminal state",
+            )
+        if row["olympus_context"] == encoded:
+            return True
+        if row["status"] == "running":
+            now = int(time.time())
+            authority = normalized["authority"]
+            lease = normalized["lease"]
+            current_limit = min(
+                int(authority["expires_at"]), int(lease["expires_at"])
+            )
+            if authority["status"] != "active" or lease["status"] != "active":
+                current_limit = now - 1
+            prior_expires = row["claim_expires"]
+            bounded_expires = (
+                min(int(prior_expires), current_limit)
+                if prior_expires is not None else current_limit
+            )
+            conn.execute(
+                "UPDATE tasks SET olympus_context = ?, claim_expires = ? "
+                "WHERE id = ?",
+                (encoded, bounded_expires, task_id),
+            )
+            if row["current_run_id"] is not None:
+                conn.execute(
+                    "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
+                    (bounded_expires, int(row["current_run_id"])),
+                )
+        else:
+            conn.execute(
+                "UPDATE tasks SET olympus_context = ? WHERE id = ?",
+                (encoded, task_id),
+            )
+        _append_event(
+            conn,
+            task_id,
+            "olympus_context_updated",
+            {"olympus": _olympus_trace(normalized)},
+            run_id=_current_run_id(conn, task_id),
+        )
+    return True
 
 
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
@@ -2811,26 +3396,28 @@ def _synthesize_ended_run(
     """
     now = int(time.time())
     trow = conn.execute(
-        "SELECT assignee, current_step_key FROM tasks WHERE id = ?",
+        "SELECT assignee, current_step_key, olympus_context "
+        "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     profile = trow["assignee"] if trow else None
     step_key = trow["current_step_key"] if trow else None
+    olympus_context = trow["olympus_context"] if trow else None
     cur = conn.execute(
         """
         INSERT INTO task_runs (
             task_id, profile, step_key,
             status, outcome,
             summary, error, metadata,
-            started_at, ended_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, ended_at, olympus_context
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task_id, profile, step_key,
             outcome, outcome,
             summary, error,
             json.dumps(metadata, ensure_ascii=False) if metadata else None,
-            now, now,
+            now, now, olympus_context,
         ),
     )
     return int(cur.lastrowid or 0)
@@ -2985,6 +3572,31 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        gate_row = conn.execute(
+            "SELECT status, assignee, olympus_context FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if gate_row is None or gate_row["status"] != "ready":
+            return None
+        try:
+            olympus = _require_current_olympus_context(
+                gate_row["olympus_context"],
+                assignee=gate_row["assignee"],
+                now=now,
+            )
+        except OlympusContextError as exc:
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": exc.reason, "governance": "olympus"},
+            )
+            return None
+        olympus_json = (
+            _serialize_olympus_context(olympus) if olympus is not None else None
+        )
+        if olympus is not None:
+            expires = min(expires, int(olympus["lease"]["expires_at"]))
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -3048,7 +3660,8 @@ def claim_task(
         # Look up the current task row so we can populate the run with
         # its assignee / step / runtime cap.
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, "
+            "olympus_context "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -3057,8 +3670,8 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, olympus_context
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -3068,6 +3681,7 @@ def claim_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                olympus_json,
             ),
         )
         run_id = run_cur.lastrowid
@@ -3075,9 +3689,14 @@ def claim_task(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
         )
+        claimed_payload: dict[str, Any] = {
+            "lock": lock, "expires": expires, "run_id": run_id
+        }
+        if olympus is not None:
+            claimed_payload["olympus"] = _olympus_trace(olympus)
         _append_event(
             conn, task_id, "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
+            claimed_payload,
             run_id=run_id,
         )
         return get_task(conn, task_id)
@@ -3106,6 +3725,35 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        gate_row = conn.execute(
+            "SELECT status, assignee, olympus_context FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if gate_row is None or gate_row["status"] != "review":
+            return None
+        try:
+            olympus = _require_current_olympus_context(
+                gate_row["olympus_context"],
+                assignee=gate_row["assignee"],
+                now=now,
+            )
+        except OlympusContextError as exc:
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {
+                    "reason": exc.reason,
+                    "governance": "olympus",
+                    "source_status": "review",
+                },
+            )
+            return None
+        olympus_json = (
+            _serialize_olympus_context(olympus) if olympus is not None else None
+        )
+        if olympus is not None:
+            expires = min(expires, int(olympus["lease"]["expires_at"]))
         cur = conn.execute(
             """
             UPDATE tasks
@@ -3122,7 +3770,8 @@ def claim_review_task(
         if cur.rowcount != 1:
             return None
         trow = conn.execute(
-            "SELECT assignee, max_runtime_seconds, current_step_key "
+            "SELECT assignee, max_runtime_seconds, current_step_key, "
+            "olympus_context "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -3131,8 +3780,8 @@ def claim_review_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+                started_at, olympus_context
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -3142,6 +3791,7 @@ def claim_review_task(
                 expires,
                 trow["max_runtime_seconds"] if trow else None,
                 now,
+                olympus_json,
             ),
         )
         run_id = run_cur.lastrowid
@@ -3149,10 +3799,15 @@ def claim_review_task(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
         )
+        claimed_payload = {
+            "lock": lock, "expires": expires, "run_id": run_id,
+            "source_status": "review"
+        }
+        if olympus is not None:
+            claimed_payload["olympus"] = _olympus_trace(olympus)
         _append_event(
             conn, task_id, "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id,
-             "source_status": "review"},
+            claimed_payload,
             run_id=run_id,
         )
         return get_task(conn, task_id)
@@ -3170,9 +3825,70 @@ def heartbeat_claim(
     Workers that know they'll exceed 15 minutes should call this every
     few minutes to keep ownership.
     """
-    expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
+    now = int(time.time())
+    expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     lock = claimer or _claimer_id()
     with write_txn(conn):
+        gate_row = conn.execute(
+            "SELECT assignee, claim_expires, current_run_id, olympus_context "
+            "FROM tasks "
+            "WHERE id = ? AND status = 'running' AND claim_lock = ?",
+            (task_id, lock),
+        ).fetchone()
+        if gate_row is None:
+            return False
+        try:
+            olympus = _require_current_olympus_context(
+                gate_row["olympus_context"],
+                assignee=gate_row["assignee"],
+                now=now,
+            )
+            if (
+                olympus is not None
+                and (
+                    gate_row["claim_expires"] is None
+                    or int(gate_row["claim_expires"]) <= now
+                )
+            ):
+                raise OlympusContextError(
+                    "olympus_claim_expired",
+                    "a governed claim cannot be renewed after it expires",
+                )
+            run_olympus = None
+            if olympus is not None and gate_row["current_run_id"] is None:
+                raise OlympusContextError(
+                    "olympus_run_context_mismatch",
+                    "governed running task has no active run",
+                )
+            if gate_row["current_run_id"] is not None:
+                run_row = conn.execute(
+                    "SELECT olympus_context FROM task_runs WHERE id = ?",
+                    (int(gate_row["current_run_id"]),),
+                ).fetchone()
+                if run_row is None:
+                    raise OlympusContextError(
+                        "olympus_run_context_mismatch",
+                        "active task has no matching run",
+                    )
+                run_olympus = _require_matching_olympus_run_context(
+                    run_row["olympus_context"],
+                    task_context=olympus,
+                    assignee=gate_row["assignee"],
+                    now=now,
+                )
+        except OlympusContextError as exc:
+            _append_event(
+                conn,
+                task_id,
+                "heartbeat_rejected",
+                {"reason": exc.reason, "governance": "olympus"},
+                run_id=_current_run_id(conn, task_id),
+            )
+            return False
+        if olympus is not None:
+            expires = min(expires, int(olympus["lease"]["expires_at"]))
+        if run_olympus is not None:
+            expires = min(expires, int(run_olympus["lease"]["expires_at"]))
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
             "WHERE id = ? AND status = 'running' AND claim_lock = ?",
@@ -3223,7 +3939,8 @@ def release_stale_claims(
     reclaimed = 0
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
+        "SELECT id, assignee, claim_lock, worker_pid, claim_expires, "
+        "last_heartbeat_at, current_run_id, olympus_context "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?",
@@ -3241,13 +3958,52 @@ def release_stale_claims(
             hb is not None
             and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         )
+        olympus_current = True
+        olympus: Optional[dict[str, Any]] = None
+        run_olympus: Optional[dict[str, Any]] = None
+        try:
+            olympus = _require_current_olympus_context(
+                row["olympus_context"], assignee=row["assignee"], now=now
+            )
+            if olympus is not None and row["current_run_id"] is None:
+                raise OlympusContextError(
+                    "olympus_run_context_mismatch",
+                    "governed running task has no active run",
+                )
+            if row["current_run_id"] is not None:
+                run_row = conn.execute(
+                    "SELECT olympus_context FROM task_runs WHERE id = ?",
+                    (int(row["current_run_id"]),),
+                ).fetchone()
+                if run_row is None:
+                    raise OlympusContextError(
+                        "olympus_run_context_mismatch",
+                        "active task has no matching run",
+                    )
+                run_olympus = _require_matching_olympus_run_context(
+                    run_row["olympus_context"],
+                    task_context=olympus,
+                    assignee=row["assignee"],
+                    now=now,
+                )
+        except OlympusContextError:
+            olympus_current = False
         if (
             host_local
             and row["worker_pid"]
             and _pid_alive(row["worker_pid"])
             and not heartbeat_stale
+            and olympus_current
         ):
             new_expires = now + _resolve_claim_ttl_seconds()
+            if olympus is not None:
+                new_expires = min(
+                    new_expires, int(olympus["lease"]["expires_at"])
+                )
+            if run_olympus is not None:
+                new_expires = min(
+                    new_expires, int(run_olympus["lease"]["expires_at"])
+                )
             with write_txn(conn):
                 cur = conn.execute(
                     "UPDATE tasks SET claim_expires = ? "
@@ -3571,9 +4327,10 @@ def complete_task(
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
-    Accepts a task that is merely ``ready`` too, so a manual CLI
-    completion (``hermes kanban complete <id>``) works without requiring
-    a claim/start/complete sequence.
+    Ordinary Kanban tasks may be merely ``ready`` so the manual CLI completion
+    path remains compatible. Olympus-governed tasks must be running under a
+    current authority/lease and an attributable active run; direct completion
+    can never bypass the claim/start gate.
 
     ``summary`` and ``metadata`` are stored on the closing run (if any)
     and surfaced to downstream children via :func:`build_worker_context`.
@@ -3627,6 +4384,67 @@ def complete_task(
         verified_cards = []
 
     with write_txn(conn):
+        task_row = conn.execute(
+            "SELECT status, assignee, claim_expires, current_run_id, "
+            "olympus_context "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            return False
+        olympus: Optional[dict[str, Any]] = None
+        if task_row["olympus_context"] is not None:
+            try:
+                olympus = _require_current_olympus_context(
+                    task_row["olympus_context"],
+                    assignee=task_row["assignee"],
+                    now=now,
+                )
+                if task_row["status"] != "running" or task_row["current_run_id"] is None:
+                    raise OlympusContextError(
+                        "olympus_completion_without_active_run",
+                        "governed completion requires an active claimed run",
+                    )
+                if (
+                    task_row["claim_expires"] is None
+                    or int(task_row["claim_expires"]) <= now
+                ):
+                    raise OlympusContextError(
+                        "olympus_claim_expired",
+                        "governed completion requires an unexpired claim",
+                    )
+                run_row = conn.execute(
+                    "SELECT olympus_context, ended_at FROM task_runs WHERE id = ?",
+                    (int(task_row["current_run_id"]),),
+                ).fetchone()
+                if run_row is None or run_row["ended_at"] is not None:
+                    raise OlympusContextError(
+                        "olympus_run_context_mismatch",
+                        "active run does not carry the task authority snapshot",
+                    )
+                run_olympus = _require_matching_olympus_run_context(
+                    run_row["olympus_context"],
+                    task_context=olympus,
+                    assignee=task_row["assignee"],
+                    now=now,
+                )
+                if run_olympus is None:
+                    raise OlympusContextError(
+                        "olympus_run_context_mismatch",
+                        "governed task has no governed run context",
+                    )
+            except OlympusContextError as exc:
+                _append_event(
+                    conn,
+                    task_id,
+                    "completion_rejected",
+                    {"reason": exc.reason, "governance": "olympus"},
+                    run_id=(
+                        int(task_row["current_run_id"])
+                        if task_row["current_run_id"] is not None else None
+                    ),
+                )
+                return False
         if expected_run_id is None:
             cur = conn.execute(
                 """
@@ -3687,6 +4505,8 @@ def complete_task(
             "result_len": len(result) if result else 0,
             "summary": ev_summary or None,
         }
+        if olympus is not None:
+            completed_payload["olympus"] = _olympus_trace(olympus)
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
         # Carry artifact paths in the event payload so the gateway
@@ -4475,7 +5295,8 @@ def decompose_triage_task(
     child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
-            "SELECT id, status, tenant, workspace_kind, workspace_path "
+            "SELECT id, status, assignee, tenant, workspace_kind, "
+            "workspace_path, olympus_context "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -4483,6 +5304,20 @@ def decompose_triage_task(
             return None
         if root_row["status"] != "triage":
             return None
+        root_olympus = _require_current_olympus_context(
+            root_row["olympus_context"],
+            assignee=root_row["assignee"],
+            now=now,
+        )
+        if (
+            root_olympus is not None
+            and root_assignee is not None
+            and root_assignee != root_olympus["agent_id"]
+        ):
+            raise OlympusContextError(
+                "olympus_agent_mismatch",
+                "root reassignment requires a matching refreshed Olympus context",
+            )
         tenant = root_row["tenant"]
         # Children inherit the root's workspace by default so a fan-out
         # of a code-gen task lands in the parent's project dir/worktree
@@ -4500,6 +5335,36 @@ def decompose_triage_task(
             title = child["title"].strip()
             body = child.get("body")
             assignee = _canonical_assignee(child.get("assignee"))
+            child_olympus: Optional[dict[str, Any]] = None
+            if root_olympus is not None:
+                if assignee is None:
+                    raise OlympusContextError(
+                        "olympus_agent_missing",
+                        "a governed decomposed task requires an assignee",
+                    )
+                explicit_child_context = child.get("olympus_context")
+                if explicit_child_context is None:
+                    child_olympus = derive_olympus_child_context(
+                        root_olympus,
+                        agent_id=assignee,
+                        workstream_id=child.get("workstream_id"),
+                    )
+                else:
+                    child_olympus = normalize_olympus_context(
+                        explicit_child_context
+                    )
+                    for key in (
+                        "goal_id", "program_id", "milestone_id", "mission_id"
+                    ):
+                        if child_olympus[key] != root_olympus[key]:
+                            raise OlympusContextError(
+                                "olympus_parent_context_conflict",
+                                "decomposed child context crosses the root mission",
+                            )
+            elif child.get("olympus_context") is not None:
+                child_olympus = normalize_olympus_context(
+                    child["olympus_context"]
+                )
             # Per-child override wins; otherwise inherit the root's
             # workspace. A child that sets workspace_kind without a path
             # falls back to the root path only when kinds match (so a
@@ -4515,8 +5380,9 @@ def decompose_triage_task(
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
-                " workspace_path, tenant, created_at, created_by) "
-                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                " workspace_path, tenant, created_at, created_by, "
+                " olympus_context) "
+                "VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -4527,11 +5393,22 @@ def decompose_triage_task(
                     tenant,
                     now,
                     (author or "decomposer"),
+                    (
+                        _serialize_olympus_context(child_olympus)
+                        if child_olympus is not None else None
+                    ),
                 ),
             )
             _append_event(
                 conn, new_id, "created",
-                {"by": author or "decomposer", "from_decompose_of": task_id},
+                {
+                    "by": author or "decomposer",
+                    "from_decompose_of": task_id,
+                    "olympus": (
+                        _olympus_trace(child_olympus)
+                        if child_olympus is not None else None
+                    ),
+                },
             )
             child_ids.append(new_id)
 
@@ -6022,6 +6899,40 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _release_unspawned_claim(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    claim_lock: Optional[str],
+) -> bool:
+    """Release a claim that failed its final pre-spawn authority check."""
+    with write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+            "AND worker_pid IS NULL",
+            (task_id, claim_lock),
+        )
+        if cur.rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="reclaimed",
+            status="reclaimed",
+            error="authority validation failed before worker spawn",
+        )
+        _append_event(
+            conn,
+            task_id,
+            "spawn_rejected",
+            {"reason": "authority_changed_before_spawn", "governance": "olympus"},
+            run_id=run_id,
+        )
+        return True
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -6295,6 +7206,19 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        # Workspace setup can take long enough for Olympus to revoke or expire
+        # authority after the initial claim. Revalidate at the last durable
+        # boundary before process creation; a rejected claim never spawns.
+        if not heartbeat_claim(
+            conn,
+            claimed.id,
+            ttl_seconds=ttl_seconds,
+            claimer=claimed.claim_lock,
+        ):
+            _release_unspawned_claim(
+                conn, claimed.id, claim_lock=claimed.claim_lock
+            )
+            continue
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -6381,6 +7305,16 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        if not heartbeat_claim(
+            conn,
+            claimed.id,
+            ttl_seconds=ttl_seconds,
+            claimer=claimed.claim_lock,
+        ):
+            _release_unspawned_claim(
+                conn, claimed.id, claim_lock=claimed.claim_lock
+            )
+            continue
         # Force-load sdlc-review skill for review agents.  The
         # _default_spawn function already auto-loads kanban-worker, and
         # appends task.skills via --skills.  Setting task.skills here
@@ -7005,6 +7939,36 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
     lines.append("")
+
+    if task.olympus_context is not None:
+        olympus = normalize_olympus_context(task.olympus_context)
+        authority = olympus["authority"]
+        lease = olympus["lease"]
+        lines.append("## Olympus authority")
+        lines.append(
+            "This task is governed by the explicit scope below. Do not infer "
+            "permission from task existence, assignment, or successful validation."
+        )
+        lines.append(f"Goal:       {olympus['goal_id']}")
+        lines.append(f"Program:    {olympus['program_id']}")
+        lines.append(f"Milestone:  {olympus['milestone_id']}")
+        lines.append(f"Mission:    {olympus['mission_id']}")
+        lines.append(f"Workstream: {olympus['workstream_id']}")
+        lines.append(
+            f"Authority:  {authority['ref']} ({authority['status']}, "
+            f"expires {authority['expires_at']})"
+        )
+        lines.append(
+            f"Lease:      {lease['ref']} ({lease['status']}, holder "
+            f"{lease['holder']}, expires {lease['expires_at']})"
+        )
+        lines.append(f"Risk:       {olympus['risk']}")
+        lines.append(f"Agent:      {olympus['agent_id']}")
+        lines.append(f"Review:     {olympus['review_status']}")
+        if olympus["evidence_refs"]:
+            lines.append("Evidence references:")
+            lines.extend(f"- {ref}" for ref in olympus["evidence_refs"])
+        lines.append("")
 
     if task.body and task.body.strip():
         lines.append("## Body")

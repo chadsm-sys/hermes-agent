@@ -783,15 +783,23 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            _self_tid = os.environ.get("HERMES_KANBAN_TASK")
+            _self_task = kb.get_task(conn, _self_tid) if _self_tid else None
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
             if _inherit_workspace:
-                _self_tid = os.environ.get("HERMES_KANBAN_TASK")
-                if _self_tid:
-                    _self_task = kb.get_task(conn, _self_tid)
-                    if _self_task is not None and _self_task.workspace_kind:
-                        workspace_kind = _self_task.workspace_kind
-                        workspace_path = _self_task.workspace_path
+                if _self_task is not None and _self_task.workspace_kind:
+                    workspace_kind = _self_task.workspace_kind
+                    workspace_path = _self_task.workspace_path
+            child_olympus_context = None
+            if _self_task is not None and _self_task.olympus_context is not None:
+                # A governed worker cannot accidentally create an ungoverned
+                # child by omitting parents. Hermes derives only task/agent
+                # attribution; it never widens or invents authority/lease scope.
+                child_olympus_context = kb.derive_olympus_child_context(
+                    _self_task.olympus_context,
+                    agent_id=str(assignee),
+                )
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -816,6 +824,7 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
+                olympus_context=child_olympus_context,
             )
             new_task = kb.get_task(conn, new_tid)
             return _ok(

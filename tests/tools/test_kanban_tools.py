@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -794,6 +795,64 @@ def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
         child = kb.get_task(conn, d["task_id"])
         assert child.workspace_kind == "dir"
         assert child.workspace_path == proj
+    finally:
+        conn.close()
+
+
+def test_create_inherits_worker_olympus_authority(monkeypatch, worker_env):
+    """A governed worker cannot create an ungoverned child by omitting parents."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time())
+    context = {
+        "schema_version": 1,
+        "goal_id": "g-tool",
+        "program_id": "p-tool",
+        "milestone_id": "ms-tool",
+        "mission_id": "m-tool",
+        "workstream_id": "ws-tool",
+        "authority": {
+            "ref": "authority-tool",
+            "mission_id": "m-tool",
+            "status": "active",
+            "expires_at": now + 3600,
+        },
+        "lease": {
+            "ref": "lease-tool",
+            "mission_id": "m-tool",
+            "holder": "olympus",
+            "status": "active",
+            "expires_at": now + 1800,
+        },
+        "risk": "high",
+        "agent_id": "test-worker",
+        "review_status": "pending",
+        "evidence_refs": [],
+    }
+    conn = kb.connect()
+    try:
+        self_tid = kb.create_task(
+            conn,
+            title="governed worker",
+            assignee="test-worker",
+            olympus_context=context,
+        )
+        assert kb.claim_task(conn, self_tid) is not None
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", self_tid)
+
+    created = json.loads(
+        kt._handle_create({"title": "governed child", "assignee": "peer"})
+    )
+    assert created["ok"] is True
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, created["task_id"])
+        assert child.olympus_context["mission_id"] == "m-tool"
+        assert child.olympus_context["lease"]["ref"] == "lease-tool"
+        assert child.olympus_context["agent_id"] == "peer"
     finally:
         conn.close()
 
