@@ -86,7 +86,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from toolsets import get_toolset_names
 
@@ -108,9 +108,12 @@ _IS_WINDOWS = sys.platform == "win32"
 # document in the existing Kanban row.  The same immutable snapshot is copied
 # onto every run so retries remain attributable even after Olympus renews or
 # revokes the task's current lease reference.
-OLYMPUS_CONTEXT_VERSION = 1
-VALID_OLYMPUS_AUTHORITY_STATUSES = {"active", "revoked"}
-VALID_OLYMPUS_LEASE_STATUSES = {"active", "revoked"}
+OLYMPUS_CONTEXT_VERSION = 2
+AUTHORITY_REQUEST_SCHEMA = "olympus-authority-request/1"
+AUTHORITY_VERIFICATION_SCHEMA = "olympus-authority-verification/1"
+AuthorityVerifier = Callable[[dict[str, Any]], dict[str, Any]]
+VALID_OLYMPUS_AUTHORITY_STATUSES = {"ACTIVE", "CONSUMED", "REVOKED"}
+VALID_OLYMPUS_LEASE_STATUSES = {"ACTIVE", "RELEASED", "REVOKED"}
 VALID_OLYMPUS_RISKS = {"low", "medium", "high", "critical"}
 OLYMPUS_CONTEXT_KEYS = {
     "schema_version",
@@ -126,8 +129,34 @@ OLYMPUS_CONTEXT_KEYS = {
     "review_status",
     "evidence_refs",
 }
-OLYMPUS_AUTHORITY_KEYS = {"ref", "mission_id", "status", "expires_at"}
-OLYMPUS_LEASE_KEYS = {"ref", "mission_id", "holder", "status", "expires_at"}
+OLYMPUS_AUTHORITY_KEYS = {
+    "authority_id",
+    "status",
+    "scope",
+    "capabilities",
+    "revision",
+    "source",
+    "expires_at",
+}
+OLYMPUS_LEASE_KEYS = {
+    "lease_id",
+    "status",
+    "mission_id",
+    "agent_id",
+    "holder",
+    "repository",
+    "branch",
+    "worktree",
+    "revision",
+    "source",
+    "expires_at",
+}
+
+OLYMPUS_CAPABILITY_CREATE = "kanban.task.create"
+OLYMPUS_CAPABILITY_UPDATE = "kanban.task.authority.update"
+OLYMPUS_CAPABILITY_CLAIM = "kanban.task.claim"
+OLYMPUS_CAPABILITY_HEARTBEAT = "kanban.task.heartbeat"
+OLYMPUS_CAPABILITY_COMPLETE = "kanban.task.complete"
 
 
 class OlympusContextError(ValueError):
@@ -167,6 +196,41 @@ def _olympus_required_epoch(
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise OlympusContextError(reason, f"{field_name} must be a positive epoch")
     return int(value)
+
+
+def _olympus_required_revision(
+    value: Any,
+    *,
+    field_name: str,
+) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise OlympusContextError(
+            "olympus_context_invalid", f"{field_name} must be a positive integer"
+        )
+    return int(value)
+
+
+def _olympus_required_text_list(
+    value: Any,
+    *,
+    field_name: str,
+) -> list[str]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise OlympusContextError(
+            "olympus_context_invalid", f"{field_name} must be a non-empty list"
+        )
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        cleaned = _olympus_required_text(
+            item,
+            reason="olympus_context_invalid",
+            field_name=f"{field_name}[]",
+        )
+        if cleaned not in seen:
+            seen.add(cleaned)
+            result.append(cleaned)
+    return result
 
 
 def _reject_unknown_olympus_keys(
@@ -229,24 +293,36 @@ def normalize_olympus_context(context: Any) -> dict[str, Any]:
         authority.get("status"),
         reason="olympus_authority_status_missing",
         field_name="olympus_context.authority.status",
-    ).lower()
+    ).upper()
     if authority_status not in VALID_OLYMPUS_AUTHORITY_STATUSES:
         raise OlympusContextError(
             "olympus_authority_status_invalid",
-            "olympus_context.authority.status must be active or revoked",
+            "olympus_context.authority.status is not recognized",
         )
     normalized["authority"] = {
-        "ref": _olympus_required_text(
-            authority.get("ref"),
+        "authority_id": _olympus_required_text(
+            authority.get("authority_id"),
             reason="olympus_authority_missing",
-            field_name="olympus_context.authority.ref",
-        ),
-        "mission_id": _olympus_required_text(
-            authority.get("mission_id"),
-            reason="olympus_authority_mission_missing",
-            field_name="olympus_context.authority.mission_id",
+            field_name="olympus_context.authority.authority_id",
         ),
         "status": authority_status,
+        "scope": _olympus_required_text_list(
+            authority.get("scope"),
+            field_name="olympus_context.authority.scope",
+        ),
+        "capabilities": _olympus_required_text_list(
+            authority.get("capabilities"),
+            field_name="olympus_context.authority.capabilities",
+        ),
+        "revision": _olympus_required_revision(
+            authority.get("revision"),
+            field_name="olympus_context.authority.revision",
+        ),
+        "source": _olympus_required_text(
+            authority.get("source"),
+            reason="olympus_authority_source_missing",
+            field_name="olympus_context.authority.source",
+        ),
         "expires_at": _olympus_required_epoch(
             authority.get("expires_at"),
             reason="olympus_authority_expiry_missing",
@@ -268,17 +344,17 @@ def normalize_olympus_context(context: Any) -> dict[str, Any]:
         lease.get("status"),
         reason="olympus_lease_status_missing",
         field_name="olympus_context.lease.status",
-    ).lower()
+    ).upper()
     if lease_status not in VALID_OLYMPUS_LEASE_STATUSES:
         raise OlympusContextError(
             "olympus_lease_status_invalid",
-            "olympus_context.lease.status must be active or revoked",
+            "olympus_context.lease.status is not recognized",
         )
     normalized["lease"] = {
-        "ref": _olympus_required_text(
-            lease.get("ref"),
+        "lease_id": _olympus_required_text(
+            lease.get("lease_id"),
             reason="olympus_lease_missing",
-            field_name="olympus_context.lease.ref",
+            field_name="olympus_context.lease.lease_id",
         ),
         "mission_id": _olympus_required_text(
             lease.get("mission_id"),
@@ -291,6 +367,35 @@ def normalize_olympus_context(context: Any) -> dict[str, Any]:
             field_name="olympus_context.lease.holder",
         ),
         "status": lease_status,
+        "agent_id": _olympus_required_text(
+            lease.get("agent_id"),
+            reason="olympus_lease_agent_missing",
+            field_name="olympus_context.lease.agent_id",
+        ),
+        "repository": _olympus_required_text(
+            lease.get("repository"),
+            reason="olympus_lease_repository_missing",
+            field_name="olympus_context.lease.repository",
+        ),
+        "branch": _olympus_required_text(
+            lease.get("branch"),
+            reason="olympus_lease_branch_missing",
+            field_name="olympus_context.lease.branch",
+        ),
+        "worktree": _olympus_required_text(
+            lease.get("worktree"),
+            reason="olympus_lease_worktree_missing",
+            field_name="olympus_context.lease.worktree",
+        ),
+        "revision": _olympus_required_revision(
+            lease.get("revision"),
+            field_name="olympus_context.lease.revision",
+        ),
+        "source": _olympus_required_text(
+            lease.get("source"),
+            reason="olympus_lease_source_missing",
+            field_name="olympus_context.lease.source",
+        ),
         "expires_at": _olympus_required_epoch(
             lease.get("expires_at"),
             reason="olympus_lease_expiry_missing",
@@ -373,8 +478,12 @@ def _olympus_trace(context: dict[str, Any]) -> dict[str, Any]:
         "milestone_id": context["milestone_id"],
         "mission_id": context["mission_id"],
         "workstream_id": context["workstream_id"],
-        "authority_ref": context["authority"]["ref"],
-        "lease_ref": context["lease"]["ref"],
+        "authority_ref": context["authority"]["authority_id"],
+        "authority_revision": context["authority"]["revision"],
+        "authority_source": context["authority"]["source"],
+        "lease_ref": context["lease"]["lease_id"],
+        "lease_revision": context["lease"]["revision"],
+        "lease_source": context["lease"]["source"],
         "lease_holder": context["lease"]["holder"],
         "risk": context["risk"],
         "agent_id": context["agent_id"],
@@ -408,12 +517,7 @@ def _require_current_olympus_context(
     mission_id = context["mission_id"]
     authority = context["authority"]
     lease = context["lease"]
-    if authority["mission_id"] != mission_id:
-        raise OlympusContextError(
-            "olympus_authority_foreign_mission",
-            "authority mission does not match task mission",
-        )
-    if authority["status"] != "active":
+    if authority["status"] != "ACTIVE":
         raise OlympusContextError(
             "olympus_authority_revoked", "authority reference is revoked"
         )
@@ -426,16 +530,182 @@ def _require_current_olympus_context(
             "olympus_lease_foreign_mission",
             "lease mission does not match task mission",
         )
-    if lease["status"] != "active":
+    if lease["status"] != "ACTIVE":
         raise OlympusContextError("olympus_lease_revoked", "lease is revoked")
     if lease["expires_at"] <= current:
         raise OlympusContextError("olympus_lease_expired", "lease is expired")
-    if assignee is None or context["agent_id"] != assignee:
+    if assignee is None or not (
+        context["agent_id"] == lease["agent_id"] == lease["holder"] == assignee
+    ):
         raise OlympusContextError(
             "olympus_agent_mismatch",
-            "task assignee does not match Olympus agent identity",
+            "lease holder, lease agent, context agent, and task assignee must match exactly",
         )
     return context
+
+
+def _olympus_authority_request(
+    context: dict[str, Any],
+    *,
+    task_id: str,
+    assignee: str,
+    action: str,
+    capability: str,
+    actor: str,
+    expected_revision: int,
+    operation_id: str,
+) -> dict[str, Any]:
+    authority = context["authority"]
+    lease = context["lease"]
+    request = {
+        "schema_version": AUTHORITY_REQUEST_SCHEMA,
+        "mission_id": context["mission_id"],
+        "goal_id": context["goal_id"],
+        "program_id": context["program_id"],
+        "milestone_id": context["milestone_id"],
+        "action": action,
+        "capability": capability,
+        "actor": actor,
+        "scope": context["mission_id"],
+        "authority_id": authority["authority_id"],
+        "authority_revision": authority["revision"],
+        "authority_source": authority["source"],
+        "lease_id": lease["lease_id"],
+        "lease_revision": lease["revision"],
+        "lease_source": lease["source"],
+        "expected_revision": expected_revision,
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "assignee": assignee,
+        "lease_agent_id": lease["agent_id"],
+        "lease_holder": lease["holder"],
+        "repository": lease["repository"],
+        "branch": lease["branch"],
+        "worktree": lease["worktree"],
+    }
+    digest = hashlib.sha256(
+        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {**request, "request_id": f"authority-request:{digest}"}
+
+
+def require_olympus_authority_verification(
+    context: Any,
+    *,
+    task_id: str,
+    assignee: str,
+    action: str,
+    capability: str,
+    actor: str,
+    expected_revision: int,
+    operation_id: str,
+    verifier: Optional[AuthorityVerifier],
+    now: Optional[int] = None,
+    allow_inactive: bool = False,
+) -> dict[str, Any]:
+    """Require the shared Mission Control exact-request/result contract.
+
+    Stored references and caller assertions are request inputs only.  They can
+    never produce an allow decision.  The verifier is a callable controlled by
+    the embedding canonical issuer; callers cannot submit a pre-built result.
+    """
+    if allow_inactive:
+        normalized = normalize_olympus_context(context)
+        lease = normalized["lease"]
+        if lease["mission_id"] != normalized["mission_id"]:
+            raise OlympusContextError(
+                "olympus_lease_foreign_mission",
+                "lease mission does not match task mission",
+            )
+        if not (
+            normalized["agent_id"] == lease["agent_id"] == lease["holder"] == assignee
+        ):
+            raise OlympusContextError(
+                "olympus_agent_mismatch",
+                "lease holder, lease agent, context agent, and task assignee must match exactly",
+            )
+    else:
+        normalized = _require_current_olympus_context(
+            context, assignee=assignee, now=now
+        )
+    if normalized is None:
+        raise OlympusContextError(
+            "olympus_context_missing", "a governed operation requires Olympus context"
+        )
+    if not callable(verifier):
+        raise OlympusContextError(
+            "olympus_authority_verification_unavailable",
+            "canonical authority verifier is unavailable",
+        )
+    if not all(str(value).strip() for value in (task_id, assignee, action, capability, actor, operation_id)):
+        raise OlympusContextError(
+            "olympus_authority_request_invalid",
+            "authority request identity is incomplete",
+        )
+    if actor != assignee:
+        raise OlympusContextError(
+            "olympus_actor_mismatch",
+            "verified actor must match the governed task assignee",
+        )
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) \
+            or expected_revision < 0:
+        raise OlympusContextError(
+            "olympus_authority_request_invalid",
+            "expected revision must be a non-negative integer",
+        )
+    authority = normalized["authority"]
+    if expected_revision != authority["revision"]:
+        raise OlympusContextError(
+            "olympus_revision_mismatch",
+            "expected canonical revision does not match stored authority revision",
+        )
+    if capability not in authority["capabilities"]:
+        raise OlympusContextError(
+            "olympus_capability_missing", "required canonical capability is absent"
+        )
+    if "*" not in authority["scope"] and normalized["mission_id"] not in authority["scope"] \
+            and normalized["program_id"] not in authority["scope"]:
+        raise OlympusContextError(
+            "olympus_scope_mismatch", "task mission is outside authority scope"
+        )
+    request = _olympus_authority_request(
+        normalized,
+        task_id=task_id,
+        assignee=assignee,
+        action=action,
+        capability=capability,
+        actor=actor,
+        expected_revision=expected_revision,
+        operation_id=operation_id,
+    )
+    try:
+        result = verifier(dict(request))
+    except Exception as exc:
+        raise OlympusContextError(
+            "olympus_authority_verification_failed",
+            f"canonical authority verification failed: {type(exc).__name__}",
+        ) from exc
+    if not isinstance(result, dict):
+        raise OlympusContextError(
+            "olympus_authority_verification_invalid",
+            "canonical authority verifier returned no structured result",
+        )
+    exact = (
+        result.get("schema_version") == AUTHORITY_VERIFICATION_SCHEMA
+        and result.get("decision") == "ALLOW"
+        and result.get("current") is True
+        and result.get("source") == authority["source"]
+        and result.get("source_revision") == authority["revision"]
+        and result.get("request_id") == request["request_id"]
+        and result.get("request") == request
+        and str(result.get("verification_id", "")).strip()
+    )
+    if not exact:
+        raise OlympusContextError(
+            "olympus_authority_verification_denied",
+            "authority verification is missing, stale, foreign, ambiguous, or contradictory",
+        )
+    return {"request": request, "verification": dict(result), "context": normalized}
 
 
 def _require_matching_olympus_run_context(
@@ -466,7 +736,8 @@ def _require_matching_olympus_run_context(
             "workstream_id",
             "agent_id",
         )
-    ):
+    ) or run_context["authority"] != task_context["authority"] \
+            or run_context["lease"] != task_context["lease"]:
         raise OlympusContextError(
             "olympus_run_context_mismatch",
             "active run authority does not match the task mission scope",
@@ -482,15 +753,21 @@ def derive_olympus_child_context(
 ) -> dict[str, Any]:
     """Derive a governed child-task context without changing authority."""
     context = normalize_olympus_context(parent_context)
-    derived = dict(context)
-    derived["authority"] = dict(context["authority"])
-    derived["lease"] = dict(context["lease"])
-    derived["evidence_refs"] = list(context["evidence_refs"])
-    derived["agent_id"] = _olympus_required_text(
+    normalized_agent = _olympus_required_text(
         agent_id,
         reason="olympus_agent_missing",
         field_name="agent_id",
     )
+    if normalized_agent != context["agent_id"]:
+        raise OlympusContextError(
+            "olympus_delegation_requires_verification",
+            "cross-agent delegation requires a separately verified child authority and lease",
+        )
+    derived = dict(context)
+    derived["authority"] = dict(context["authority"])
+    derived["lease"] = dict(context["lease"])
+    derived["evidence_refs"] = list(context["evidence_refs"])
+    derived["agent_id"] = normalized_agent
     if workstream_id is not None:
         derived["workstream_id"] = _olympus_required_text(
             workstream_id,
@@ -2486,7 +2763,7 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
-def create_task(
+def _create_task_internal(
     conn: sqlite3.Connection,
     *,
     title: str,
@@ -2553,11 +2830,9 @@ def create_task(
         raise ValueError("branch_name is only valid for worktree workspaces")
     parents = tuple(p for p in parents if p)
 
-    # Resolve Olympus context before the idempotency fast path so a repeated
-    # key cannot silently alias two missions or downgrade a governed task into
-    # an ordinary Kanban task. Governed children inherit their parent's mission
-    # context when callers use the existing parent relationship and omit an
-    # explicit context; no second mission/task registry is introduced.
+    # Only the dedicated verified wrapper may provide Olympus context.  Generic
+    # callers cannot opt a task in, renew authority, or inherit a privileged
+    # parent context merely by knowing row identifiers.
     normalized_olympus: Optional[dict[str, Any]] = None
     if olympus_context is not None:
         normalized_olympus = normalize_olympus_context(olympus_context)
@@ -2569,36 +2844,11 @@ def create_task(
         ).fetchall()
         governed_parents = [r for r in parent_rows if r["olympus_context"] is not None]
         if normalized_olympus is None and governed_parents:
-            if len(governed_parents) != len(parent_rows):
-                raise OlympusContextError(
-                    "olympus_parent_context_mixed",
-                    "cannot infer authority from mixed Olympus and legacy parents",
-                )
-            if assignee is None:
-                raise OlympusContextError(
-                    "olympus_agent_missing",
-                    "a governed child task requires an explicit assignee",
-                )
-            parent_contexts = [
-                normalize_olympus_context(json.loads(r["olympus_context"]))
-                for r in governed_parents
-            ]
-            hierarchy_keys = (
-                "goal_id", "program_id", "milestone_id", "mission_id"
+            raise OlympusContextError(
+                "olympus_verified_context_required",
+                "a governed child requires the dedicated canonical-verification path",
             )
-            first = parent_contexts[0]
-            if any(
-                any(ctx[key] != first[key] for key in hierarchy_keys)
-                for ctx in parent_contexts[1:]
-            ):
-                raise OlympusContextError(
-                    "olympus_parent_context_conflict",
-                    "governed parents do not share one Olympus mission hierarchy",
-                )
-            normalized_olympus = derive_olympus_child_context(
-                first, agent_id=assignee
-            )
-        elif normalized_olympus is not None and governed_parents:
+        if normalized_olympus is not None and governed_parents:
             hierarchy_keys = (
                 "goal_id", "program_id", "milestone_id", "mission_id"
             )
@@ -2804,6 +3054,130 @@ def create_task(
     raise RuntimeError("unreachable")
 
 
+def create_task(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body: Optional[str] = None,
+    assignee: Optional[str] = None,
+    created_by: Optional[str] = None,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    parents: Iterable[str] = (),
+    triage: bool = False,
+    idempotency_key: Optional[str] = None,
+    max_runtime_seconds: Optional[int] = None,
+    skills: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
+    goal_mode: bool = False,
+    goal_max_turns: Optional[int] = None,
+    initial_status: str = "running",
+    session_id: Optional[str] = None,
+    board: Optional[str] = None,
+) -> str:
+    """Create an ordinary task; Olympus context is never caller-injectable."""
+    return _create_task_internal(
+        conn,
+        title=title,
+        body=body,
+        assignee=assignee,
+        created_by=created_by,
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
+        branch_name=branch_name,
+        tenant=tenant,
+        priority=priority,
+        parents=parents,
+        triage=triage,
+        idempotency_key=idempotency_key,
+        max_runtime_seconds=max_runtime_seconds,
+        skills=skills,
+        max_retries=max_retries,
+        goal_mode=goal_mode,
+        goal_max_turns=goal_max_turns,
+        initial_status=initial_status,
+        session_id=session_id,
+        board=board,
+        olympus_context=None,
+    )
+
+
+def create_olympus_task(
+    conn: sqlite3.Connection,
+    *,
+    olympus_context: dict[str, Any],
+    authority_verifier: Optional[AuthorityVerifier],
+    actor: str,
+    operation_id: str,
+    expected_revision: int,
+    title: str,
+    body: Optional[str] = None,
+    assignee: Optional[str] = None,
+    created_by: Optional[str] = None,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    parents: Iterable[str] = (),
+    triage: bool = False,
+    idempotency_key: Optional[str] = None,
+    max_runtime_seconds: Optional[int] = None,
+    skills: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
+    goal_mode: bool = False,
+    goal_max_turns: Optional[int] = None,
+    initial_status: str = "running",
+    session_id: Optional[str] = None,
+    board: Optional[str] = None,
+) -> str:
+    """Persist a governed task only after exact canonical verification."""
+    canonical_assignee = _canonical_assignee(assignee)
+    if canonical_assignee is None:
+        raise OlympusContextError(
+            "olympus_agent_missing", "a governed task requires an assignee"
+        )
+    normalized = normalize_olympus_context(olympus_context)
+    require_olympus_authority_verification(
+        normalized,
+        task_id=f"pending:{operation_id}",
+        assignee=canonical_assignee,
+        action="create",
+        capability=OLYMPUS_CAPABILITY_CREATE,
+        actor=actor,
+        expected_revision=expected_revision,
+        operation_id=operation_id,
+        verifier=authority_verifier,
+    )
+    return _create_task_internal(
+        conn,
+        title=title,
+        body=body,
+        assignee=canonical_assignee,
+        created_by=created_by,
+        workspace_kind=workspace_kind,
+        workspace_path=workspace_path,
+        branch_name=branch_name,
+        tenant=tenant,
+        priority=priority,
+        parents=parents,
+        triage=triage,
+        idempotency_key=idempotency_key,
+        max_runtime_seconds=max_runtime_seconds,
+        skills=skills,
+        max_retries=max_retries,
+        goal_mode=goal_mode,
+        goal_max_turns=goal_max_turns,
+        initial_status=initial_status,
+        session_id=session_id,
+        board=board,
+        olympus_context=normalized,
+    )
+
+
 def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> list[str]:
     parents = list(parents)
     if not parents:
@@ -2826,30 +3200,66 @@ def update_task_olympus_context(
     conn: sqlite3.Connection,
     task_id: str,
     context: dict[str, Any],
+    *,
+    authority_verifier: Optional[AuthorityVerifier],
+    actor: str,
+    operation_id: str,
+    expected_revision: int,
 ) -> bool:
-    """Renew, revoke, or enrich a governed task's explicit context.
+    """Renew or revoke a governed task through canonical verification.
 
-    The first non-NULL context opts a legacy task into Olympus governance.
-    Once present it cannot be cleared. Updating the task never rewrites an
-    active or historical run: each attempt keeps the immutable snapshot
-    captured at claim/start. This lets Olympus revoke an in-flight lease
-    immediately (future heartbeat/completion fails closed) and lets a retry
-    receive a renewed reference without corrupting attempt history.
+    Legacy tasks cannot be opted in here.  Updating never rewrites an active or
+    historical run: each attempt keeps the immutable snapshot captured at
+    claim/start.
     """
     normalized = normalize_olympus_context(context)
     encoded = _serialize_olympus_context(normalized)
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, claim_lock, claim_expires, current_run_id, "
+            "SELECT status, assignee, claim_lock, claim_expires, current_run_id, "
             "olympus_context FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
             return False
+        if row["olympus_context"] is None:
+            raise OlympusContextError(
+                "olympus_legacy_opt_in_forbidden",
+                "legacy tasks cannot be opted into Olympus through an update",
+            )
         if row["status"] in {"done", "archived"}:
             raise OlympusContextError(
                 "olympus_context_update_forbidden",
                 "Olympus context cannot change after terminal state",
+            )
+        stored = normalize_olympus_context(json.loads(row["olympus_context"]))
+        hierarchy = ("goal_id", "program_id", "milestone_id", "mission_id", "workstream_id")
+        if any(stored[key] != normalized[key] for key in hierarchy):
+            raise OlympusContextError(
+                "olympus_context_scope_change_forbidden",
+                "authority updates cannot move a task to another mission hierarchy",
+            )
+        require_olympus_authority_verification(
+            normalized,
+            task_id=task_id,
+            assignee=row["assignee"],
+            action="update_authority_context",
+            capability=OLYMPUS_CAPABILITY_UPDATE,
+            actor=actor,
+            expected_revision=expected_revision,
+            operation_id=operation_id,
+            verifier=authority_verifier,
+            allow_inactive=True,
+        )
+        if not (
+            normalized["agent_id"]
+            == normalized["lease"]["agent_id"]
+            == normalized["lease"]["holder"]
+            == row["assignee"]
+        ):
+            raise OlympusContextError(
+                "olympus_agent_mismatch",
+                "updated lease holder, lease agent, context agent, and assignee must match",
             )
         if row["olympus_context"] == encoded:
             return True
@@ -2860,7 +3270,7 @@ def update_task_olympus_context(
             current_limit = min(
                 int(authority["expires_at"]), int(lease["expires_at"])
             )
-            if authority["status"] != "active" or lease["status"] != "active":
+            if authority["status"] != "ACTIVE" or lease["status"] != "ACTIVE":
                 current_limit = now - 1
             prior_expires = row["claim_expires"]
             bounded_expires = (
@@ -3562,6 +3972,10 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    authority_verifier: Optional[AuthorityVerifier] = None,
+    actor: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -3584,6 +3998,19 @@ def claim_task(
                 assignee=gate_row["assignee"],
                 now=now,
             )
+            if olympus is not None:
+                require_olympus_authority_verification(
+                    olympus,
+                    task_id=task_id,
+                    assignee=gate_row["assignee"],
+                    action="claim",
+                    capability=OLYMPUS_CAPABILITY_CLAIM,
+                    actor=actor or "",
+                    expected_revision=expected_revision,  # type: ignore[arg-type]
+                    operation_id=operation_id or "",
+                    verifier=authority_verifier,
+                    now=now,
+                )
         except OlympusContextError as exc:
             _append_event(
                 conn,
@@ -3708,6 +4135,10 @@ def claim_review_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    authority_verifier: Optional[AuthorityVerifier] = None,
+    actor: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> Optional[Task]:
     """Atomically transition ``review -> running``.
 
@@ -3737,6 +4168,19 @@ def claim_review_task(
                 assignee=gate_row["assignee"],
                 now=now,
             )
+            if olympus is not None:
+                require_olympus_authority_verification(
+                    olympus,
+                    task_id=task_id,
+                    assignee=gate_row["assignee"],
+                    action="claim_review",
+                    capability=OLYMPUS_CAPABILITY_CLAIM,
+                    actor=actor or "",
+                    expected_revision=expected_revision,  # type: ignore[arg-type]
+                    operation_id=operation_id or "",
+                    verifier=authority_verifier,
+                    now=now,
+                )
         except OlympusContextError as exc:
             _append_event(
                 conn,
@@ -3819,6 +4263,10 @@ def heartbeat_claim(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    authority_verifier: Optional[AuthorityVerifier] = None,
+    actor: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> bool:
     """Extend a running claim.  Returns True if we still own it.
 
@@ -3843,6 +4291,19 @@ def heartbeat_claim(
                 assignee=gate_row["assignee"],
                 now=now,
             )
+            if olympus is not None:
+                require_olympus_authority_verification(
+                    olympus,
+                    task_id=task_id,
+                    assignee=gate_row["assignee"],
+                    action="heartbeat",
+                    capability=OLYMPUS_CAPABILITY_HEARTBEAT,
+                    actor=actor or "",
+                    expected_revision=expected_revision,  # type: ignore[arg-type]
+                    operation_id=operation_id or "",
+                    verifier=authority_verifier,
+                    now=now,
+                )
             if (
                 olympus is not None
                 and (
@@ -3909,6 +4370,9 @@ def release_stale_claims(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
+    authority_verifier: Optional[AuthorityVerifier] = None,
+    actor: Optional[str] = None,
+    operation_id: Optional[str] = None,
 ) -> int:
     """Reset any ``running`` task whose claim has expired.
 
@@ -3965,6 +4429,19 @@ def release_stale_claims(
             olympus = _require_current_olympus_context(
                 row["olympus_context"], assignee=row["assignee"], now=now
             )
+            if olympus is not None:
+                require_olympus_authority_verification(
+                    olympus,
+                    task_id=row["id"],
+                    assignee=row["assignee"],
+                    action="recover_stale_claim",
+                    capability=OLYMPUS_CAPABILITY_HEARTBEAT,
+                    actor=actor or "",
+                    expected_revision=olympus["authority"]["revision"],
+                    operation_id=(f"{operation_id}:{row['id']}" if operation_id else ""),
+                    verifier=authority_verifier,
+                    now=now,
+                )
             if olympus is not None and row["current_run_id"] is None:
                 raise OlympusContextError(
                     "olympus_run_context_mismatch",
@@ -4324,6 +4801,10 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    authority_verifier: Optional[AuthorityVerifier] = None,
+    actor: Optional[str] = None,
+    operation_id: Optional[str] = None,
+    expected_revision: Optional[int] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -4398,6 +4879,18 @@ def complete_task(
                 olympus = _require_current_olympus_context(
                     task_row["olympus_context"],
                     assignee=task_row["assignee"],
+                    now=now,
+                )
+                require_olympus_authority_verification(
+                    olympus,
+                    task_id=task_id,
+                    assignee=task_row["assignee"],
+                    action="complete",
+                    capability=OLYMPUS_CAPABILITY_COMPLETE,
+                    actor=actor or "",
+                    expected_revision=expected_revision,  # type: ignore[arg-type]
+                    operation_id=operation_id or "",
+                    verifier=authority_verifier,
                     now=now,
                 )
                 if task_row["status"] != "running" or task_row["current_run_id"] is None:
@@ -5309,6 +5802,11 @@ def decompose_triage_task(
             assignee=root_row["assignee"],
             now=now,
         )
+        if root_olympus is not None:
+            raise OlympusContextError(
+                "olympus_verified_context_required",
+                "governed decomposition requires a dedicated canonical-verification path",
+            )
         if (
             root_olympus is not None
             and root_assignee is not None
@@ -7955,12 +8453,15 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
         lines.append(f"Mission:    {olympus['mission_id']}")
         lines.append(f"Workstream: {olympus['workstream_id']}")
         lines.append(
-            f"Authority:  {authority['ref']} ({authority['status']}, "
+            f"Authority:  {authority['authority_id']} ({authority['status']}, "
+            f"revision {authority['revision']}, source {authority['source']}, "
             f"expires {authority['expires_at']})"
         )
         lines.append(
-            f"Lease:      {lease['ref']} ({lease['status']}, holder "
-            f"{lease['holder']}, expires {lease['expires_at']})"
+            f"Lease:      {lease['lease_id']} ({lease['status']}, holder "
+            f"{lease['holder']}, agent {lease['agent_id']}, revision "
+            f"{lease['revision']}, source {lease['source']}, expires "
+            f"{lease['expires_at']})"
         )
         lines.append(f"Risk:       {olympus['risk']}")
         lines.append(f"Agent:      {olympus['agent_id']}")

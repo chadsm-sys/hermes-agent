@@ -46,7 +46,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
@@ -579,6 +579,8 @@ def get_task(
 # ---------------------------------------------------------------------------
 
 class CreateTaskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
@@ -593,7 +595,6 @@ class CreateTaskBody(BaseModel):
     skills: Optional[list[str]] = None
     goal_mode: bool = False
     goal_max_turns: Optional[int] = None
-    olympus_context: Optional[dict] = None
 
 
 @router.post("/tasks")
@@ -618,7 +619,6 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             skills=payload.skills,
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
-            olympus_context=payload.olympus_context,
         )
         task = kanban_db.get_task(conn, task_id)
         body: dict[str, Any] = {"task": _task_dict(task) if task else None}
@@ -807,6 +807,8 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # ---------------------------------------------------------------------------
 
 class UpdateTaskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -819,7 +821,6 @@ class UpdateTaskBody(BaseModel):
     # complete --summary ... --metadata ...``.
     summary: Optional[str] = None
     metadata: Optional[dict] = None
-    olympus_context: Optional[dict] = None
 
 
 @router.patch("/tasks/{task_id}")
@@ -831,22 +832,16 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
 
-        # --- Olympus authority context ----------------------------------
-        # The kernel refuses clearing and terminal-state rewrites. A renewal
-        # or revocation is persisted before any later claim/start/heartbeat/
-        # completion transition can observe it; run snapshots stay immutable.
-        if payload.olympus_context is not None:
-            try:
-                ok = kanban_db.update_task_olympus_context(
-                    conn, task_id, payload.olympus_context
-                )
-            except kanban_db.OlympusContextError as e:
-                raise HTTPException(status_code=409, detail=str(e))
-            if not ok:
-                raise HTTPException(status_code=404, detail="task not found")
-
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
+            if task.olympus_context is not None and payload.assignee != task.assignee:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "governed task reassignment requires the dedicated "
+                        "canonical-authority path"
+                    ),
+                )
             try:
                 ok = kanban_db.assign_task(
                     conn, task_id, payload.assignee or None,

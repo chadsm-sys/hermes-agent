@@ -236,19 +236,21 @@ def heartbeat_current_worker_from_env() -> bool:
         try:
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
             try:
-                kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                claim_current = kb.heartbeat_claim(conn, tid, claimer=claim_lock)
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_claim failed", exc_info=True)
+                claim_current = False
             run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID")
             run_id: Optional[int]
             try:
                 run_id = int(run_id_raw) if run_id_raw else None
             except (TypeError, ValueError):
                 run_id = None
-            try:
-                kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
-            except Exception:
-                logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
+            if claim_current:
+                try:
+                    kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
+                except Exception:
+                    logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
         finally:
             try:
                 conn.close()
@@ -662,7 +664,10 @@ def _handle_heartbeat(args: dict, **kw) -> str:
             # default _claimer_id() covers locally-driven workers that
             # never went through the dispatcher path.
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
-            kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+            if not kb.heartbeat_claim(conn, tid, claimer=claim_lock):
+                return tool_error(
+                    f"could not heartbeat {tid} (claim or canonical authority is not current)"
+                )
 
             ok = kb.heartbeat_worker(
                 conn,
@@ -791,14 +796,10 @@ def _handle_create(args: dict, **kw) -> str:
                 if _self_task is not None and _self_task.workspace_kind:
                     workspace_kind = _self_task.workspace_kind
                     workspace_path = _self_task.workspace_path
-            child_olympus_context = None
             if _self_task is not None and _self_task.olympus_context is not None:
-                # A governed worker cannot accidentally create an ungoverned
-                # child by omitting parents. Hermes derives only task/agent
-                # attribution; it never widens or invents authority/lease scope.
-                child_olympus_context = kb.derive_olympus_child_context(
-                    _self_task.olympus_context,
-                    agent_id=str(assignee),
+                return tool_error(
+                    "governed child creation requires the dedicated canonical-authority "
+                    "route; generic kanban_create cannot inherit or inject Olympus context"
                 )
             new_tid = kb.create_task(
                 conn,
@@ -824,7 +825,6 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
-                olympus_context=child_olympus_context,
             )
             new_task = kb.get_task(conn, new_tid)
             return _ok(

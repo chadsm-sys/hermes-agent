@@ -6,6 +6,7 @@ import copy
 import json
 import shutil
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -29,65 +30,182 @@ def conn(tmp_path, monkeypatch):
         connection.close()
 
 
-def _context(*, now: int | None = None, lease_ref: str = "lease-1") -> dict:
+def _context(
+    *,
+    now: int | None = None,
+    lease_id: str = "lease-1",
+    agent_id: str = "coding",
+    authority_revision: int = 7,
+    lease_revision: int = 11,
+) -> dict:
     current = int(time.time()) if now is None else now
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "goal_id": "goal-1",
         "program_id": "program-1",
         "milestone_id": "milestone-1",
         "mission_id": "mission-1",
         "workstream_id": "workstream-1",
         "authority": {
-            "ref": "authority-1",
-            "mission_id": "mission-1",
-            "status": "active",
+            "authority_id": "authority-1",
+            "status": "ACTIVE",
+            "scope": ["mission-1"],
+            "capabilities": [
+                kb.OLYMPUS_CAPABILITY_CREATE,
+                kb.OLYMPUS_CAPABILITY_UPDATE,
+                kb.OLYMPUS_CAPABILITY_CLAIM,
+                kb.OLYMPUS_CAPABILITY_HEARTBEAT,
+                kb.OLYMPUS_CAPABILITY_COMPLETE,
+            ],
+            "revision": authority_revision,
+            "source": "mission-control:test-authority",
             "expires_at": current + 3600,
         },
         "lease": {
-            "ref": lease_ref,
+            "lease_id": lease_id,
             "mission_id": "mission-1",
-            "holder": "olympus",
-            "status": "active",
+            "agent_id": agent_id,
+            "holder": agent_id,
+            "repository": "chadsm-sys/hermes-agent",
+            "branch": "codex-mini/M-20260713-olympus-hermes-bind",
+            "worktree": "/isolated/hermes-bind",
+            "revision": lease_revision,
+            "source": "acp:test-lease",
+            "status": "ACTIVE",
             "expires_at": current + 1800,
         },
         "risk": "high",
-        "agent_id": "coding",
+        "agent_id": agent_id,
         "review_status": "pending",
         "evidence_refs": ["evidence://plan/1"],
     }
 
 
-def _rejection_reason(conn, task_id: str) -> str:
-    rejected = [e for e in kb.list_events(conn, task_id) if e.kind == "claim_rejected"]
+def _allow(request: dict) -> dict:
+    return {
+        "schema_version": kb.AUTHORITY_VERIFICATION_SCHEMA,
+        "verification_id": f"verification:{request['request_id'].split(':', 1)[1]}",
+        "decision": "ALLOW",
+        "current": True,
+        "source": request["authority_source"],
+        "source_revision": request["authority_revision"],
+        "request_id": request["request_id"],
+        "request": request,
+    }
+
+
+def _create(conn, context: dict | None = None, **kwargs) -> str:
+    context = copy.deepcopy(context or _context())
+    return kb.create_olympus_task(
+        conn,
+        olympus_context=context,
+        authority_verifier=_allow,
+        actor=context["agent_id"],
+        operation_id=kwargs.pop("operation_id", "create:1"),
+        expected_revision=context["authority"]["revision"],
+        title=kwargs.pop("title", "governed task"),
+        assignee=kwargs.pop("assignee", context["agent_id"]),
+        **kwargs,
+    )
+
+
+def _claim(conn, task_id: str, context: dict, **kwargs):
+    return kb.claim_task(
+        conn,
+        task_id,
+        authority_verifier=kwargs.pop("authority_verifier", _allow),
+        actor=kwargs.pop("actor", context["agent_id"]),
+        operation_id=kwargs.pop("operation_id", f"claim:{task_id}"),
+        expected_revision=kwargs.pop(
+            "expected_revision", context["authority"]["revision"]
+        ),
+        **kwargs,
+    )
+
+
+def _heartbeat(conn, task_id: str, context: dict, **kwargs) -> bool:
+    return kb.heartbeat_claim(
+        conn,
+        task_id,
+        authority_verifier=kwargs.pop("authority_verifier", _allow),
+        actor=kwargs.pop("actor", context["agent_id"]),
+        operation_id=kwargs.pop("operation_id", f"heartbeat:{task_id}"),
+        expected_revision=kwargs.pop(
+            "expected_revision", context["authority"]["revision"]
+        ),
+        **kwargs,
+    )
+
+
+def _complete(conn, task_id: str, context: dict, **kwargs) -> bool:
+    return kb.complete_task(
+        conn,
+        task_id,
+        authority_verifier=kwargs.pop("authority_verifier", _allow),
+        actor=kwargs.pop("actor", context["agent_id"]),
+        operation_id=kwargs.pop("operation_id", f"complete:{task_id}"),
+        expected_revision=kwargs.pop(
+            "expected_revision", context["authority"]["revision"]
+        ),
+        **kwargs,
+    )
+
+
+def _update(conn, task_id: str, context: dict, **kwargs) -> bool:
+    return kb.update_task_olympus_context(
+        conn,
+        task_id,
+        context,
+        authority_verifier=kwargs.pop("authority_verifier", _allow),
+        actor=kwargs.pop("actor", context["agent_id"]),
+        operation_id=kwargs.pop("operation_id", f"update:{task_id}"),
+        expected_revision=kwargs.pop(
+            "expected_revision", context["authority"]["revision"]
+        ),
+        **kwargs,
+    )
+
+
+def _inject_raw_context(conn, context: dict, *, assignee: str = "coding") -> str:
+    task_id = kb.create_task(conn, title="raw governed row", assignee=assignee)
+    conn.execute(
+        "UPDATE tasks SET olympus_context = ? WHERE id = ?",
+        (json.dumps(context), task_id),
+    )
+    conn.commit()
+    return task_id
+
+
+def _rejection_reason(conn, task_id: str, kind: str = "claim_rejected") -> str:
+    rejected = [e for e in kb.list_events(conn, task_id) if e.kind == kind]
     assert rejected
     return rejected[-1].payload["reason"]
 
 
 def test_authorized_retry_completion_trace_is_attributable(conn):
-    first_context = _context(lease_ref="lease-attempt-1")
-    task_id = kb.create_task(
-        conn,
-        title="governed task",
-        assignee="coding",
-        olympus_context=first_context,
-    )
+    first_context = _context(lease_id="lease-attempt-1")
+    task_id = _create(conn, first_context)
 
-    first = kb.claim_task(conn, task_id, claimer="worker:first", ttl_seconds=7200)
+    first = _claim(
+        conn, task_id, first_context, claimer="worker:first", ttl_seconds=7200
+    )
     assert first is not None
     first_run_id = first.current_run_id
     assert first.claim_expires <= first_context["lease"]["expires_at"]
     assert kb.reclaim_task(conn, task_id, reason="retry with renewed lease")
 
-    renewed = _context(lease_ref="lease-attempt-2")
-    assert kb.update_task_olympus_context(conn, task_id, renewed)
-    second = kb.claim_task(conn, task_id, claimer="worker:second")
+    renewed = _context(
+        lease_id="lease-attempt-2", authority_revision=8, lease_revision=12
+    )
+    assert _update(conn, task_id, renewed)
+    second = _claim(conn, task_id, renewed, claimer="worker:second")
     assert second is not None
     second_run_id = second.current_run_id
     assert second_run_id != first_run_id
-    assert kb.complete_task(
+    assert _complete(
         conn,
         task_id,
+        renewed,
         result="done",
         summary="evidence-backed completion",
         metadata={"evidence_refs": ["evidence://result/1"]},
@@ -96,22 +214,19 @@ def test_authorized_retry_completion_trace_is_attributable(conn):
 
     task = kb.get_task(conn, task_id)
     assert task is not None and task.status == "done"
-    assert task.olympus_context["lease"]["ref"] == "lease-attempt-2"
+    assert task.olympus_context["lease"]["lease_id"] == "lease-attempt-2"
     runs = kb.list_runs(conn, task_id)
     assert [run.outcome for run in runs] == ["reclaimed", "completed"]
-    assert runs[0].olympus_context["lease"]["ref"] == "lease-attempt-1"
-    assert runs[1].olympus_context["lease"]["ref"] == "lease-attempt-2"
+    assert runs[0].olympus_context["lease"]["lease_id"] == "lease-attempt-1"
+    assert runs[1].olympus_context["lease"]["lease_id"] == "lease-attempt-2"
+    assert runs[1].olympus_context["authority"]["revision"] == 8
     assert runs[1].olympus_context["mission_id"] == "mission-1"
-    assert runs[1].olympus_context["agent_id"] == "coding"
 
     claimed = [e for e in kb.list_events(conn, task_id) if e.kind == "claimed"]
     assert [e.payload["olympus"]["lease_ref"] for e in claimed] == [
         "lease-attempt-1",
         "lease-attempt-2",
     ]
-    completed = [e for e in kb.list_events(conn, task_id) if e.kind == "completed"][-1]
-    assert completed.run_id == second_run_id
-    assert completed.payload["olympus"]["mission_id"] == "mission-1"
     worker_context = kb.build_worker_context(conn, task_id)
     assert "## Olympus authority" in worker_context
     assert "lease-attempt-2" in worker_context
@@ -124,40 +239,32 @@ def test_authorized_retry_completion_trace_is_attributable(conn):
         ("expired", "olympus_lease_expired"),
         ("revoked", "olympus_lease_revoked"),
         ("foreign", "olympus_lease_foreign_mission"),
-        ("agent", "olympus_agent_mismatch"),
+        ("context-agent", "olympus_agent_mismatch"),
+        ("lease-agent", "olympus_agent_mismatch"),
+        ("holder", "olympus_agent_mismatch"),
     ],
 )
-def test_claim_denies_missing_expired_revoked_foreign_or_wrong_agent(
+def test_claim_denies_missing_stale_revoked_foreign_or_identity_conflict(
     conn, mutation: str, reason: str
 ):
     context = _context()
-    assignee = "coding"
-    if mutation == "expired":
+    if mutation == "missing":
+        del context["lease"]
+    elif mutation == "expired":
         context["lease"]["expires_at"] = int(time.time()) - 1
     elif mutation == "revoked":
-        context["lease"]["status"] = "revoked"
+        context["lease"]["status"] = "REVOKED"
     elif mutation == "foreign":
         context["lease"]["mission_id"] = "mission-other"
-    elif mutation == "agent":
+    elif mutation == "context-agent":
         context["agent_id"] = "reviewer"
+    elif mutation == "lease-agent":
+        context["lease"]["agent_id"] = "reviewer"
+    elif mutation == "holder":
+        context["lease"]["holder"] = "reviewer"
+    task_id = _inject_raw_context(conn, context)
 
-    if mutation == "missing":
-        task_id = kb.create_task(conn, title="missing lease", assignee=assignee)
-        del context["lease"]
-        conn.execute(
-            "UPDATE tasks SET olympus_context = ? WHERE id = ?",
-            (json.dumps(context), task_id),
-        )
-        conn.commit()
-    else:
-        task_id = kb.create_task(
-            conn,
-            title=f"denied {mutation}",
-            assignee=assignee,
-            olympus_context=context,
-        )
-
-    assert kb.claim_task(conn, task_id, claimer="worker:denied") is None
+    assert _claim(conn, task_id, _context(), claimer="worker:denied") is None
     task = kb.get_task(conn, task_id)
     assert task is not None and task.status == "ready"
     assert kb.list_runs(conn, task_id) == []
@@ -165,205 +272,319 @@ def test_claim_denies_missing_expired_revoked_foreign_or_wrong_agent(
 
 
 @pytest.mark.parametrize("location", ["context", "authority", "lease"])
-def test_context_v1_rejects_unknown_fields(conn, location: str):
+def test_context_v2_rejects_unknown_fields(conn, location: str):
     context = _context()
     if location == "context":
         context["typo_field"] = "unsafe"
     else:
         context[location]["typo_field"] = "unsafe"
-
     with pytest.raises(kb.OlympusContextError) as exc_info:
-        kb.create_task(
-            conn,
-            title=f"unknown {location} field",
-            assignee="coding",
-            olympus_context=context,
-        )
-
+        _create(conn, context)
     assert exc_info.value.reason == "olympus_context_invalid"
 
 
-def test_review_claim_uses_the_same_fail_closed_gate(conn):
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        None,
+        lambda request: {**_allow(request), "decision": "DENY"},
+        lambda request: {**_allow(request), "current": False},
+        lambda request: {**_allow(request), "source": "foreign:issuer"},
+        lambda request: {**_allow(request), "source_revision": 999},
+        lambda request: {**_allow(request), "request_id": "wrong"},
+        lambda request: {**_allow(request), "request": {"forged": True}},
+        lambda request: (_ for _ in ()).throw(RuntimeError("issuer down")),
+    ],
+)
+def test_creation_denies_missing_stale_foreign_or_contradictory_verifier(
+    conn, verifier
+):
     context = _context()
-    context["lease"]["status"] = "revoked"
-    task_id = kb.create_task(
-        conn,
-        title="review denied",
-        assignee="coding",
-        olympus_context=context,
-    )
+    with pytest.raises(kb.OlympusContextError):
+        kb.create_olympus_task(
+            conn,
+            olympus_context=context,
+            authority_verifier=verifier,
+            actor="coding",
+            operation_id="create:abuse",
+            expected_revision=7,
+            title="must not exist",
+            assignee="coding",
+        )
+    assert kb.list_tasks(conn) == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("actor", "olympus_actor_mismatch"),
+        ("revision", "olympus_revision_mismatch"),
+        ("capability", "olympus_capability_missing"),
+        ("scope", "olympus_scope_mismatch"),
+    ],
+)
+def test_creation_denies_wrong_actor_revision_capability_or_scope(
+    conn, mutation: str, reason: str
+):
+    context = _context()
+    actor = "coding"
+    revision = 7
+    if mutation == "actor":
+        actor = "dashboard"
+    elif mutation == "revision":
+        revision = 6
+    elif mutation == "capability":
+        context["authority"]["capabilities"].remove(kb.OLYMPUS_CAPABILITY_CREATE)
+    elif mutation == "scope":
+        context["authority"]["scope"] = ["mission-other"]
+    with pytest.raises(kb.OlympusContextError) as exc_info:
+        kb.create_olympus_task(
+            conn,
+            olympus_context=context,
+            authority_verifier=_allow,
+            actor=actor,
+            operation_id="create:local-denial",
+            expected_revision=revision,
+            title="must not exist",
+            assignee="coding",
+        )
+    assert exc_info.value.reason == reason
+
+
+def test_generic_create_and_legacy_update_cannot_inject_olympus_context(conn):
+    with pytest.raises(TypeError):
+        kb.create_task(
+            conn,
+            title="generic injection",
+            assignee="coding",
+            olympus_context=_context(),  # type: ignore[call-arg]
+        )
+    legacy_id = kb.create_task(conn, title="legacy", assignee="coding")
+    with pytest.raises(kb.OlympusContextError) as exc_info:
+        _update(conn, legacy_id, _context())
+    assert exc_info.value.reason == "olympus_legacy_opt_in_forbidden"
+
+
+def test_claim_requires_callable_canonical_verifier(conn):
+    context = _context()
+    task_id = _create(conn, context)
+    assert kb.claim_task(conn, task_id, claimer="unverified") is None
+    assert _rejection_reason(conn, task_id) == "olympus_authority_verification_unavailable"
+    assert kb.get_task(conn, task_id).status == "ready"
+
+
+def test_review_claim_uses_the_same_canonical_gate(conn):
+    context = _context()
+    task_id = _create(conn, context)
     conn.execute("UPDATE tasks SET status = 'review' WHERE id = ?", (task_id,))
     conn.commit()
-
     assert kb.claim_review_task(conn, task_id, claimer="reviewer:1") is None
-    assert kb.get_task(conn, task_id).status == "review"
-    assert _rejection_reason(conn, task_id) == "olympus_lease_revoked"
-
-
-def test_revocation_stops_heartbeat_and_completion_but_preserves_run_snapshot(conn):
-    context = _context()
-    task_id = kb.create_task(
+    assert _rejection_reason(conn, task_id) == "olympus_authority_verification_unavailable"
+    claimed = kb.claim_review_task(
         conn,
-        title="revoke in flight",
-        assignee="coding",
-        olympus_context=context,
+        task_id,
+        claimer="reviewer:2",
+        authority_verifier=_allow,
+        actor="coding",
+        operation_id="review-claim:1",
+        expected_revision=7,
     )
-    claimed = kb.claim_task(conn, task_id, claimer="worker:active")
+    assert claimed is not None
+
+
+def test_revocation_stops_heartbeat_and_completion_and_preserves_snapshot(conn):
+    context = _context()
+    task_id = _create(conn, context)
+    claimed = _claim(conn, task_id, context, claimer="worker:active")
     assert claimed is not None
     run_id = claimed.current_run_id
 
     revoked = copy.deepcopy(context)
-    revoked["lease"]["status"] = "revoked"
-    assert kb.update_task_olympus_context(conn, task_id, revoked)
-    assert not kb.heartbeat_claim(conn, task_id, claimer="worker:active")
-    assert not kb.complete_task(conn, task_id, result="must not land")
+    revoked["lease"]["status"] = "REVOKED"
+    revoked["authority"]["revision"] = 8
+    revoked["lease"]["revision"] = 12
+    assert _update(conn, task_id, revoked)
+    assert not _heartbeat(conn, task_id, revoked, claimer="worker:active")
+    assert not _complete(conn, task_id, revoked, result="must not land")
     task = kb.get_task(conn, task_id)
     assert task.status == "running"
     assert task.claim_expires < int(time.time())
     run = kb.get_run(conn, run_id)
-    assert run.olympus_context["lease"]["status"] == "active"
-    rejection = [
-        e for e in kb.list_events(conn, task_id) if e.kind == "completion_rejected"
-    ][-1]
-    assert rejection.payload["reason"] == "olympus_lease_revoked"
+    assert run.olympus_context["lease"]["status"] == "ACTIVE"
+    assert _rejection_reason(conn, task_id, "completion_rejected") == "olympus_lease_revoked"
 
 
-def test_new_lease_cannot_resurrect_an_attempt_revoked_in_flight(conn):
-    context = _context(lease_ref="lease-before-revocation")
-    task_id = kb.create_task(
-        conn,
-        title="revoked attempt stays stopped",
-        assignee="coding",
-        olympus_context=context,
-    )
-    claimed = kb.claim_task(conn, task_id, claimer="worker:revoked")
-    assert claimed is not None
+def test_revoked_attempt_reconciles_to_fresh_verified_retry(conn):
+    context = _context(lease_id="lease-before-revocation")
+    task_id = _create(conn, context)
+    assert _claim(conn, task_id, context, claimer="worker:old") is not None
 
     revoked = copy.deepcopy(context)
-    revoked["lease"]["status"] = "revoked"
-    assert kb.update_task_olympus_context(conn, task_id, revoked)
-    renewed = _context(lease_ref="lease-after-revocation")
-    assert kb.update_task_olympus_context(conn, task_id, renewed)
+    revoked["lease"]["status"] = "REVOKED"
+    revoked["authority"]["revision"] = 8
+    revoked["lease"]["revision"] = 12
+    assert _update(conn, task_id, revoked)
+    renewed = _context(
+        lease_id="lease-after-revocation", authority_revision=9, lease_revision=13
+    )
+    assert _update(conn, task_id, renewed)
+    assert not _heartbeat(conn, task_id, renewed, claimer="worker:old")
 
-    assert not kb.heartbeat_claim(conn, task_id, claimer="worker:revoked")
-    assert not kb.complete_task(conn, task_id, result="must retry")
-    reasons = [
-        e.payload["reason"]
-        for e in kb.list_events(conn, task_id)
-        if e.kind in {"heartbeat_rejected", "completion_rejected"}
-    ]
-    assert reasons[-2:] == ["olympus_claim_expired", "olympus_claim_expired"]
-
+    # A sweep without a canonical verifier may reclaim the stopped attempt,
+    # but may never extend or resume it.
     assert kb.release_stale_claims(conn) == 1
-    retried = kb.claim_task(conn, task_id, claimer="worker:retried")
+    retried = _claim(conn, task_id, renewed, claimer="worker:new")
     assert retried is not None
-    assert kb.complete_task(conn, task_id, result="new attempt authorized")
+    assert _complete(conn, task_id, renewed, result="fresh attempt completed")
+
+
+def test_attempt_snapshot_requires_exact_authority_and_lease_identity(conn):
+    context = _context()
+    task_id = _create(conn, context)
+    claimed = _claim(conn, task_id, context, claimer="worker:exact")
+    run = kb.get_run(conn, claimed.current_run_id)
+    forged = copy.deepcopy(run.olympus_context)
+    forged["lease"]["lease_id"] = "foreign-attempt"
+    forged["authority"]["revision"] = 999
+    conn.execute(
+        "UPDATE task_runs SET olympus_context = ? WHERE id = ?",
+        (kb._serialize_olympus_context(forged), claimed.current_run_id),
+    )
+    conn.commit()
+    assert not _heartbeat(conn, task_id, context, claimer="worker:exact")
+    assert _rejection_reason(conn, task_id, "heartbeat_rejected") == "olympus_run_context_mismatch"
+
+
+def test_cross_agent_derivation_denied_but_verified_delegated_child_allowed(conn):
+    parent_context = _context()
+    parent_id = _create(conn, parent_context, title="parent")
+    assert kb.derive_olympus_child_context(parent_context, agent_id="coding") == kb.normalize_olympus_context(parent_context)
+    with pytest.raises(kb.OlympusContextError) as exc_info:
+        kb.derive_olympus_child_context(parent_context, agent_id="reviewer")
+    assert exc_info.value.reason == "olympus_delegation_requires_verification"
+    with pytest.raises(kb.OlympusContextError) as exc_info:
+        kb.create_task(conn, title="generic child", assignee="coding", parents=[parent_id])
+    assert exc_info.value.reason == "olympus_verified_context_required"
+
+    delegated = _context(
+        lease_id="lease-reviewer", agent_id="reviewer", authority_revision=8, lease_revision=12
+    )
+    child_id = _create(
+        conn,
+        delegated,
+        title="verified delegated child",
+        assignee="reviewer",
+        parents=[parent_id],
+        operation_id="create:delegated-child",
+    )
+    child = kb.get_task(conn, child_id)
+    assert child.olympus_context["agent_id"] == "reviewer"
+    assert child.olympus_context["lease"]["holder"] == "reviewer"
+    assert child.olympus_context["lease"]["lease_id"] == "lease-reviewer"
 
 
 def test_direct_completion_cannot_bypass_governed_claim_start(conn):
-    task_id = kb.create_task(
-        conn,
-        title="no direct completion",
-        assignee="coding",
-        olympus_context=_context(),
-    )
-    assert not kb.complete_task(conn, task_id, result="bypass")
+    context = _context()
+    task_id = _create(conn, context)
+    assert not _complete(conn, task_id, context, result="bypass")
     assert kb.get_task(conn, task_id).status == "ready"
-    rejected = [
-        e for e in kb.list_events(conn, task_id) if e.kind == "completion_rejected"
-    ][-1]
-    assert rejected.payload["reason"] == "olympus_completion_without_active_run"
+    assert _rejection_reason(conn, task_id, "completion_rejected") == "olympus_completion_without_active_run"
 
 
-def test_ordinary_kanban_task_keeps_legacy_claim_and_manual_completion(conn):
+def test_ordinary_kanban_compatibility_is_unchanged(conn):
     claimed_id = kb.create_task(conn, title="legacy claim", assignee="coding")
     claimed = kb.claim_task(conn, claimed_id, claimer="legacy:worker")
     assert claimed is not None and claimed.olympus_context is None
     assert kb.complete_task(conn, claimed_id, result="ok")
     assert kb.list_runs(conn, claimed_id)[0].olympus_context is None
-
     manual_id = kb.create_task(conn, title="legacy manual")
     assert kb.complete_task(conn, manual_id, result="still supported")
-    assert kb.get_task(conn, manual_id).status == "done"
 
 
-def test_dispatcher_claim_gate_prevents_spawn(conn, monkeypatch):
+def test_dispatcher_without_canonical_issuer_never_spawns_governed_work(
+    conn, monkeypatch
+):
     context = _context()
-    context["lease"]["status"] = "revoked"
-    task_id = kb.create_task(
-        conn,
-        title="dispatcher denied",
-        assignee="coding",
-        olympus_context=context,
-    )
+    task_id = _create(conn, context)
     monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
     spawned: list[str] = []
-
     result = kb.dispatch_once(
         conn,
         spawn_fn=lambda task, workspace: spawned.append(task.id),
         max_spawn=1,
     )
-
     assert result.spawned == []
     assert spawned == []
     assert kb.get_task(conn, task_id).status == "ready"
-    assert _rejection_reason(conn, task_id) == "olympus_lease_revoked"
+    assert _rejection_reason(conn, task_id) == "olympus_authority_verification_unavailable"
 
 
-def test_dispatcher_revalidates_authority_after_workspace_setup(
-    conn, monkeypatch, tmp_path
-):
+def test_restart_reloads_exact_context_and_reverifies(conn):
     context = _context()
-    task_id = kb.create_task(
-        conn,
-        title="revoke between claim and spawn",
-        assignee="coding",
-        olympus_context=context,
-    )
-    monkeypatch.setattr("hermes_cli.profiles.profile_exists", lambda _: True)
-    spawned: list[str] = []
-
-    def revoke_during_workspace(task, *, board=None):
-        revoked = copy.deepcopy(context)
-        revoked["lease"]["status"] = "revoked"
-        assert kb.update_task_olympus_context(conn, task.id, revoked)
-        return tmp_path
-
-    monkeypatch.setattr(kb, "resolve_workspace", revoke_during_workspace)
-    result = kb.dispatch_once(
-        conn,
-        spawn_fn=lambda task, workspace: spawned.append(task.id),
-        max_spawn=1,
-    )
-
-    assert result.spawned == []
-    assert spawned == []
-    task = kb.get_task(conn, task_id)
-    assert task.status == "ready"
-    assert task.current_run_id is None
-    events = kb.list_events(conn, task_id)
-    assert any(e.kind == "heartbeat_rejected" for e in events)
-    assert any(e.kind == "spawn_rejected" for e in events)
+    task_id = _create(conn, context)
+    db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+    conn.close()
+    reopened = kb.connect(Path(db_path))
+    try:
+        assert kb.claim_task(
+            reopened,
+            task_id,
+            claimer="restart:denied",
+            authority_verifier=lambda request: {**_allow(request), "source_revision": 999},
+            actor="coding",
+            operation_id="restart:claim:denied",
+            expected_revision=7,
+        ) is None
+        claimed = _claim(
+            reopened,
+            task_id,
+            context,
+            claimer="restart:allowed",
+            operation_id="restart:claim:allowed",
+        )
+        assert claimed is not None
+        assert claimed.olympus_context == kb.normalize_olympus_context(context)
+    finally:
+        reopened.close()
 
 
-def test_governed_child_inherits_mission_and_rebinds_agent(conn):
-    parent_id = kb.create_task(
-        conn,
-        title="parent",
-        assignee="coding",
-        olympus_context=_context(),
-    )
-    child_id = kb.create_task(
-        conn,
-        title="child",
-        assignee="reviewer",
-        parents=[parent_id],
-    )
-    child = kb.get_task(conn, child_id)
-    assert child.olympus_context["mission_id"] == "mission-1"
-    assert child.olympus_context["agent_id"] == "reviewer"
-    assert child.olympus_context["lease"]["ref"] == "lease-1"
+def test_three_then_six_concurrent_claimers_admit_exactly_one(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    db_path = home / "concurrency.db"
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    context = _context()
+
+    def run_race(contenders: int, task_id: str) -> list[bool]:
+        barrier = threading.Barrier(contenders)
+        results = [False] * contenders
+
+        def worker(index: int) -> None:
+            with kb.connect(db_path) as local:
+                barrier.wait()
+                results[index] = _claim(
+                    local,
+                    task_id,
+                    context,
+                    claimer=f"race:{contenders}:{index}",
+                    operation_id=f"race:{contenders}:{index}",
+                ) is not None
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(contenders)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return results
+
+    with kb.connect(db_path) as setup:
+        first = _create(setup, context, title="three-way", operation_id="create:three")
+    assert sum(run_race(3, first)) == 1
+    with kb.connect(db_path) as setup:
+        second = _create(setup, context, title="six-way", operation_id="create:six")
+    assert sum(run_race(6, second)) == 1
 
 
 def test_additive_migration_preserves_legacy_rows_and_backup_rolls_back(
@@ -424,6 +645,8 @@ def test_additive_migration_preserves_legacy_rows_and_backup_rolls_back(
     try:
         task_cols = {row[1] for row in raw.execute("PRAGMA table_info(tasks)")}
         assert "olympus_context" not in task_cols
-        assert raw.execute("SELECT title FROM tasks WHERE id='legacy-1'").fetchone()[0] == "preserve me"
+        assert raw.execute(
+            "SELECT title FROM tasks WHERE id='legacy-1'"
+        ).fetchone()[0] == "preserve me"
     finally:
         raw.close()

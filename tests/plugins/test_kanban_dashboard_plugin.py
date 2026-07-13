@@ -114,34 +114,9 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
-def test_olympus_context_roundtrips_and_can_be_revoked(client):
-    now = int(time.time())
-    context = {
-        "schema_version": 1,
-        "goal_id": "g-api",
-        "program_id": "p-api",
-        "milestone_id": "ms-api",
-        "mission_id": "m-api",
-        "workstream_id": "ws-api",
-        "authority": {
-            "ref": "authority-api",
-            "mission_id": "m-api",
-            "status": "active",
-            "expires_at": now + 3600,
-        },
-        "lease": {
-            "ref": "lease-api",
-            "mission_id": "m-api",
-            "holder": "olympus",
-            "status": "active",
-            "expires_at": now + 1800,
-        },
-        "risk": "medium",
-        "agent_id": "coding",
-        "review_status": "pending",
-        "evidence_refs": ["evidence://api"],
-    }
-    created = client.post(
+def test_generic_dashboard_cannot_inject_or_replace_olympus_context(client):
+    context = {"schema_version": 2, "forged": "caller assertion"}
+    injected = client.post(
         "/api/plugins/kanban/tasks",
         json={
             "title": "governed API task",
@@ -149,43 +124,22 @@ def test_olympus_context_roundtrips_and_can_be_revoked(client):
             "olympus_context": context,
         },
     )
+    assert injected.status_code == 422
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "ordinary API task", "assignee": "coding"},
+    )
     assert created.status_code == 200, created.text
     task = created.json()["task"]
-    assert task["olympus_context"]["mission_id"] == "m-api"
-    assert task["olympus_context"]["lease"]["ref"] == "lease-api"
-
-    conn = kb.connect()
-    try:
-        claimed = kb.claim_task(conn, task["id"], claimer="api-worker")
-        assert claimed is not None
-        claim_lock = claimed.claim_lock
-    finally:
-        conn.close()
-    detail = client.get(f"/api/plugins/kanban/tasks/{task['id']}")
-    assert detail.status_code == 200, detail.text
-    assert (
-        detail.json()["runs"][0]["olympus_context"]["lease"]["status"]
-        == "active"
-    )
-
-    context["lease"]["status"] = "revoked"
+    assert task["olympus_context"] is None
     updated = client.patch(
         f"/api/plugins/kanban/tasks/{task['id']}",
         json={"olympus_context": context},
     )
-    assert updated.status_code == 200, updated.text
-    assert updated.json()["task"]["olympus_context"]["lease"]["status"] == "revoked"
+    assert updated.status_code == 422, updated.text
     detail = client.get(f"/api/plugins/kanban/tasks/{task['id']}")
-    assert (
-        detail.json()["runs"][0]["olympus_context"]["lease"]["status"]
-        == "active"
-    )
-
-    conn = kb.connect()
-    try:
-        assert not kb.heartbeat_claim(conn, task["id"], claimer=claim_lock)
-    finally:
-        conn.close()
+    assert detail.status_code == 200
+    assert detail.json()["task"]["olympus_context"] is None
 
 
 def test_scheduled_tasks_have_their_own_column_not_todo(client):

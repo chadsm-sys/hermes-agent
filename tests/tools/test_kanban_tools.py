@@ -799,30 +799,39 @@ def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
         conn.close()
 
 
-def test_create_inherits_worker_olympus_authority(monkeypatch, worker_env):
-    """A governed worker cannot create an ungoverned child by omitting parents."""
+def test_generic_create_cannot_inherit_worker_olympus_authority(monkeypatch, worker_env):
+    """A model-facing tool cannot derive privileged child authority."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
 
     now = int(time.time())
     context = {
-        "schema_version": 1,
+        "schema_version": 2,
         "goal_id": "g-tool",
         "program_id": "p-tool",
         "milestone_id": "ms-tool",
         "mission_id": "m-tool",
         "workstream_id": "ws-tool",
         "authority": {
-            "ref": "authority-tool",
-            "mission_id": "m-tool",
-            "status": "active",
+            "authority_id": "authority-tool",
+            "status": "ACTIVE",
+            "scope": ["m-tool"],
+            "capabilities": [kb.OLYMPUS_CAPABILITY_CREATE],
+            "revision": 1,
+            "source": "mission-control:test",
             "expires_at": now + 3600,
         },
         "lease": {
-            "ref": "lease-tool",
+            "lease_id": "lease-tool",
             "mission_id": "m-tool",
-            "holder": "olympus",
-            "status": "active",
+            "agent_id": "test-worker",
+            "holder": "test-worker",
+            "repository": "chadsm-sys/hermes-agent",
+            "branch": "test/m-tool",
+            "worktree": "/test/m-tool",
+            "revision": 1,
+            "source": "acp:test",
+            "status": "ACTIVE",
             "expires_at": now + 1800,
         },
         "risk": "high",
@@ -830,15 +839,29 @@ def test_create_inherits_worker_olympus_authority(monkeypatch, worker_env):
         "review_status": "pending",
         "evidence_refs": [],
     }
+    def allow(request):
+        return {
+            "schema_version": kb.AUTHORITY_VERIFICATION_SCHEMA,
+            "verification_id": "verification:tool",
+            "decision": "ALLOW",
+            "current": True,
+            "source": request["authority_source"],
+            "source_revision": request["authority_revision"],
+            "request_id": request["request_id"],
+            "request": request,
+        }
     conn = kb.connect()
     try:
-        self_tid = kb.create_task(
+        self_tid = kb.create_olympus_task(
             conn,
+            olympus_context=context,
+            authority_verifier=allow,
+            actor="test-worker",
+            operation_id="tool-parent",
+            expected_revision=1,
             title="governed worker",
             assignee="test-worker",
-            olympus_context=context,
         )
-        assert kb.claim_task(conn, self_tid) is not None
     finally:
         conn.close()
     monkeypatch.setenv("HERMES_KANBAN_TASK", self_tid)
@@ -846,13 +869,11 @@ def test_create_inherits_worker_olympus_authority(monkeypatch, worker_env):
     created = json.loads(
         kt._handle_create({"title": "governed child", "assignee": "peer"})
     )
-    assert created["ok"] is True
+    assert "error" in created
+    assert "dedicated canonical-authority route" in created["error"]
     conn = kb.connect()
     try:
-        child = kb.get_task(conn, created["task_id"])
-        assert child.olympus_context["mission_id"] == "m-tool"
-        assert child.olympus_context["lease"]["ref"] == "lease-tool"
-        assert child.olympus_context["agent_id"] == "peer"
+        assert all(task.title != "governed child" for task in kb.list_tasks(conn))
     finally:
         conn.close()
 
