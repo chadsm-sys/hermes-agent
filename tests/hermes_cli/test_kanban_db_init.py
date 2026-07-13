@@ -4,6 +4,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 
 
@@ -120,8 +122,9 @@ def test_legacy_text_pk_tables_rebuilt_to_integer_autoincrement(tmp_path, monkey
         assert len(conn.execute("SELECT * FROM task_events").fetchall()) == 2
         assert conn.execute("SELECT body FROM task_comments").fetchone()["body"] == "hi"
         assert len(conn.execute("SELECT * FROM task_runs").fetchall()) == 1
-        # Non-numeric legacy cursor ("e-1") casts to 0.
-        assert conn.execute("SELECT last_event_id FROM kanban_notify_subs").fetchone()["last_event_id"] == 0
+        # The legacy cursor is remapped to the new integer identity, avoiding a
+        # replay of already-delivered events after migration.
+        assert conn.execute("SELECT last_event_id FROM kanban_notify_subs").fetchone()["last_event_id"] == 1
 
         # Indexes restored, including idx_events_run (added by the additive pass).
         indexes = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
@@ -175,3 +178,38 @@ def test_unseen_events_for_sub_survives_migrated_db(tmp_path, monkeypatch):
         )
         assert isinstance(cursor, int)
         assert isinstance(events, list)
+
+
+def test_rebuild_fails_closed_and_rolls_back_unmappable_linked_identity(
+    tmp_path, monkeypatch,
+):
+    db_path = _setup_home(tmp_path, monkeypatch)
+    _make_legacy_db(db_path)
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute(
+            "UPDATE tasks SET current_run_id='missing-legacy-run' WHERE id='task-1'"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with pytest.raises(
+        sqlite3.IntegrityError, match="unmappable tasks.current_run_id"
+    ):
+        kb.connect(db_path)
+
+    raw = sqlite3.connect(db_path)
+    try:
+        assert raw.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        columns = {
+            row[1]: row[2].upper()
+            for row in raw.execute("PRAGMA table_info(task_runs)")
+        }
+        assert columns["id"] == "TEXT"
+        assert raw.execute(
+            "SELECT current_run_id FROM tasks WHERE id='task-1'"
+        ).fetchone()[0] == "missing-legacy-run"
+    finally:
+        raw.close()

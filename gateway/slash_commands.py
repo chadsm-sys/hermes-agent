@@ -486,6 +486,7 @@ class GatewaySlashCommandsMixin:
     def _verify_olympus_root(
         self,
         kb,
+        conn,
         task,
         *,
         source_identity: dict[str, str],
@@ -499,18 +500,19 @@ class GatewaySlashCommandsMixin:
             self._validate_olympus_selection_binding(
                 selection, context, source_identity
             )
-        verification = kb.require_olympus_authority_verification(
-            context,
-            task_id=task.id,
-            assignee=task.assignee,
+        verification = kb.verify_olympus_telegram_task(
+            conn,
+            authorization_task_id=task.id,
+            target_task_id=task.id,
             action=action,
-            capability=capability,
-            actor=task.assignee,
-            expected_revision=context["authority"]["revision"],
-            operation_id=operation_id,
-            verifier=getattr(self, "_olympus_authority_verifier", None),
+            verifier=getattr(
+                self, "_kanban_olympus_authority_verifier", None
+            ),
             source_identity=source_identity,
+            operation_id=operation_id,
         )
+        if verification["request"]["capability"] != capability:
+            raise ValueError("Telegram capability did not match the frozen action")
         return context, verification
 
     @staticmethod
@@ -572,7 +574,7 @@ class GatewaySlashCommandsMixin:
         agent_id = selection["agent_id"]
         title = " ".join(prompt.split())[:120]
 
-        def _create() -> tuple[str, Optional[str]]:
+        def _create() -> str:
             from hermes_cli import kanban_db as kb
 
             source_identity = self._olympus_source_identity(event)
@@ -580,8 +582,8 @@ class GatewaySlashCommandsMixin:
                 event, source_identity
             )
             delivery_digest = self._olympus_json_digest(delivery_identity)
-            delivery_key = f"olympus-telegram:v2:{delivery_digest}"
-            operation_id = f"olympus-telegram-intake:v2:{delivery_digest}"
+            delivery_key = f"olympus-telegram:v3:{delivery_digest}"
+            operation_id = f"olympus-telegram-intake:v3:{delivery_digest}"
             if board != "default" and not kb.board_exists(board):
                 raise ValueError(f"Kanban board {board!r} does not exist")
             conn = kb.connect(board=board)
@@ -591,67 +593,53 @@ class GatewaySlashCommandsMixin:
                 self._validate_olympus_selection_binding(
                     selection, root_context, source_identity
                 )
-                child_context = kb.derive_olympus_child_context(
-                    root_context, agent_id=root_context["agent_id"]
+                verifier = getattr(
+                    self, "_kanban_olympus_authority_verifier", None
                 )
-                delivery_context = {
-                    "schema_version": 2,
-                    "delivery_identity": delivery_identity,
-                    "source_identity": source_identity,
-                    "selection": selection,
-                    "prompt_sha256": hashlib.sha256(
-                        prompt.encode("utf-8")
-                    ).hexdigest(),
-                    "title": title,
-                    "session_id": session_entry.session_id,
-                }
+                telegram_auth = kb.olympus_telegram_auth(
+                    conn,
+                    verifier=verifier,
+                    source_identity=source_identity,
+                    authorization_task_id=root.id,
+                    target_task_id=root.id,
+                    action="telegram-intake",
+                    operation_id=operation_id,
+                )
+                service_auth = kb.olympus_service_auth(
+                    conn,
+                    verifier=verifier,
+                    dispatcher_instance_id=getattr(
+                        self, "_kanban_dispatcher_instance_id", ""
+                    ),
+                    actor=root_context["agent_id"],
+                    operation_id=f"{operation_id}:service",
+                )
                 task_id = kb.create_olympus_telegram_task(
                     conn,
-                    olympus_context=child_context,
-                    authority_verifier=getattr(
-                        self, "_olympus_authority_verifier", None
-                    ),
-                    source_identity=source_identity,
-                    operation_id=operation_id,
-                    expected_revision=root_context["authority"]["revision"],
+                    telegram_auth=telegram_auth,
+                    service_auth=service_auth,
                     delivery_key=delivery_key,
-                    delivery_context=delivery_context,
+                    delivery_identity=delivery_identity,
                     title=title,
                     body=prompt,
                     assignee=root_context["agent_id"],
                     created_by=operator_tag,
-                    # Mission/root identity is carried in the exact verified
-                    # context and delivery journal. A dependency link here
-                    # would incorrectly hold every intake task until the
-                    # selected mission root itself completed.
-                    parents=(),
                     session_id=session_entry.session_id,
+                    platform="telegram",
+                    chat_id=str(source.chat_id),
+                    thread_id=(
+                        str(source.thread_id) if source.thread_id else None
+                    ),
+                    user_id=str(source.user_id) if source.user_id else None,
+                    notifier_profile=source_identity["profile"],
                     board=board,
                 )
-                notify_error = None
-                try:
-                    kb.add_notify_sub(
-                        conn,
-                        task_id=task_id,
-                        platform="telegram",
-                        chat_id=str(source.chat_id),
-                        thread_id=(
-                            str(source.thread_id) if source.thread_id else None
-                        ),
-                        user_id=str(source.user_id) if source.user_id else None,
-                        notifier_profile=(
-                            getattr(self, "_kanban_notifier_profile", None)
-                            or self._active_profile_name()
-                        ),
-                    )
-                except Exception as exc:
-                    notify_error = str(exc)
-                return task_id, notify_error
+                return task_id
             finally:
                 conn.close()
 
         try:
-            task_id, notify_error = await asyncio.to_thread(_create)
+            task_id = await asyncio.to_thread(_create)
         except Exception as exc:
             logger.warning(
                 "Olympus Telegram intake denied for mission %s: %s",
@@ -664,14 +652,6 @@ class GatewaySlashCommandsMixin:
             f"Queued `{task_id}` for mission `{mission_id}` on board "
             f"`{board}` with agent `{agent_id}`."
         )
-        if notify_error:
-            logger.warning(
-                "Olympus task %s was created but notification subscription "
-                "failed: %s",
-                task_id,
-                notify_error,
-            )
-            result += " Notification subscription failed; inspect the task directly."
         return result
 
     async def _handle_olympus_command(self, event: MessageEvent) -> str:
@@ -706,7 +686,7 @@ class GatewaySlashCommandsMixin:
                     event, source_identity
                 )
                 operation_id = (
-                    "olympus-telegram-command:v2:"
+                    "olympus-telegram-command:v3:"
                     + self._olympus_json_digest(delivery_identity)
                 )
                 from hermes_cli import kanban_db as kb
@@ -715,6 +695,7 @@ class GatewaySlashCommandsMixin:
                     root = kb.get_task(conn, selection["root_task_id"])
                     self._verify_olympus_root(
                         kb,
+                        conn,
                         root,
                         source_identity=source_identity,
                         capability=kb.OLYMPUS_CAPABILITY_TELEGRAM_CLEAR,
@@ -726,7 +707,13 @@ class GatewaySlashCommandsMixin:
                     conn.close()
             except Exception as exc:
                 return f"Olympus clear blocked: {exc}"
-            self.session_store.set_olympus_selection(session_key, None)
+            if not self.session_store.compare_and_set_olympus_selection(
+                session_key, expected=selection, replacement=None
+            ):
+                return (
+                    "Olympus clear not applied: the selection changed during "
+                    "authority verification. The newer selection was preserved."
+                )
             return "Olympus durable intake selection cleared."
 
         if action == "select":
@@ -752,7 +739,7 @@ class GatewaySlashCommandsMixin:
                     event, source_identity
                 )
                 operation_id = (
-                    "olympus-telegram-command:v2:"
+                    "olympus-telegram-command:v3:"
                     + self._olympus_json_digest(delivery_identity)
                 )
                 board_normalized = str(board).strip().lower()
@@ -767,6 +754,7 @@ class GatewaySlashCommandsMixin:
                     root = kb.get_task(conn, root_task_id)
                     context, _ = self._verify_olympus_root(
                         kb,
+                        conn,
                         root,
                         source_identity=source_identity,
                         capability=kb.OLYMPUS_CAPABILITY_TELEGRAM_SELECT,
@@ -831,12 +819,13 @@ class GatewaySlashCommandsMixin:
                     root = kb.get_task(conn, selection["root_task_id"])
                     self._verify_olympus_root(
                         kb,
+                        conn,
                         root,
                         source_identity=source_identity,
                         capability=kb.OLYMPUS_CAPABILITY_TELEGRAM_STATUS,
                         action="telegram-status",
                         operation_id=(
-                            "olympus-telegram-command:v2:"
+                            "olympus-telegram-command:v3:"
                             + self._olympus_json_digest(delivery_identity)
                         ),
                         selection=selection,
@@ -875,7 +864,7 @@ class GatewaySlashCommandsMixin:
                 event, source_identity
             )
             operation_id = (
-                "olympus-telegram-control:v2:"
+                "olympus-telegram-control:v3:"
                 + self._olympus_json_digest(delivery_identity)
             )
             conn = kb.connect(board=selection["board"])
@@ -885,17 +874,33 @@ class GatewaySlashCommandsMixin:
                 self._validate_olympus_selection_binding(
                     selection, root_context, source_identity
                 )
-                result = kb.apply_olympus_telegram_control(
+                verifier = getattr(
+                    self, "_kanban_olympus_authority_verifier", None
+                )
+                telegram_auth = kb.olympus_telegram_auth(
                     conn,
+                    verifier=verifier,
+                    source_identity=source_identity,
                     authorization_task_id=root.id,
                     target_task_id=task_id,
-                    action=action,
-                    authority_verifier=getattr(
-                        self, "_olympus_authority_verifier", None
-                    ),
-                    source_identity=source_identity,
+                    action=f"telegram-control:{action}",
                     operation_id=operation_id,
-                    expected_revision=root_context["authority"]["revision"],
+                )
+                service_auth = kb.olympus_service_auth(
+                    conn,
+                    verifier=verifier,
+                    dispatcher_instance_id=getattr(
+                        self, "_kanban_dispatcher_instance_id", ""
+                    ),
+                    actor=root_context["agent_id"],
+                    operation_id=f"{operation_id}:service",
+                )
+                result = kb.apply_olympus_telegram_control(
+                    conn,
+                    telegram_auth=telegram_auth,
+                    service_auth=service_auth,
+                    target_task_id=task_id,
+                    action=action,
                     operator_tag=operator_tag,
                 )
                 return str(result["status"])

@@ -1173,6 +1173,47 @@ class SessionStore:
             self._save()
             return True
 
+    def compare_and_set_olympus_selection(
+        self,
+        session_key: str,
+        *,
+        expected: Optional[Dict[str, Any]],
+        replacement: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Replace an Olympus selection only when the captured value matches.
+
+        Verification happens outside the session lock because it may open the
+        Kanban database and call the canonical authority issuer.  This CAS is
+        the persistence boundary that prevents a stale ``/olympus clear`` from
+        deleting a newer selection installed while that verification ran.
+        """
+        normalized_expected = (
+            normalize_olympus_selection(expected)
+            if expected is not None
+            else None
+        )
+        normalized_replacement = (
+            normalize_olympus_selection(replacement)
+            if replacement is not None
+            else None
+        )
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            current = (
+                normalize_olympus_selection(entry.olympus_selection)
+                if entry.olympus_selection is not None
+                else None
+            )
+            if current != normalized_expected:
+                return False
+            entry.olympus_selection = normalized_replacement
+            entry.updated_at = _now()
+            self._save()
+            return True
+
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
 

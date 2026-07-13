@@ -71,22 +71,26 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
+import inspect
 import json
+import math
 import os
 import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import logging
 import time
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from toolsets import get_toolset_names
 
@@ -109,12 +113,23 @@ _IS_WINDOWS = sys.platform == "win32"
 # onto every run so retries remain attributable even after Olympus renews or
 # revokes the task's current lease reference.
 OLYMPUS_CONTEXT_VERSION = 2
-AUTHORITY_REQUEST_SCHEMA = "olympus-authority-request/1"
-AUTHORITY_VERIFICATION_SCHEMA = "olympus-authority-verification/1"
+AUTHORITY_REQUEST_SCHEMA = "olympus-authority-request/3"
+AUTHORITY_VERIFICATION_SCHEMA = "olympus-authority-verification/3"
 AuthorityVerifier = Callable[[dict[str, Any]], dict[str, Any]]
+MAX_AUTHORITY_VERIFICATION_TTL = 300.0
 VALID_OLYMPUS_AUTHORITY_STATUSES = {"ACTIVE", "CONSUMED", "REVOKED"}
 VALID_OLYMPUS_LEASE_STATUSES = {"ACTIVE", "RELEASED", "REVOKED"}
 VALID_OLYMPUS_RISKS = {"low", "medium", "high", "critical"}
+VALID_PROCESS_STATES = {
+    "legacy", "workspace_pending", "launch_reserved", "starting",
+    "registered", "termination_pending", "terminal", "spawn_failed",
+    "identity_unverified",
+}
+VALID_EFFECT_KINDS = {"terminate_worker", "notify_text", "notify_artifact"}
+VALID_EFFECT_STATES = {
+    "pending", "applying", "applied", "gone", "not_sent", "unknown",
+    "identity_unverified", "identity_mismatch", "authority_stale", "failed",
+}
 OLYMPUS_CONTEXT_KEYS = {
     "schema_version",
     "goal_id",
@@ -151,29 +166,658 @@ OLYMPUS_LEASE_KEYS = {
     "source",
     "expires_at",
 }
+OLYMPUS_SOURCE_IDENTITY_KEYS = {
+    "platform", "bot_id", "profile", "chat_id", "thread_id", "user_id",
+}
+OLYMPUS_TARGET_IDENTITY_KEYS = {
+    "authorization_subject_id", "authorization_subject_revision",
+    "authorization_subject_status", "control_action", "task_id",
+    "task_record_revision", "goal_id", "program_id", "milestone_id",
+    "mission_id", "workstream_id",
+    "agent_id", "assignee", "status", "authority_id", "authority_revision",
+    "authority_status", "authority_source", "lease_id", "lease_revision",
+    "lease_status", "lease_source", "lease_agent_id", "lease_holder",
+}
 
 OLYMPUS_CAPABILITY_CREATE = "kanban.task.create"
 OLYMPUS_CAPABILITY_UPDATE = "kanban.task.authority.update"
 OLYMPUS_CAPABILITY_CLAIM = "kanban.task.claim"
 OLYMPUS_CAPABILITY_HEARTBEAT = "kanban.task.heartbeat"
 OLYMPUS_CAPABILITY_COMPLETE = "kanban.task.complete"
-OLYMPUS_CAPABILITY_TELEGRAM_SELECT = "telegram.olympus.select"
-OLYMPUS_CAPABILITY_TELEGRAM_STATUS = "telegram.olympus.status"
-OLYMPUS_CAPABILITY_TELEGRAM_CLEAR = "telegram.olympus.clear"
-OLYMPUS_CAPABILITY_TELEGRAM_INTAKE = "telegram.olympus.intake"
-OLYMPUS_CAPABILITY_TELEGRAM_PAUSE = "telegram.olympus.control.pause"
-OLYMPUS_CAPABILITY_TELEGRAM_RESUME = "telegram.olympus.control.resume"
-OLYMPUS_CAPABILITY_TELEGRAM_INTERRUPT = "telegram.olympus.emergency.interrupt"
-OLYMPUS_CAPABILITY_TELEGRAM_CANCEL = "telegram.olympus.emergency.cancel"
+OLYMPUS_CAPABILITY_EDIT = "kanban.task.edit"
+OLYMPUS_CAPABILITY_ASSIGN = "kanban.task.assign"
+OLYMPUS_CAPABILITY_LINK = "kanban.task.link"
+OLYMPUS_CAPABILITY_COMMENT = "kanban.task.comment"
+OLYMPUS_CAPABILITY_ATTACHMENT = "kanban.task.attachment"
+OLYMPUS_CAPABILITY_STATUS = "kanban.task.status"
+OLYMPUS_CAPABILITY_TRIAGE = "kanban.task.triage"
+OLYMPUS_CAPABILITY_ARCHIVE = "kanban.task.archive"
+OLYMPUS_CAPABILITY_DELETE = "kanban.task.delete"
+OLYMPUS_CAPABILITY_WORKSPACE = "kanban.task.workspace"
+OLYMPUS_CAPABILITY_RECOVER = "kanban.task.recover"
+OLYMPUS_CAPABILITY_NOTIFY = "kanban.task.notify"
+OLYMPUS_CAPABILITY_INSPECT = "kanban.task.inspect"
+OLYMPUS_CAPABILITY_RELEASE = "kanban.task.release"
 
-OLYMPUS_SOURCE_IDENTITY_KEYS = {
-    "platform",
-    "bot_id",
-    "profile",
-    "chat_id",
-    "thread_id",
-    "user_id",
+# Frozen Mission Control v4 wire registry (foundation head
+# 439523c332f1b86a9fae45992d983b66238a40b1).  This is deliberately explicit:
+# an ALLOW for one action can never be substituted onto another action that
+# happens to use the same local mutator or touch the same columns.
+HERMES_KANBAN_ACTION_CAPABILITIES = dict((
+    ("add_attachment", "kanban.task.attachment"),
+    ("add_notification_subscription", "kanban.task.notify"),
+    ("advance_notification_cursor", "kanban.task.notify"),
+    ("archive", "kanban.task.archive"),
+    ("assign", "kanban.task.assign"),
+    ("block", "kanban.task.status"),
+    ("claim", "kanban.task.claim"),
+    ("claim_notification_delivery", "kanban.task.notify"),
+    ("claim_notification_effect", "kanban.task.notify"),
+    ("claim_review", "kanban.task.claim"),
+    ("comment", "kanban.task.comment"),
+    ("complete", "kanban.task.complete"),
+    ("create", "kanban.task.create"),
+    ("create_idempotent", "kanban.task.create"),
+    ("decompose_triage", "kanban.task.triage"),
+    ("delete", "kanban.task.delete"),
+    ("delete_archived", "kanban.task.delete"),
+    ("delete_attachment", "kanban.task.attachment"),
+    ("demote_parent_reopened", "kanban.task.status"),
+    ("edit_result", "kanban.task.edit"),
+    ("edit_task", "kanban.task.edit"),
+    ("enforce_max_runtime", "kanban.task.recover"),
+    ("execute_worker_termination_effect", "kanban.task.recover"),
+    ("extend_stale_claim", "kanban.task.recover"),
+    ("fail_worker_launch", "kanban.task.recover"),
+    ("finish_notification_effect", "kanban.task.notify"),
+    ("heartbeat", "kanban.task.heartbeat"),
+    ("heartbeat_worker", "kanban.task.heartbeat"),
+    ("inspect_governed_status", "kanban.task.inspect"),
+    ("link", "kanban.task.link"),
+    ("link_governed_child", "kanban.task.link"),
+    ("mark_worker_starting", "kanban.task.claim"),
+    ("mark_worker_workspace_ready", "kanban.task.workspace"),
+    ("promote", "kanban.task.status"),
+    ("reclaim", "kanban.task.recover"),
+    ("reconcile_effect_journal", "kanban.task.recover"),
+    ("reconcile_worker_run", "kanban.task.recover"),
+    ("record_failure", "kanban.task.recover"),
+    ("recover_crashed_worker", "kanban.task.recover"),
+    ("recover_stale_claim", "kanban.task.recover"),
+    ("recover_stale_running", "kanban.task.recover"),
+    ("register_worker_process", "kanban.task.claim"),
+    ("release_blocked_task", "kanban.task.release"),
+    ("release_unspawned_claim", "kanban.task.recover"),
+    ("remove_notification_subscription", "kanban.task.notify"),
+    ("reserve_notification_effect", "kanban.task.notify"),
+    ("rewind_notification_cursor", "kanban.task.notify"),
+    ("schedule", "kanban.task.status"),
+    ("set_direct_status", "kanban.task.status"),
+    ("set_worker_pid", "kanban.task.claim"),
+    ("set_workspace", "kanban.task.workspace"),
+    ("settle_worker_termination", "kanban.task.recover"),
+    ("specify_triage", "kanban.task.triage"),
+    ("stage_worker_termination", "kanban.task.recover"),
+    ("unblock", "kanban.task.status"),
+    ("unlink", "kanban.task.link"),
+    ("unlink_deleted_task", "kanban.task.link"),
+    ("update_authority_context", "kanban.task.authority.update"),
+))
+
+TELEGRAM_ACTION_CAPABILITIES = {
+    "telegram-select": "telegram.olympus.select",
+    "telegram-status": "telegram.olympus.status",
+    "telegram-clear": "telegram.olympus.clear",
+    "telegram-intake": "telegram.olympus.intake",
+    "telegram-control:pause": "telegram.olympus.control.pause",
+    "telegram-control:resume": "telegram.olympus.control.resume",
+    "telegram-control:interrupt": "telegram.olympus.emergency.interrupt",
+    "telegram-control:cancel": "telegram.olympus.emergency.cancel",
 }
+OLYMPUS_CAPABILITY_TELEGRAM_SELECT = TELEGRAM_ACTION_CAPABILITIES["telegram-select"]
+OLYMPUS_CAPABILITY_TELEGRAM_STATUS = TELEGRAM_ACTION_CAPABILITIES["telegram-status"]
+OLYMPUS_CAPABILITY_TELEGRAM_CLEAR = TELEGRAM_ACTION_CAPABILITIES["telegram-clear"]
+OLYMPUS_CAPABILITY_TELEGRAM_INTAKE = TELEGRAM_ACTION_CAPABILITIES["telegram-intake"]
+TELEGRAM_EMERGENCY_ACTIONS = frozenset({
+    "telegram-control:interrupt", "telegram-control:cancel",
+})
+KANBAN_TASK_ACTION_CAPABILITIES = {
+    **HERMES_KANBAN_ACTION_CAPABILITIES,
+    **TELEGRAM_ACTION_CAPABILITIES,
+}
+SUBSCRIPTION_REGISTRATION_ACTIONS = frozenset({
+    "add_notification_subscription",
+})
+NOTIFICATION_PRINCIPAL_ACTIONS = frozenset({
+    "advance_notification_cursor",
+    "claim_notification_delivery", "claim_notification_effect",
+    "finish_notification_effect", "remove_notification_subscription",
+    "reserve_notification_effect", "rewind_notification_cursor",
+})
+WORKER_PRINCIPAL_ACTIONS = frozenset({
+    "complete", "block", "comment", "heartbeat", "heartbeat_worker",
+})
+KANBAN_ACTION_PRINCIPAL_KINDS = {
+    action: (
+        "telegram_user" if action in TELEGRAM_ACTION_CAPABILITIES
+        else "kanban_notifier" if action in NOTIFICATION_PRINCIPAL_ACTIONS
+        else "kanban_worker" if action in WORKER_PRINCIPAL_ACTIONS
+        else "kanban_service_dispatcher"
+    )
+    for action in KANBAN_TASK_ACTION_CAPABILITIES
+}
+
+# DB-enforced write intents.  The canonical verifier authorizes an exact
+# action/capability pair; these maps constrain what that permit may physically
+# change after it is issued.  A permit for a comment or notification therefore
+# cannot be confused for a task-status or run-lifecycle permit even on the same
+# connection and revision.
+_OLYMPUS_TASK_WRITE_COLUMNS: dict[tuple[str, str], frozenset[str]] = {
+    ("create_idempotent", OLYMPUS_CAPABILITY_CREATE): frozenset(),
+    ("update_authority_context", OLYMPUS_CAPABILITY_UPDATE): frozenset({
+        "olympus_context", "claim_expires",
+    }),
+    ("release_blocked_task", OLYMPUS_CAPABILITY_RELEASE): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+    }),
+    ("assign", OLYMPUS_CAPABILITY_ASSIGN): frozenset({
+        "assignee", "consecutive_failures", "last_failure_error",
+    }),
+    ("link", OLYMPUS_CAPABILITY_LINK): frozenset({"status"}),
+    ("unlink", OLYMPUS_CAPABILITY_LINK): frozenset(),
+    ("link_governed_child", OLYMPUS_CAPABILITY_LINK): frozenset(),
+    ("unlink_deleted_task", OLYMPUS_CAPABILITY_LINK): frozenset(),
+    ("comment", OLYMPUS_CAPABILITY_COMMENT): frozenset(),
+    ("add_attachment", OLYMPUS_CAPABILITY_ATTACHMENT): frozenset(),
+    ("delete_attachment", OLYMPUS_CAPABILITY_ATTACHMENT): frozenset(),
+    ("promote", OLYMPUS_CAPABILITY_STATUS): frozenset({"status"}),
+    ("claim", OLYMPUS_CAPABILITY_CLAIM): frozenset({
+        "status", "claim_lock", "claim_expires", "started_at",
+        "current_run_id",
+    }),
+    ("claim_review", OLYMPUS_CAPABILITY_CLAIM): frozenset({
+        "status", "claim_lock", "claim_expires", "started_at",
+        "current_run_id",
+    }),
+    ("heartbeat", OLYMPUS_CAPABILITY_HEARTBEAT): frozenset({"claim_expires"}),
+    ("extend_stale_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "claim_expires",
+    }),
+    ("recover_stale_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("reclaim", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id", "consecutive_failures", "last_failure_error",
+    }),
+    ("complete", OLYMPUS_CAPABILITY_COMPLETE): frozenset({
+        "status", "result", "completed_at", "claim_lock", "claim_expires",
+        "worker_pid", "current_run_id", "consecutive_failures",
+        "last_failure_error",
+    }),
+    ("edit_result", OLYMPUS_CAPABILITY_EDIT): frozenset({"result"}),
+    ("block", OLYMPUS_CAPABILITY_STATUS): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("unblock", OLYMPUS_CAPABILITY_STATUS): frozenset({
+        "status", "current_run_id", "consecutive_failures",
+        "last_failure_error",
+    }),
+    ("specify_triage", OLYMPUS_CAPABILITY_TRIAGE): frozenset({
+        "title", "body", "assignee", "status",
+    }),
+    ("decompose_triage", OLYMPUS_CAPABILITY_TRIAGE): frozenset({
+        "assignee", "status",
+    }),
+    ("archive", OLYMPUS_CAPABILITY_ARCHIVE): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("delete_archived", OLYMPUS_CAPABILITY_DELETE): frozenset(),
+    ("delete", OLYMPUS_CAPABILITY_DELETE): frozenset(),
+    ("edit_task", OLYMPUS_CAPABILITY_EDIT): frozenset({
+        "title", "body", "priority",
+    }),
+    ("set_direct_status", OLYMPUS_CAPABILITY_STATUS): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id", "completed_at",
+    }),
+    ("demote_parent_reopened", OLYMPUS_CAPABILITY_STATUS): frozenset({"status"}),
+    ("set_workspace", OLYMPUS_CAPABILITY_WORKSPACE): frozenset({"workspace_path"}),
+    ("schedule", OLYMPUS_CAPABILITY_STATUS): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+    }),
+    ("heartbeat_worker", OLYMPUS_CAPABILITY_HEARTBEAT): frozenset({
+        "last_heartbeat_at",
+    }),
+    ("enforce_max_runtime", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("recover_stale_running", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("recover_crashed_worker", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id", "last_failure_error",
+    }),
+    ("record_failure", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id", "consecutive_failures", "last_failure_error",
+    }),
+    ("set_worker_pid", OLYMPUS_CAPABILITY_CLAIM): frozenset({"worker_pid"}),
+    ("release_unspawned_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("mark_worker_workspace_ready", OLYMPUS_CAPABILITY_WORKSPACE): frozenset(),
+    ("mark_worker_starting", OLYMPUS_CAPABILITY_CLAIM): frozenset(),
+    ("register_worker_process", OLYMPUS_CAPABILITY_CLAIM): frozenset({"worker_pid"}),
+    ("fail_worker_launch", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id", "consecutive_failures", "last_failure_error",
+    }),
+    ("stage_worker_termination", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("settle_worker_termination", OLYMPUS_CAPABILITY_RECOVER): frozenset(),
+    ("execute_worker_termination_effect", OLYMPUS_CAPABILITY_RECOVER): frozenset(),
+    ("reconcile_worker_run", OLYMPUS_CAPABILITY_RECOVER): frozenset({
+        "status", "claim_lock", "claim_expires", "worker_pid",
+        "current_run_id",
+    }),
+    ("add_notification_subscription", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("remove_notification_subscription", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("claim_notification_delivery", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("advance_notification_cursor", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("rewind_notification_cursor", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("reserve_notification_effect", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("claim_notification_effect", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("finish_notification_effect", OLYMPUS_CAPABILITY_NOTIFY): frozenset(),
+    ("reconcile_effect_journal", OLYMPUS_CAPABILITY_RECOVER): frozenset(),
+    # Telegram permits authorize only immutable intake/control journals or a
+    # read-only verification.  They never authorize task-column mutation;
+    # the trusted service dispatcher obtains a separate action-specific
+    # permit for any resulting Kanban state transition.
+    **{
+        (action, capability): frozenset()
+        for action, capability in TELEGRAM_ACTION_CAPABILITIES.items()
+    },
+}
+
+_OLYMPUS_RUN_WRITE_COLUMNS: dict[tuple[str, str], frozenset[str]] = {
+    ("update_authority_context", OLYMPUS_CAPABILITY_UPDATE): frozenset({"claim_expires"}),
+    ("claim", OLYMPUS_CAPABILITY_CLAIM): frozenset({"__insert__", "status", "outcome", "summary", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("claim_review", OLYMPUS_CAPABILITY_CLAIM): frozenset({"__insert__"}),
+    ("heartbeat", OLYMPUS_CAPABILITY_HEARTBEAT): frozenset({"claim_expires"}),
+    ("extend_stale_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({"claim_expires"}),
+    ("recover_stale_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("reclaim", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("complete", OLYMPUS_CAPABILITY_COMPLETE): frozenset({"__insert__", "status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("edit_result", OLYMPUS_CAPABILITY_EDIT): frozenset({"__insert__", "summary", "metadata"}),
+    ("block", OLYMPUS_CAPABILITY_STATUS): frozenset({"__insert__", "status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("unblock", OLYMPUS_CAPABILITY_STATUS): frozenset({"status", "outcome", "summary", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("archive", OLYMPUS_CAPABILITY_ARCHIVE): frozenset({"status", "outcome", "summary", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("set_direct_status", OLYMPUS_CAPABILITY_STATUS): frozenset({"__insert__", "status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("heartbeat_worker", OLYMPUS_CAPABILITY_HEARTBEAT): frozenset({"last_heartbeat_at"}),
+    ("enforce_max_runtime", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("recover_stale_running", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("recover_crashed_worker", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("record_failure", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("set_worker_pid", OLYMPUS_CAPABILITY_CLAIM): frozenset({"worker_pid"}),
+    ("release_unspawned_claim", OLYMPUS_CAPABILITY_RECOVER): frozenset({"status", "outcome", "summary", "metadata", "error", "ended_at", "claim_lock", "claim_expires", "worker_pid"}),
+    ("mark_worker_workspace_ready", OLYMPUS_CAPABILITY_WORKSPACE): frozenset({"process_state", "workspace_snapshot"}),
+    ("mark_worker_starting", OLYMPUS_CAPABILITY_CLAIM): frozenset({"process_state"}),
+    ("register_worker_process", OLYMPUS_CAPABILITY_CLAIM): frozenset({"process_state", "worker_pid", "worker_host_id", "worker_boot_id", "worker_start_token", "worker_registered_at", "dispatcher_instance_id"}),
+    ("fail_worker_launch", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state", "status", "outcome", "error", "ended_at", "claim_lock", "claim_expires"}),
+    ("stage_worker_termination", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state", "status", "outcome", "error", "ended_at", "claim_lock", "claim_expires"}),
+    ("settle_worker_termination", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state"}),
+    ("execute_worker_termination_effect", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state"}),
+    ("reconcile_worker_run", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state", "status", "outcome", "error", "ended_at", "claim_lock", "claim_expires"}),
+    ("reconcile_effect_journal", OLYMPUS_CAPABILITY_RECOVER): frozenset({"process_state"}),
+}
+
+_OLYMPUS_FORCE_TOUCH_ACTIONS = frozenset({
+    "link", "unlink", "link_governed_child", "unlink_deleted_task",
+    "comment", "add_attachment", "delete_attachment",
+    "add_notification_subscription", "remove_notification_subscription",
+    "claim_notification_delivery", "advance_notification_cursor",
+    "rewind_notification_cursor",
+})
+
+_OLYMPUS_TASK_MUTABLE_COLUMNS = (
+    "title", "body", "assignee", "status", "priority", "created_by",
+    "created_at", "started_at", "completed_at", "workspace_kind",
+    "workspace_path", "branch_name", "claim_lock", "claim_expires", "tenant",
+    "result", "idempotency_key", "consecutive_failures", "worker_pid",
+    "last_failure_error", "max_runtime_seconds", "last_heartbeat_at",
+    "current_run_id", "workflow_template_id", "current_step_key", "skills",
+    "model_override", "max_retries", "goal_mode", "goal_max_turns",
+    "session_id", "olympus_context",
+)
+
+_OLYMPUS_RUN_MUTABLE_COLUMNS = (
+    "profile", "step_key", "status", "claim_lock", "claim_expires",
+    "worker_pid", "max_runtime_seconds", "last_heartbeat_at", "started_at",
+    "ended_at", "outcome", "summary", "metadata", "error", "process_state",
+    "launch_token", "workspace_snapshot", "auth_root_id",
+    "auth_root_revision", "verification_id", "worker_host_id",
+    "worker_boot_id", "worker_start_token", "worker_registered_at",
+    "dispatcher_instance_id",
+)
+
+_OLYMPUS_PROTECTED_AUDIT_KINDS = frozenset({
+    "claim_rejected", "heartbeat_rejected", "completion_rejected",
+    "promotion_rejected", "authority_contained",
+    "completion_blocked_hallucination", "spawn_rejected",
+})
+
+OLYMPUS_RUNTIME_IDENTITY_KEYS = frozenset({
+    "board_id", "worker_task_id", "worker_task_revision", "worker_status",
+    "worker_assignee", "run_id", "run_subject_revision", "run_status",
+    "claim_lock", "claim_expires", "process_state", "host_id", "boot_id",
+    "pid", "start_token", "dispatcher_instance_id",
+})
+OLYMPUS_NOTIFIER_IDENTITY_KEYS = frozenset({
+    "board_id", "task_id", "task_record_revision", "platform", "chat_id",
+    "thread_id", "user_id", "notifier_profile", "created_at", "last_event_id",
+    "source_event_id", "effect_id", "effect_state", "gateway_host_id",
+    "gateway_boot_id", "gateway_pid", "gateway_start_token",
+})
+
+_AUTHORITY_KEYS = frozenset({
+    "authority_id", "status", "scope", "capabilities", "revision", "source",
+    "expires_at",
+})
+_LEASE_KEYS = frozenset({
+    "lease_id", "status", "mission_id", "agent_id", "holder", "repository",
+    "branch", "worktree", "revision", "source", "expires_at",
+})
+_KANBAN_SUBJECT_KEYS = frozenset({
+    "subject_type", "subject_id", "subject_revision", "subject_status",
+    "authority", "lease", "goal_id", "program_id", "milestone_id",
+    "mission_id", "workstream_id", "assignee",
+})
+_AUTHORITY_REQUEST_KEYS = frozenset({
+    "schema_version", "profile", "target", "authorization_root", "action",
+    "capability", "actor", "principal", "operation_id", "request_id",
+})
+_AUTHORITY_RESULT_KEYS = frozenset({
+    "schema_version", "verification_id", "decision", "current", "verified_at",
+    "valid_until", "verified_principal", "verified_actor", "request_id",
+    "request", "target_verification", "authorization_root_verification",
+})
+_SUBJECT_PROOF_KEYS = frozenset({
+    "authority_current", "containment_target", "subject",
+})
+_PRINCIPAL_COMMON_KEYS = frozenset({
+    "kind", "principal_type", "principal_id", "principal_source",
+})
+_PRINCIPAL_KEYS_BY_KIND = {
+    "kanban_service_dispatcher": _PRINCIPAL_COMMON_KEYS | {
+        "board_id", "dispatcher_instance_id",
+    },
+    "kanban_worker": _PRINCIPAL_COMMON_KEYS | {
+        "board_id", "worker_task_id", "worker_task_revision", "worker_status",
+        "worker_assignee", "run_id", "run_subject_revision", "run_status",
+        "claim_lock", "claim_expires", "process_state", "host_id", "boot_id",
+        "pid", "start_token", "dispatcher_instance_id",
+    },
+    "kanban_notifier": _PRINCIPAL_COMMON_KEYS | {
+        "board_id", "task_id", "task_record_revision", "platform", "chat_id",
+        "thread_id", "user_id", "notifier_profile", "created_at",
+        "last_event_id", "source_event_id", "effect_id", "effect_state",
+        "gateway_host_id", "gateway_boot_id", "gateway_pid",
+        "gateway_start_token",
+    },
+    "telegram_user": _PRINCIPAL_COMMON_KEYS | {
+        "bot_id", "profile", "chat_id", "thread_id", "user_id",
+    },
+}
+_NOTIFICATION_SUBSCRIPTION_OPERATION_KEYS = frozenset({
+    "schema_version", "action", "board_id", "task_id",
+    "task_record_revision", "platform", "chat_id", "thread_id", "user_id",
+    "notifier_profile",
+})
+NOTIFICATION_SUBSCRIPTION_OPERATION_SCHEMA = (
+    "kanban-notification-subscription-operation/1"
+)
+NOTIFICATION_EFFECT_RESERVATION_SCHEMA = (
+    "kanban-notification-effect-reservation/1"
+)
+NOTIFICATION_EFFECT_TRANSITION_SCHEMA = (
+    "kanban-notification-effect-transition/1"
+)
+NOTIFIER_MUTATION_WRITE_SCHEMA = "kanban-notifier-mutation-write/1"
+WORKER_REGISTRATION_WRITE_SCHEMA = "kanban-worker-registration-write/1"
+CREATE_RECEIPT_WRITE_SCHEMA = "kanban-create-receipt-write/1"
+RELEASE_RECEIPT_WRITE_SCHEMA = "kanban-release-receipt-write/1"
+TELEGRAM_DELIVERY_WRITE_SCHEMA = "kanban-telegram-delivery-write/1"
+TELEGRAM_CONTROL_WRITE_SCHEMA = "kanban-telegram-control-write/1"
+_OLYMPUS_RELEASE_RECEIPT_KEYS = frozenset({
+    "schema_version", "operation_id", "task_id", "previous_status", "status",
+    "previous_revision", "record_revision", "verification_id", "request_id",
+    "actor", "principal", "authority_id", "authority_revision",
+    "authority_source", "lease_id", "lease_revision", "lease_source",
+    "created_at",
+})
+_NOTIFICATION_EFFECT_RESERVATION_KEYS = frozenset({
+    "schema_version", "action", "task_id", "task_record_revision",
+    "effect_kind", "operation_id", "event_id", "destination_key", "part",
+    "source_identity", "payload", "payload_sha256", "target_post_revision",
+})
+_NOTIFICATION_EFFECT_TRANSITION_KEYS = frozenset({
+    "schema_version", "action", "task_id", "task_record_revision",
+    "effect_row_id", "effect_kind", "operation_id", "event_id",
+    "destination_key", "old_state", "new_state", "error", "updated_at",
+    "applied_at",
+})
+_WORKER_REGISTRATION_WRITE_KEYS = frozenset({
+    "schema_version", "action", "task_id", "task_record_revision",
+    "dispatcher_instance_id",
+})
+_TELEGRAM_DELIVERY_WRITE_KEYS = frozenset({
+    "schema_version", "action", "task_id", "task_record_revision",
+    "delivery_key", "authorization_task_id", "authorization_task_revision",
+    "created_task_id", "payload", "payload_sha256", "created_at",
+})
+_TELEGRAM_CONTROL_WRITE_KEYS = frozenset({
+    "schema_version", "action", "task_id", "task_record_revision",
+    "operation_id", "authorization_task_id", "authorization_task_revision",
+    "source_identity", "request_payload", "payload_sha256",
+    "result_status", "effect_operation_id", "created_at",
+})
+_EXACT_MUTATION_BINDING_ACTIONS = frozenset({
+    "reserve_notification_effect", "claim_notification_effect",
+    "finish_notification_effect", "register_worker_process",
+    "telegram-intake", "telegram-control:pause", "telegram-control:resume",
+    "telegram-control:interrupt", "telegram-control:cancel",
+})
+
+
+class AuthorityContractError(ValueError):
+    """Stable fail-closed error for malformed frozen v3 wire data."""
+
+
+@dataclass(frozen=True)
+class OlympusMutationAuth:
+    """Trusted, process-local authority-verification binding.
+
+    Generic CLI, dashboard, and tool payloads never construct this object.
+    The embedding composition root supplies the callable and authenticated
+    principal; every other value remains an input that the canonical issuer
+    must independently verify.
+    """
+
+    verifier: AuthorityVerifier
+    principal_type: str
+    principal_id: str
+    principal_source: str
+    actor: Optional[str] = None
+    operation_id: Optional[str] = None
+    source_identity: Optional[dict[str, Any]] = None
+    target_identity: Optional[dict[str, Any]] = None
+    runtime_identity: Optional[dict[str, Any]] = None
+    notifier_identity: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """Exact OS process instance; PID alone is never a safe identity."""
+
+    host_id: str
+    boot_id: str
+    pid: int
+    start_token: str
+
+
+@dataclass(frozen=True)
+class OlympusWorkerAuthSession:
+    """Trusted process-local binding installed after worker registration."""
+
+    verifier: AuthorityVerifier
+    board_id: str
+    task_id: str
+    run_id: int
+    run_subject_revision: int
+    claim_lock: str
+    assignee: str
+    process_identity: ProcessIdentity
+    dispatcher_instance_id: str
+
+    def issue(
+        self,
+        conn: sqlite3.Connection,
+        action: str,
+        capability: str,
+    ) -> OlympusMutationAuth:
+        runtime = olympus_worker_runtime_snapshot(
+            conn,
+            worker_task_id=self.task_id,
+            run_id=self.run_id,
+            claim_lock=self.claim_lock,
+        )
+        observed_process = ProcessIdentity(
+            host_id=runtime["host_id"],
+            boot_id=runtime["boot_id"],
+            pid=runtime["pid"],
+            start_token=runtime["start_token"],
+        )
+        if (
+            runtime["board_id"] != self.board_id
+            or runtime["worker_task_id"] != self.task_id
+            or runtime["run_id"] != self.run_id
+            or runtime["run_subject_revision"] != self.run_subject_revision
+            or runtime["worker_assignee"] != self.assignee
+            or observed_process != self.process_identity
+            or runtime["dispatcher_instance_id"] != self.dispatcher_instance_id
+        ):
+            raise OlympusContextError(
+                "olympus_runtime_identity_conflict",
+                "worker authorization session no longer matches canonical state",
+            )
+        process_instance = (
+            f"{observed_process.host_id}:{observed_process.boot_id}:"
+            f"{observed_process.pid}:{observed_process.start_token}"
+        )
+        return OlympusMutationAuth(
+            verifier=self.verifier,
+            principal_type="kanban_worker",
+            principal_id=(
+                f"kanban-worker:{self.board_id}:{self.task_id}:"
+                f"{self.run_id}:{process_instance}"
+            ),
+            principal_source=f"kanban-dispatcher:{self.dispatcher_instance_id}",
+            actor=self.assignee,
+            operation_id=(
+                f"worker:{self.run_id}:{action}:{runtime['worker_task_revision']}"
+            ),
+            runtime_identity=runtime,
+        )
+
+
+_OLYMPUS_MUTATION_AUTH: ContextVar[Optional[OlympusMutationAuth]] = ContextVar(
+    "olympus_mutation_auth", default=None
+)
+_OLYMPUS_WORKER_AUTH_SESSION: ContextVar[
+    Optional[OlympusWorkerAuthSession]
+] = ContextVar("olympus_worker_auth_session", default=None)
+
+
+def install_olympus_worker_auth_session(
+    session: OlympusWorkerAuthSession,
+):
+    """Install a trusted worker session and return its ContextVar token."""
+    return _OLYMPUS_WORKER_AUTH_SESSION.set(session)
+
+
+def current_olympus_worker_auth_session() -> Optional[OlympusWorkerAuthSession]:
+    return _OLYMPUS_WORKER_AUTH_SESSION.get()
+
+
+def reset_olympus_worker_auth_session(token) -> None:
+    _OLYMPUS_WORKER_AUTH_SESSION.reset(token)
+
+
+def install_olympus_worker_auth_session_from_env(
+    conn: sqlite3.Connection,
+    verifier: AuthorityVerifier,
+):
+    """Bind the current registered worker process at a trusted composition root.
+
+    Environment values locate the dispatcher reservation; none of them grant
+    authority.  The live DB row, exact OS process instance, and canonical
+    verifier are rechecked before the process-local session is installed.
+    """
+    if not callable(verifier):
+        raise TypeError("verifier must be callable")
+    task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK", "").strip()
+    dispatcher = os.environ.get(
+        "HERMES_KANBAN_DISPATCHER_INSTANCE", ""
+    ).strip()
+    try:
+        run_id = int(os.environ.get("HERMES_KANBAN_RUN_ID", ""))
+    except (TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_runtime_identity_invalid",
+            "registered worker run id is missing",
+        ) from exc
+    runtime = olympus_worker_runtime_snapshot(
+        conn,
+        worker_task_id=task_id,
+        run_id=run_id,
+        claim_lock=claim_lock,
+    )
+    process_identity = read_process_identity(os.getpid())
+    if (
+        process_identity is None
+        or process_identity.host_id != runtime["host_id"]
+        or process_identity.boot_id != runtime["boot_id"]
+        or process_identity.pid != runtime["pid"]
+        or process_identity.start_token != runtime["start_token"]
+        or dispatcher != runtime["dispatcher_instance_id"]
+    ):
+        raise OlympusContextError(
+            "olympus_runtime_process_mismatch",
+            "current process does not match the registered worker",
+        )
+    session = OlympusWorkerAuthSession(
+        verifier=verifier,
+        board_id=runtime["board_id"],
+        task_id=runtime["worker_task_id"],
+        run_id=runtime["run_id"],
+        run_subject_revision=runtime["run_subject_revision"],
+        claim_lock=runtime["claim_lock"],
+        assignee=runtime["worker_assignee"],
+        process_identity=process_identity,
+        dispatcher_instance_id=dispatcher,
+    )
+    return install_olympus_worker_auth_session(session)
 
 
 class OlympusContextError(ValueError):
@@ -561,86 +1205,1250 @@ def _require_current_olympus_context(
     return context
 
 
-def _olympus_authority_request(
-    context: dict[str, Any],
-    *,
-    task_id: str,
-    assignee: str,
-    action: str,
-    capability: str,
-    actor: str,
-    expected_revision: int,
-    operation_id: str,
-    source_identity: Optional[dict[str, str]] = None,
-    target_identity: Optional[dict[str, Any]] = None,
+def _strict_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise AuthorityContractError(f"{field_name} must be a non-empty string")
+    cleaned = value.strip()
+    if len(cleaned) > 2048:
+        raise AuthorityContractError(f"{field_name} is too long")
+    return cleaned
+
+
+def _strict_string(
+    value: Any, field_name: str, *, allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        expected = "a string" if allow_empty else "a non-empty string"
+        raise AuthorityContractError(f"{field_name} must be {expected}")
+    if len(value) > 2048:
+        raise AuthorityContractError(f"{field_name} is too long")
+    return value if allow_empty else value.strip()
+
+
+def _strict_optional_string(value: Any, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    return _strict_string(value, field_name, allow_empty=True)
+
+
+def _strict_int(value: Any, field_name: str, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise AuthorityContractError(
+            f"{field_name} must be an integer >= {minimum}, not a boolean"
+        )
+    return value
+
+
+def _strict_time(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AuthorityContractError(f"{field_name} must be a finite timestamp")
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise AuthorityContractError(
+            f"{field_name} must be a positive finite timestamp"
+        )
+    return normalized
+
+
+def _strict_text_list(value: Any, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise AuthorityContractError(f"{field_name} must be a non-empty list")
+    cleaned = [_strict_text(item, f"{field_name}[]") for item in value]
+    if len(set(cleaned)) != len(cleaned):
+        raise AuthorityContractError(f"{field_name} contains duplicate values")
+    return sorted(cleaned)
+
+
+def _require_exact_keys(
+    value: Any, expected: frozenset[str], field_name: str,
 ) -> dict[str, Any]:
-    authority = context["authority"]
-    lease = context["lease"]
-    request = {
+    if not isinstance(value, dict):
+        raise AuthorityContractError(f"{field_name} must be an object")
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unknown = sorted(repr(item) for item in actual - expected)
+        raise AuthorityContractError(
+            f"{field_name} fields are not exact; missing={missing}, unknown={unknown}"
+        )
+    return value
+
+
+def _normalize_v3_authority(
+    value: Any, *, field_name: str, now: Optional[float], require_current: bool,
+) -> dict[str, Any]:
+    raw = _require_exact_keys(value, _AUTHORITY_KEYS, field_name)
+    status = _strict_text(raw["status"], f"{field_name}.status")
+    if status not in VALID_OLYMPUS_AUTHORITY_STATUSES:
+        raise AuthorityContractError(f"{field_name}.status is not recognized")
+    expiry = _strict_time(raw["expires_at"], f"{field_name}.expires_at")
+    if require_current and status != "ACTIVE":
+        raise AuthorityContractError(f"{field_name} must be ACTIVE")
+    if require_current and now is not None and expiry <= now:
+        raise AuthorityContractError(f"{field_name} is expired")
+    return {
+        "authority_id": _strict_text(
+            raw["authority_id"], f"{field_name}.authority_id"
+        ),
+        "status": status,
+        "scope": _strict_text_list(raw["scope"], f"{field_name}.scope"),
+        "capabilities": _strict_text_list(
+            raw["capabilities"], f"{field_name}.capabilities"
+        ),
+        "revision": _strict_int(
+            raw["revision"], f"{field_name}.revision", minimum=1
+        ),
+        "source": _strict_text(raw["source"], f"{field_name}.source"),
+        "expires_at": expiry,
+    }
+
+
+def _normalize_v3_lease(
+    value: Any, *, field_name: str, now: Optional[float], require_current: bool,
+) -> dict[str, Any]:
+    raw = _require_exact_keys(value, _LEASE_KEYS, field_name)
+    status = _strict_text(raw["status"], f"{field_name}.status")
+    if status not in VALID_OLYMPUS_LEASE_STATUSES:
+        raise AuthorityContractError(f"{field_name}.status is not recognized")
+    expiry = _strict_time(raw["expires_at"], f"{field_name}.expires_at")
+    if require_current and status != "ACTIVE":
+        raise AuthorityContractError(f"{field_name} must be ACTIVE")
+    if require_current and now is not None and expiry <= now:
+        raise AuthorityContractError(f"{field_name} is expired")
+    return {
+        "lease_id": _strict_text(raw["lease_id"], f"{field_name}.lease_id"),
+        "status": status,
+        "mission_id": _strict_text(raw["mission_id"], f"{field_name}.mission_id"),
+        "agent_id": _strict_text(raw["agent_id"], f"{field_name}.agent_id"),
+        "holder": _strict_text(raw["holder"], f"{field_name}.holder"),
+        "repository": _strict_text(raw["repository"], f"{field_name}.repository"),
+        "branch": _strict_text(raw["branch"], f"{field_name}.branch"),
+        "worktree": _strict_text(raw["worktree"], f"{field_name}.worktree"),
+        "revision": _strict_int(
+            raw["revision"], f"{field_name}.revision", minimum=1
+        ),
+        "source": _strict_text(raw["source"], f"{field_name}.source"),
+        "expires_at": expiry,
+    }
+
+
+def _normalize_kanban_subject(
+    value: Any, *, field_name: str, now: float, require_current: bool,
+) -> dict[str, Any]:
+    raw = _require_exact_keys(value, _KANBAN_SUBJECT_KEYS, field_name)
+    if _strict_text(raw["subject_type"], f"{field_name}.subject_type") \
+            != "kanban_task":
+        raise AuthorityContractError(
+            f"{field_name}.subject_type does not match profile"
+        )
+    status = _strict_text(raw["subject_status"], f"{field_name}.subject_status")
+    if status not in VALID_STATUSES:
+        raise AuthorityContractError(f"{field_name}.subject_status is not recognized")
+    authority = _normalize_v3_authority(
+        raw["authority"], field_name=f"{field_name}.authority", now=now,
+        require_current=require_current,
+    )
+    lease = _normalize_v3_lease(
+        raw["lease"], field_name=f"{field_name}.lease", now=now,
+        require_current=require_current,
+    )
+    result = {
+        "subject_type": "kanban_task",
+        "subject_id": _strict_text(raw["subject_id"], f"{field_name}.subject_id"),
+        "subject_revision": _strict_int(
+            raw["subject_revision"], f"{field_name}.subject_revision", minimum=0
+        ),
+        "subject_status": status,
+        "authority": authority,
+        "lease": lease,
+    }
+    for key in (
+        "goal_id", "program_id", "milestone_id", "mission_id", "workstream_id",
+    ):
+        result[key] = _strict_text(raw[key], f"{field_name}.{key}")
+    if lease["mission_id"] != result["mission_id"]:
+        raise AuthorityContractError(
+            f"{field_name}.lease.mission_id does not match subject"
+        )
+    assignee = _strict_text(raw["assignee"], f"{field_name}.assignee")
+    if not (assignee == lease["agent_id"] == lease["holder"]):
+        raise AuthorityContractError(
+            f"{field_name} assignee, lease agent, and lease holder must match"
+        )
+    result["assignee"] = assignee
+    return result
+
+
+def _request_digest(request_without_id: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        request_without_id, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _wire_equal(left: Any, right: Any) -> bool:
+    return json.dumps(
+        left, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ) == json.dumps(
+        right, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+
+
+def _scope_allows(authority: dict[str, Any], subject: dict[str, Any]) -> bool:
+    subject_scopes = {
+        subject[key]
+        for key in (
+            "subject_id", "goal_id", "program_id", "milestone_id", "mission_id",
+        )
+    }
+    return "*" in authority["scope"] or bool(
+        subject_scopes.intersection(authority["scope"])
+    )
+
+
+def _normalize_notification_subscription_operation_binding(
+    value: Any,
+    *,
+    target: Optional[dict[str, Any]] = None,
+    board_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Canonicalize the v4 add-only notification destination binding."""
+    raw = _require_exact_keys(
+        value,
+        _NOTIFICATION_SUBSCRIPTION_OPERATION_KEYS,
+        "principal.operation_binding",
+    )
+    if raw["schema_version"] != NOTIFICATION_SUBSCRIPTION_OPERATION_SCHEMA:
+        raise AuthorityContractError(
+            "principal.operation_binding schema is not notification subscription v1"
+        )
+    if raw["action"] != "add_notification_subscription":
+        raise AuthorityContractError(
+            "principal.operation_binding action is not add_notification_subscription"
+        )
+    normalized = {
+        "schema_version": NOTIFICATION_SUBSCRIPTION_OPERATION_SCHEMA,
+        "action": "add_notification_subscription",
+        "board_id": _strict_text(
+            raw["board_id"], "principal.operation_binding.board_id"
+        ),
+        "task_id": _strict_text(
+            raw["task_id"], "principal.operation_binding.task_id"
+        ),
+        "task_record_revision": _strict_int(
+            raw["task_record_revision"],
+            "principal.operation_binding.task_record_revision",
+            minimum=1,
+        ),
+        "platform": _strict_text(
+            raw["platform"], "principal.operation_binding.platform"
+        ),
+        "chat_id": _strict_text(
+            raw["chat_id"], "principal.operation_binding.chat_id"
+        ),
+        "thread_id": _strict_string(
+            raw["thread_id"],
+            "principal.operation_binding.thread_id",
+            allow_empty=True,
+        ),
+        "user_id": _strict_optional_string(
+            raw["user_id"], "principal.operation_binding.user_id"
+        ),
+        "notifier_profile": _strict_optional_string(
+            raw["notifier_profile"],
+            "principal.operation_binding.notifier_profile",
+        ),
+    }
+    if board_id is not None and normalized["board_id"] != board_id:
+        raise AuthorityContractError(
+            "subscription operation board does not match service dispatcher"
+        )
+    if target is not None and (
+        normalized["task_id"] != target["subject_id"]
+        or normalized["task_record_revision"] != target["subject_revision"]
+    ):
+        raise AuthorityContractError(
+            "subscription operation task or revision does not match target"
+        )
+    return normalized
+
+
+def notification_subscription_operation_id(operation_binding: Any) -> str:
+    """Return the canonical idempotency identity for one exact subscription."""
+    normalized = _normalize_notification_subscription_operation_binding(
+        operation_binding
+    )
+    digest = hashlib.sha256(json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")).hexdigest()
+    return f"kanban-notification-subscription:add:{digest}"
+
+
+def _canonical_json_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise AuthorityContractError(f"{field_name} must be canonical JSON text")
+    try:
+        decoded = json.loads(value)
+        canonical = json.dumps(
+            decoded, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise AuthorityContractError(
+            f"{field_name} must be canonical JSON text"
+        ) from exc
+    if canonical != value:
+        raise AuthorityContractError(f"{field_name} is not canonical JSON")
+    return canonical
+
+
+def _normalize_exact_mutation_binding(
+    value: Any, *, action: str, task_id: str, task_record_revision: int,
+) -> dict[str, Any]:
+    """Canonicalize one process-local exact SQL write intent."""
+    if action == "reserve_notification_effect":
+        raw = _require_exact_keys(
+            value, _NOTIFICATION_EFFECT_RESERVATION_KEYS, "mutation_binding",
+        )
+        if (
+            raw["schema_version"] != NOTIFICATION_EFFECT_RESERVATION_SCHEMA
+            or raw["action"] != action
+        ):
+            raise AuthorityContractError(
+                "notification effect reservation binding has the wrong schema/action"
+            )
+        source = _canonical_json_text(
+            raw["source_identity"], "mutation_binding.source_identity"
+        )
+        payload = _canonical_json_text(
+            raw["payload"], "mutation_binding.payload"
+        )
+        digest = _strict_text(
+            raw["payload_sha256"], "mutation_binding.payload_sha256"
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != digest
+        ):
+            raise AuthorityContractError(
+                "mutation_binding.payload_sha256 does not match canonical payload"
+            )
+        normalized = {
+            "schema_version": NOTIFICATION_EFFECT_RESERVATION_SCHEMA,
+            "action": action,
+            "task_id": _strict_text(raw["task_id"], "mutation_binding.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"],
+                "mutation_binding.task_record_revision", minimum=1,
+            ),
+            "effect_kind": _strict_text(
+                raw["effect_kind"], "mutation_binding.effect_kind"
+            ),
+            "operation_id": _strict_text(
+                raw["operation_id"], "mutation_binding.operation_id"
+            ),
+            "event_id": _strict_int(
+                raw["event_id"], "mutation_binding.event_id", minimum=1,
+            ),
+            "destination_key": _strict_text(
+                raw["destination_key"], "mutation_binding.destination_key"
+            ),
+            "part": _strict_text(raw["part"], "mutation_binding.part"),
+            "source_identity": source,
+            "payload": payload,
+            "payload_sha256": digest,
+            "target_post_revision": _strict_int(
+                raw["target_post_revision"],
+                "mutation_binding.target_post_revision", minimum=1,
+            ),
+        }
+        if normalized["effect_kind"] not in {"notify_text", "notify_artifact"}:
+            raise AuthorityContractError(
+                "mutation_binding.effect_kind is not a notification effect"
+            )
+    elif action in {"claim_notification_effect", "finish_notification_effect"}:
+        raw = _require_exact_keys(
+            value, _NOTIFICATION_EFFECT_TRANSITION_KEYS, "mutation_binding",
+        )
+        if (
+            raw["schema_version"] != NOTIFICATION_EFFECT_TRANSITION_SCHEMA
+            or raw["action"] != action
+        ):
+            raise AuthorityContractError(
+                "notification effect transition binding has the wrong schema/action"
+            )
+        error = raw["error"]
+        if error is not None and not isinstance(error, str):
+            raise AuthorityContractError("mutation_binding.error must be text or null")
+        applied_at = raw["applied_at"]
+        if applied_at is not None:
+            applied_at = _strict_int(
+                applied_at, "mutation_binding.applied_at", minimum=0,
+            )
+        normalized = {
+            "schema_version": NOTIFICATION_EFFECT_TRANSITION_SCHEMA,
+            "action": action,
+            "task_id": _strict_text(raw["task_id"], "mutation_binding.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"],
+                "mutation_binding.task_record_revision", minimum=1,
+            ),
+            "effect_row_id": _strict_int(
+                raw["effect_row_id"], "mutation_binding.effect_row_id", minimum=1,
+            ),
+            "effect_kind": _strict_text(
+                raw["effect_kind"], "mutation_binding.effect_kind"
+            ),
+            "operation_id": _strict_text(
+                raw["operation_id"], "mutation_binding.operation_id"
+            ),
+            "event_id": _strict_int(
+                raw["event_id"], "mutation_binding.event_id", minimum=1,
+            ),
+            "destination_key": _strict_text(
+                raw["destination_key"], "mutation_binding.destination_key"
+            ),
+            "old_state": _strict_text(
+                raw["old_state"], "mutation_binding.old_state"
+            ),
+            "new_state": _strict_text(
+                raw["new_state"], "mutation_binding.new_state"
+            ),
+            "error": error,
+            "updated_at": _strict_int(
+                raw["updated_at"], "mutation_binding.updated_at", minimum=0,
+            ),
+            "applied_at": applied_at,
+        }
+        if normalized["effect_kind"] not in {"notify_text", "notify_artifact"}:
+            raise AuthorityContractError(
+                "mutation_binding.effect_kind is not a notification effect"
+            )
+    elif action == "register_worker_process":
+        raw = _require_exact_keys(
+            value, _WORKER_REGISTRATION_WRITE_KEYS, "mutation_binding",
+        )
+        if (
+            raw["schema_version"] != WORKER_REGISTRATION_WRITE_SCHEMA
+            or raw["action"] != action
+        ):
+            raise AuthorityContractError(
+                "worker registration binding has the wrong schema/action"
+            )
+        normalized = {
+            "schema_version": WORKER_REGISTRATION_WRITE_SCHEMA,
+            "action": action,
+            "task_id": _strict_text(raw["task_id"], "mutation_binding.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"],
+                "mutation_binding.task_record_revision", minimum=1,
+            ),
+            "dispatcher_instance_id": _strict_text(
+                raw["dispatcher_instance_id"],
+                "mutation_binding.dispatcher_instance_id",
+            ),
+        }
+    elif action == "telegram-intake":
+        raw = _require_exact_keys(
+            value, _TELEGRAM_DELIVERY_WRITE_KEYS, "mutation_binding",
+        )
+        if (
+            raw["schema_version"] != TELEGRAM_DELIVERY_WRITE_SCHEMA
+            or raw["action"] != action
+        ):
+            raise AuthorityContractError(
+                "Telegram delivery binding has the wrong schema/action"
+            )
+        payload = _canonical_json_text(
+            raw["payload"], "mutation_binding.payload"
+        )
+        digest = _strict_text(
+            raw["payload_sha256"], "mutation_binding.payload_sha256"
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != digest
+        ):
+            raise AuthorityContractError(
+                "mutation_binding.payload_sha256 does not match canonical payload"
+            )
+        normalized = {
+            "schema_version": TELEGRAM_DELIVERY_WRITE_SCHEMA,
+            "action": action,
+            "task_id": _strict_text(raw["task_id"], "mutation_binding.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"],
+                "mutation_binding.task_record_revision", minimum=1,
+            ),
+            "delivery_key": _strict_text(
+                raw["delivery_key"], "mutation_binding.delivery_key"
+            ),
+            "authorization_task_id": _strict_text(
+                raw["authorization_task_id"],
+                "mutation_binding.authorization_task_id",
+            ),
+            "authorization_task_revision": _strict_int(
+                raw["authorization_task_revision"],
+                "mutation_binding.authorization_task_revision", minimum=1,
+            ),
+            "created_task_id": _strict_text(
+                raw["created_task_id"], "mutation_binding.created_task_id"
+            ),
+            "payload": payload,
+            "payload_sha256": digest,
+            "created_at": _strict_int(
+                raw["created_at"], "mutation_binding.created_at", minimum=0,
+            ),
+        }
+        if normalized["authorization_task_id"] != normalized["task_id"] or (
+            normalized["authorization_task_revision"]
+            != normalized["task_record_revision"]
+        ):
+            raise AuthorityContractError(
+                "Telegram delivery authorization root is not the exact target"
+            )
+    elif action.startswith("telegram-control:"):
+        raw = _require_exact_keys(
+            value, _TELEGRAM_CONTROL_WRITE_KEYS, "mutation_binding",
+        )
+        if (
+            raw["schema_version"] != TELEGRAM_CONTROL_WRITE_SCHEMA
+            or raw["action"] != action
+        ):
+            raise AuthorityContractError(
+                "Telegram control binding has the wrong schema/action"
+            )
+        source = _canonical_json_text(
+            raw["source_identity"], "mutation_binding.source_identity"
+        )
+        payload = _canonical_json_text(
+            raw["request_payload"], "mutation_binding.request_payload"
+        )
+        digest = _strict_text(
+            raw["payload_sha256"], "mutation_binding.payload_sha256"
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(payload.encode("utf-8")).hexdigest() != digest
+        ):
+            raise AuthorityContractError(
+                "mutation_binding.payload_sha256 does not match canonical payload"
+            )
+        result_status = raw["result_status"]
+        if result_status is not None:
+            result_status = _strict_text(
+                result_status, "mutation_binding.result_status"
+            )
+        effect_operation_id = raw["effect_operation_id"]
+        if effect_operation_id is not None:
+            effect_operation_id = _strict_text(
+                effect_operation_id, "mutation_binding.effect_operation_id"
+            )
+        normalized = {
+            "schema_version": TELEGRAM_CONTROL_WRITE_SCHEMA,
+            "action": action,
+            "task_id": _strict_text(raw["task_id"], "mutation_binding.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"],
+                "mutation_binding.task_record_revision", minimum=1,
+            ),
+            "operation_id": _strict_text(
+                raw["operation_id"], "mutation_binding.operation_id"
+            ),
+            "authorization_task_id": _strict_text(
+                raw["authorization_task_id"],
+                "mutation_binding.authorization_task_id",
+            ),
+            "authorization_task_revision": _strict_int(
+                raw["authorization_task_revision"],
+                "mutation_binding.authorization_task_revision", minimum=1,
+            ),
+            "source_identity": source,
+            "request_payload": payload,
+            "payload_sha256": digest,
+            "result_status": result_status,
+            "effect_operation_id": effect_operation_id,
+            "created_at": _strict_int(
+                raw["created_at"], "mutation_binding.created_at", minimum=0,
+            ),
+        }
+    else:
+        raise AuthorityContractError(
+            f"action {action!r} does not accept an exact mutation binding"
+        )
+    if (
+        normalized["task_id"] != task_id
+        or normalized["task_record_revision"] != task_record_revision
+    ):
+        raise AuthorityContractError(
+            "mutation binding task or revision does not match the exact target"
+        )
+    if (
+        action == "reserve_notification_effect"
+        and normalized["target_post_revision"] != task_record_revision
+    ):
+        raise AuthorityContractError(
+            "notification effect target_post_revision is not exact"
+        )
+    return normalized
+
+
+def _normalize_kanban_principal(
+    value: Any, *, action: str, target: dict[str, Any], now: float,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise AuthorityContractError("principal must be an object")
+    kind = _strict_text(value.get("kind"), "principal.kind")
+    expected_keys = _PRINCIPAL_KEYS_BY_KIND.get(kind)
+    if expected_keys is None:
+        raise AuthorityContractError(f"principal.kind {kind!r} is not recognized")
+    if (
+        kind == "kanban_service_dispatcher"
+        and action in SUBSCRIPTION_REGISTRATION_ACTIONS
+    ):
+        expected_keys = expected_keys | {"operation_binding"}
+    raw = _require_exact_keys(value, expected_keys, "principal")
+    required_kind = KANBAN_ACTION_PRINCIPAL_KINDS.get(action)
+    if required_kind is None:
+        raise AuthorityContractError(f"action {action!r} has no principal-kind binding")
+    if kind != required_kind:
+        raise AuthorityContractError(
+            f"action {action!r} requires principal kind {required_kind!r}"
+        )
+    result = {
+        "kind": kind,
+        "principal_type": _strict_text(raw["principal_type"], "principal.principal_type"),
+        "principal_id": _strict_text(raw["principal_id"], "principal.principal_id"),
+        "principal_source": _strict_text(
+            raw["principal_source"], "principal.principal_source"
+        ),
+    }
+    if kind == "kanban_service_dispatcher":
+        board_id = _strict_text(raw["board_id"], "principal.board_id")
+        dispatcher = _strict_text(
+            raw["dispatcher_instance_id"], "principal.dispatcher_instance_id"
+        )
+        expected = (
+            "service",
+            f"kanban-service-dispatcher:{board_id}:{dispatcher}",
+            f"kanban-dispatcher:{board_id}:{dispatcher}",
+        )
+        if (
+            result["principal_type"], result["principal_id"],
+            result["principal_source"],
+        ) != expected:
+            raise AuthorityContractError(
+                "service-dispatcher principal triple is not canonically derived"
+            )
+        result.update({"board_id": board_id, "dispatcher_instance_id": dispatcher})
+        if action in SUBSCRIPTION_REGISTRATION_ACTIONS:
+            result["operation_binding"] = (
+                _normalize_notification_subscription_operation_binding(
+                    raw["operation_binding"],
+                    target=target,
+                    board_id=board_id,
+                )
+            )
+    elif kind == "kanban_worker":
+        result.update({
+            "board_id": _strict_text(raw["board_id"], "principal.board_id"),
+            "worker_task_id": _strict_text(
+                raw["worker_task_id"], "principal.worker_task_id"
+            ),
+            "worker_task_revision": _strict_int(
+                raw["worker_task_revision"], "principal.worker_task_revision", minimum=1
+            ),
+            "worker_status": _strict_text(
+                raw["worker_status"], "principal.worker_status"
+            ),
+            "worker_assignee": _strict_text(
+                raw["worker_assignee"], "principal.worker_assignee"
+            ),
+            "run_id": _strict_int(raw["run_id"], "principal.run_id", minimum=1),
+            "run_subject_revision": _strict_int(
+                raw["run_subject_revision"], "principal.run_subject_revision", minimum=1
+            ),
+            "run_status": _strict_text(raw["run_status"], "principal.run_status"),
+            "claim_lock": _strict_text(raw["claim_lock"], "principal.claim_lock"),
+            "claim_expires": _strict_int(
+                raw["claim_expires"], "principal.claim_expires", minimum=1
+            ),
+            "process_state": _strict_text(
+                raw["process_state"], "principal.process_state"
+            ),
+            "host_id": _strict_text(raw["host_id"], "principal.host_id"),
+            "boot_id": _strict_text(raw["boot_id"], "principal.boot_id"),
+            "pid": _strict_int(raw["pid"], "principal.pid", minimum=1),
+            "start_token": _strict_text(raw["start_token"], "principal.start_token"),
+            "dispatcher_instance_id": _strict_text(
+                raw["dispatcher_instance_id"], "principal.dispatcher_instance_id"
+            ),
+        })
+        if result["worker_task_id"] != target["subject_id"] \
+                or result["worker_task_revision"] != target["subject_revision"] \
+                or result["worker_status"] != target["subject_status"] \
+                or result["worker_assignee"] != target["assignee"]:
+            raise AuthorityContractError(
+                "worker task identity must match the exact target revision"
+            )
+        if result["run_subject_revision"] > result["worker_task_revision"]:
+            raise AuthorityContractError(
+                "worker run origin may not be newer than the exact task revision"
+            )
+        if result["claim_expires"] <= now:
+            raise AuthorityContractError("worker claim is expired")
+        expected = (
+            "kanban_worker",
+            f"kanban-worker:{result['board_id']}:{result['worker_task_id']}:"
+            f"{result['run_id']}:{result['host_id']}:{result['boot_id']}:"
+            f"{result['pid']}:{result['start_token']}",
+            f"kanban-dispatcher:{result['dispatcher_instance_id']}",
+        )
+        if (
+            result["principal_type"], result["principal_id"],
+            result["principal_source"],
+        ) != expected:
+            raise AuthorityContractError(
+                "worker principal triple is not canonically derived"
+            )
+    elif kind == "kanban_notifier":
+        result.update({
+            "board_id": _strict_text(raw["board_id"], "principal.board_id"),
+            "task_id": _strict_text(raw["task_id"], "principal.task_id"),
+            "task_record_revision": _strict_int(
+                raw["task_record_revision"], "principal.task_record_revision", minimum=1
+            ),
+            "platform": _strict_text(raw["platform"], "principal.platform"),
+            "chat_id": _strict_text(raw["chat_id"], "principal.chat_id"),
+            "thread_id": _strict_optional_string(
+                raw["thread_id"], "principal.thread_id"
+            ),
+            "user_id": _strict_optional_string(raw["user_id"], "principal.user_id"),
+            "notifier_profile": _strict_optional_string(
+                raw["notifier_profile"], "principal.notifier_profile"
+            ),
+            "created_at": _strict_int(raw["created_at"], "principal.created_at", minimum=0),
+            "last_event_id": _strict_int(
+                raw["last_event_id"], "principal.last_event_id", minimum=0
+            ),
+            "source_event_id": _strict_int(
+                raw["source_event_id"], "principal.source_event_id", minimum=0
+            ),
+            "effect_id": _strict_text(raw["effect_id"], "principal.effect_id"),
+            "effect_state": _strict_text(raw["effect_state"], "principal.effect_state"),
+            "gateway_host_id": _strict_text(
+                raw["gateway_host_id"], "principal.gateway_host_id"
+            ),
+            "gateway_boot_id": _strict_text(
+                raw["gateway_boot_id"], "principal.gateway_boot_id"
+            ),
+            "gateway_pid": _strict_int(
+                raw["gateway_pid"], "principal.gateway_pid", minimum=1
+            ),
+            "gateway_start_token": _strict_text(
+                raw["gateway_start_token"], "principal.gateway_start_token"
+            ),
+        })
+        if result["task_id"] != target["subject_id"] \
+                or result["task_record_revision"] != target["subject_revision"]:
+            raise AuthorityContractError(
+                "notifier task identity must match the exact target revision"
+            )
+        destination = ":".join((
+            result["platform"], result["chat_id"], result["thread_id"] or "",
+            result["user_id"] or "",
+        ))
+        expected = (
+            "kanban_notifier",
+            f"kanban-notifier:{result['board_id']}:{result['task_id']}:"
+            f"{destination}:{result['effect_id']}",
+            f"kanban-gateway:{result['gateway_host_id']}:"
+            f"{result['gateway_boot_id']}:{result['gateway_pid']}:"
+            f"{result['gateway_start_token']}",
+        )
+        if (
+            result["principal_type"], result["principal_id"],
+            result["principal_source"],
+        ) != expected:
+            raise AuthorityContractError(
+                "notifier principal triple is not canonically derived"
+            )
+    else:
+        result.update({
+            "bot_id": _strict_text(raw["bot_id"], "principal.bot_id"),
+            "profile": _strict_text(raw["profile"], "principal.profile"),
+            "chat_id": _strict_text(raw["chat_id"], "principal.chat_id"),
+            "thread_id": _strict_string(
+                raw["thread_id"], "principal.thread_id", allow_empty=True
+            ),
+            "user_id": _strict_text(raw["user_id"], "principal.user_id"),
+        })
+        expected = (
+            "telegram_user",
+            f"telegram:{result['bot_id']}:{result['user_id']}",
+            f"telegram-bot:{result['bot_id']}:profile:{result['profile']}",
+        )
+        if (
+            result["principal_type"], result["principal_id"],
+            result["principal_source"],
+        ) != expected:
+            raise AuthorityContractError(
+                "Telegram principal triple is not canonically derived"
+            )
+    return result
+
+
+def _normalize_authority_request_parts(
+    *, target: Any, authorization_root: Any, action: Any, capability: Any,
+    actor: Any, principal: Any, operation_id: Any, now: float,
+) -> dict[str, Any]:
+    normalized_action = _strict_text(action, "action")
+    normalized_capability = _strict_text(capability, "capability")
+    expected_capability = KANBAN_TASK_ACTION_CAPABILITIES.get(normalized_action)
+    if expected_capability is None:
+        raise AuthorityContractError(
+            f"action {normalized_action!r} is not registered for profile 'kanban_task'"
+        )
+    if normalized_capability != expected_capability:
+        raise AuthorityContractError(
+            f"action {normalized_action!r} requires capability {expected_capability!r}"
+        )
+    emergency = normalized_action in TELEGRAM_EMERGENCY_ACTIONS
+    normalized_target = _normalize_kanban_subject(
+        target, field_name="target", now=now, require_current=not emergency,
+    )
+    normalized_root = None
+    if authorization_root is not None:
+        normalized_root = _normalize_kanban_subject(
+            authorization_root, field_name="authorization_root", now=now,
+            require_current=True,
+        )
+        for key in (
+            "mission_id", "goal_id", "program_id", "milestone_id", "workstream_id",
+        ):
+            if normalized_root[key] != normalized_target[key]:
+                raise AuthorityContractError(
+                    f"authorization_root.{key} does not match target"
+                )
+        if normalized_root["subject_revision"] < 1:
+            raise AuthorityContractError(
+                "authorization_root must identify an existing subject revision"
+            )
+    if emergency and normalized_root is None:
+        raise AuthorityContractError(
+            "emergency containment requires a current authorization_root"
+        )
+    if normalized_action == "create":
+        if normalized_target["subject_revision"] != 0:
+            raise AuthorityContractError(
+                "create requires absent target subject_revision 0"
+            )
+    elif normalized_target["subject_revision"] < 1:
+        raise AuthorityContractError(
+            "non-create operations require an existing target revision"
+        )
+    for name, subject in (
+        ("target", normalized_target), ("authorization_root", normalized_root),
+    ):
+        if subject is None or (emergency and name == "target"):
+            continue
+        if normalized_capability not in subject["authority"]["capabilities"]:
+            raise AuthorityContractError(f"{name} authority lacks capability")
+        if not _scope_allows(subject["authority"], subject):
+            raise AuthorityContractError(f"{name} is outside authority scope")
+    normalized_actor = _strict_text(actor, "actor")
+    actor_subject = normalized_root or normalized_target
+    if normalized_actor != actor_subject["lease"]["holder"]:
+        raise AuthorityContractError(
+            "actor must match the exact authorizing lease holder"
+        )
+    normalized_principal = _normalize_kanban_principal(
+        principal, action=normalized_action, target=normalized_target, now=now,
+    )
+    normalized_operation_id = _strict_text(operation_id, "operation_id")
+    if normalized_action in SUBSCRIPTION_REGISTRATION_ACTIONS:
+        expected_operation_id = notification_subscription_operation_id(
+            normalized_principal["operation_binding"]
+        )
+        if normalized_operation_id != expected_operation_id:
+            raise AuthorityContractError(
+                "subscription operation_id is not canonically derived"
+            )
+    return {
         "schema_version": AUTHORITY_REQUEST_SCHEMA,
-        "mission_id": context["mission_id"],
+        "profile": "kanban_task",
+        "target": normalized_target,
+        "authorization_root": normalized_root,
+        "action": normalized_action,
+        "capability": normalized_capability,
+        "actor": normalized_actor,
+        "principal": normalized_principal,
+        "operation_id": normalized_operation_id,
+    }
+
+
+def profile_authority_request(
+    *, target: dict[str, Any], action: str, capability: str, actor: str,
+    principal_binding: dict[str, Any], operation_id: str,
+    authorization_root: Optional[dict[str, Any]] = None,
+    now: Optional[float] = None,
+) -> dict[str, Any]:
+    current = _strict_time(time.time() if now is None else now, "now")
+    request = _normalize_authority_request_parts(
+        target=target, authorization_root=authorization_root, action=action,
+        capability=capability, actor=actor, principal=principal_binding,
+        operation_id=operation_id, now=current,
+    )
+    return {**request, "request_id": f"authority-request:{_request_digest(request)}"}
+
+
+def validate_authority_request(
+    request: Any, *, now: Optional[float] = None,
+) -> dict[str, Any]:
+    try:
+        raw = _require_exact_keys(request, _AUTHORITY_REQUEST_KEYS, "request")
+        if raw["schema_version"] != AUTHORITY_REQUEST_SCHEMA:
+            raise AuthorityContractError("authority request schema is not v3")
+        if raw["profile"] != "kanban_task":
+            raise AuthorityContractError("authority request profile is not kanban_task")
+        current = _strict_time(time.time() if now is None else now, "now")
+        normalized = _normalize_authority_request_parts(
+            target=raw["target"], authorization_root=raw["authorization_root"],
+            action=raw["action"], capability=raw["capability"], actor=raw["actor"],
+            principal=raw["principal"], operation_id=raw["operation_id"], now=current,
+        )
+        expected_id = f"authority-request:{_request_digest(normalized)}"
+        if raw["request_id"] != expected_id:
+            raise AuthorityContractError("authority request digest does not match")
+        canonical = {**normalized, "request_id": expected_id}
+        if not _wire_equal(raw, canonical):
+            raise AuthorityContractError("authority request is not canonical")
+    except (AuthorityContractError, TypeError, ValueError, OverflowError) as exc:
+        return {"valid": False, "reason": str(exc)}
+    return {"valid": True, "request": canonical}
+
+
+def validate_authority_verification(
+    request: dict[str, Any], result: Any, *, now: Optional[float] = None,
+) -> dict[str, Any]:
+    try:
+        current = _strict_time(time.time() if now is None else now, "now")
+    except Exception as exc:
+        return {"valid": False, "reason": f"invalid validation time: {type(exc).__name__}"}
+    if not isinstance(result, dict):
+        return {
+            "valid": False,
+            "reason": "canonical authority verifier returned no structured result",
+        }
+    try:
+        detached = json.loads(json.dumps(
+            result, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ))
+    except Exception as exc:
+        return {
+            "valid": False,
+            "reason": f"authority verification is not detached JSON: {type(exc).__name__}",
+        }
+    request_check = validate_authority_request(request, now=current)
+    if not request_check["valid"]:
+        return {"valid": False, "reason": request_check["reason"]}
+    canonical_request = request_check["request"]
+    contradictory = (
+        any(detached.get(key) is False for key in (
+            "allowed", "authorized", "granted", "valid",
+        ))
+        or any(detached.get(key) is True for key in (
+            "denied", "revoked", "expired", "stale", "ambiguous", "contradictory",
+        ))
+        or str(detached.get("status", "")).upper() in {
+            "DENY", "DENIED", "REVOKED", "EXPIRED", "STALE", "INVALID",
+        }
+        or str(detached.get("state", "")).upper() in {
+            "DENY", "DENIED", "REVOKED", "EXPIRED", "STALE", "INVALID",
+        }
+    )
+    if contradictory:
+        return {"valid": False, "reason": "authority verification is contradictory"}
+    try:
+        raw = _require_exact_keys(detached, _AUTHORITY_RESULT_KEYS, "verification")
+        if raw["schema_version"] != AUTHORITY_VERIFICATION_SCHEMA:
+            raise AuthorityContractError("authority verification schema is not v3")
+        if raw["decision"] != "ALLOW" or raw["current"] is not True:
+            raise AuthorityContractError("authority verification is stale or not ALLOW")
+        verification_id = _strict_text(raw["verification_id"], "verification_id")
+        verified_at = _strict_time(raw["verified_at"], "verified_at")
+        valid_until = _strict_time(raw["valid_until"], "valid_until")
+        if not verified_at <= current < valid_until:
+            raise AuthorityContractError("authority verification window is not current")
+        if valid_until - verified_at > MAX_AUTHORITY_VERIFICATION_TTL:
+            raise AuthorityContractError("authority verification TTL exceeds the bound")
+        emergency = canonical_request["action"] in TELEGRAM_EMERGENCY_ACTIONS
+        subjects = (
+            [canonical_request["authorization_root"]]
+            if emergency else [canonical_request["target"]]
+        )
+        if not emergency and canonical_request["authorization_root"] is not None:
+            subjects.append(canonical_request["authorization_root"])
+        expiries = [
+            expiry
+            for subject in subjects
+            for expiry in (
+                subject["authority"]["expires_at"], subject["lease"]["expires_at"],
+            )
+        ]
+        if canonical_request["principal"]["kind"] == "kanban_worker":
+            expiries.append(float(canonical_request["principal"]["claim_expires"]))
+        if any(expiry <= current for expiry in expiries):
+            raise AuthorityContractError(
+                "authority or lease expired before verification acceptance"
+            )
+        if valid_until > min(expiries):
+            raise AuthorityContractError(
+                "verification validity exceeds authority, lease, or worker claim expiry"
+            )
+        expected_target_current = not emergency
+        expected_target = {
+            "authority_current": expected_target_current,
+            "containment_target": emergency,
+            "subject": canonical_request["target"],
+        }
+        target_proof = _require_exact_keys(
+            raw["target_verification"], _SUBJECT_PROOF_KEYS, "target_verification"
+        )
+        if target_proof["authority_current"] is not expected_target_current \
+                or target_proof["containment_target"] is not emergency:
+            raise AuthorityContractError(
+                "target verification currentness contradicts the action"
+            )
+        if not _wire_equal(target_proof["subject"], canonical_request["target"]):
+            raise AuthorityContractError(
+                "raw target verification subject is not the canonical target"
+            )
+        normalized_target = _normalize_kanban_subject(
+            target_proof["subject"], field_name="target_verification.subject",
+            now=current, require_current=expected_target_current,
+        )
+        if {
+            "authority_current": expected_target_current,
+            "containment_target": emergency,
+            "subject": normalized_target,
+        } != expected_target:
+            raise AuthorityContractError("target verification is stale or foreign")
+        expected_root = canonical_request["authorization_root"]
+        root_proof = raw["authorization_root_verification"]
+        if expected_root is None:
+            if root_proof is not None:
+                raise AuthorityContractError("unexpected authorization root verification")
+        else:
+            proof = _require_exact_keys(
+                root_proof, _SUBJECT_PROOF_KEYS, "authorization_root_verification"
+            )
+            if proof["authority_current"] is not True \
+                    or proof["containment_target"] is not False:
+                raise AuthorityContractError(
+                    "authorization root verification is not current"
+                )
+            if not _wire_equal(proof["subject"], expected_root):
+                raise AuthorityContractError(
+                    "raw authorization root subject is not canonical"
+                )
+            if _normalize_kanban_subject(
+                proof["subject"], field_name="authorization_root_verification.subject",
+                now=current, require_current=True,
+            ) != expected_root:
+                raise AuthorityContractError(
+                    "authorization root verification is stale or foreign"
+                )
+        echoed = validate_authority_request(raw["request"], now=current)
+        if not echoed["valid"] or echoed["request"] != canonical_request:
+            raise AuthorityContractError(
+                "authority verification request echo is malformed or foreign"
+            )
+        if not _wire_equal(raw["verified_principal"], canonical_request["principal"]) \
+                or _strict_text(raw["verified_actor"], "verified_actor") \
+                != canonical_request["actor"] \
+                or raw["request_id"] != canonical_request["request_id"]:
+            raise AuthorityContractError(
+                "authority verification principal, actor, or request is foreign"
+            )
+        canonical = {
+            "schema_version": AUTHORITY_VERIFICATION_SCHEMA,
+            "verification_id": verification_id,
+            "decision": "ALLOW",
+            "current": True,
+            "verified_at": verified_at,
+            "valid_until": valid_until,
+            "verified_principal": canonical_request["principal"],
+            "verified_actor": canonical_request["actor"],
+            "request_id": canonical_request["request_id"],
+            "request": canonical_request,
+            "target_verification": expected_target,
+            "authorization_root_verification": (
+                None if expected_root is None else {
+                    "authority_current": True,
+                    "containment_target": False,
+                    "subject": expected_root,
+                }
+            ),
+        }
+        if not _wire_equal(raw, canonical):
+            raise AuthorityContractError(
+                "authority verification is not the exact canonical result"
+            )
+        accepted = json.loads(json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ))
+    except (AuthorityContractError, TypeError, ValueError, OverflowError) as exc:
+        return {"valid": False, "reason": str(exc)}
+    return {"valid": True, "verification": accepted}
+
+
+def _olympus_subject(
+    context: dict[str, Any], *, subject_id: str, subject_revision: int,
+    subject_status: str, assignee: str,
+) -> dict[str, Any]:
+    return {
+        "subject_type": "kanban_task",
+        "subject_id": subject_id,
+        "subject_revision": subject_revision,
+        "subject_status": subject_status,
         "goal_id": context["goal_id"],
         "program_id": context["program_id"],
         "milestone_id": context["milestone_id"],
-        "action": action,
-        "capability": capability,
-        "actor": actor,
-        "scope": context["mission_id"],
-        "authority_id": authority["authority_id"],
-        "authority_revision": authority["revision"],
-        "authority_source": authority["source"],
-        "lease_id": lease["lease_id"],
-        "lease_revision": lease["revision"],
-        "lease_source": lease["source"],
-        "expected_revision": expected_revision,
-        "operation_id": operation_id,
-        "task_id": task_id,
+        "mission_id": context["mission_id"],
+        "workstream_id": context["workstream_id"],
         "assignee": assignee,
-        "lease_agent_id": lease["agent_id"],
-        "lease_holder": lease["holder"],
-        "repository": lease["repository"],
-        "branch": lease["branch"],
-        "worktree": lease["worktree"],
+        "authority": context["authority"],
+        "lease": context["lease"],
     }
-    if source_identity is not None:
-        request["source_identity"] = dict(source_identity)
-    if target_identity is not None:
-        request["target_identity"] = dict(target_identity)
-    digest = hashlib.sha256(
-        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    return {**request, "request_id": f"authority-request:{digest}"}
+
+
+def _olympus_principal_binding(
+    principal: OlympusMutationAuth, *, board_id: str,
+    operation_binding: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    bindings = tuple(
+        value for value in (
+            principal.source_identity, principal.runtime_identity,
+            principal.notifier_identity,
+        ) if value is not None
+    )
+    if len(bindings) > 1:
+        raise AuthorityContractError(
+            "a principal cannot combine Telegram, worker, and notifier bindings"
+        )
+    common = {
+        "principal_type": principal.principal_type,
+        "principal_id": principal.principal_id,
+        "principal_source": principal.principal_source,
+    }
+    if principal.runtime_identity is not None:
+        return {"kind": "kanban_worker", **common, **principal.runtime_identity}
+    if principal.notifier_identity is not None:
+        return {"kind": "kanban_notifier", **common, **principal.notifier_identity}
+    if principal.source_identity is not None:
+        source = _require_exact_keys(
+            principal.source_identity,
+            frozenset(OLYMPUS_SOURCE_IDENTITY_KEYS),
+            "source_identity",
+        )
+        if source["platform"] != "telegram":
+            raise AuthorityContractError(
+                "governed Telegram operations require platform=telegram"
+            )
+        if principal.target_identity is None:
+            raise AuthorityContractError(
+                "Telegram source and target identity must be supplied together"
+            )
+        return {
+            "kind": "telegram_user", **common,
+            "bot_id": source["bot_id"], "profile": source["profile"],
+            "chat_id": source["chat_id"],
+            "thread_id": source["thread_id"] or "", "user_id": source["user_id"],
+        }
+    if principal.target_identity is not None:
+        raise AuthorityContractError(
+            "Telegram source and target identity must be supplied together"
+        )
+    source_prefix = f"kanban-dispatcher:{board_id}:"
+    if not principal.principal_source.startswith(source_prefix):
+        raise AuthorityContractError(
+            "service dispatcher source is not canonically derived"
+        )
+    dispatcher = principal.principal_source[len(source_prefix):]
+    binding = {
+        "kind": "kanban_service_dispatcher", **common,
+        "board_id": board_id, "dispatcher_instance_id": dispatcher,
+    }
+    if operation_binding is not None:
+        binding["operation_binding"] = (
+            _normalize_notification_subscription_operation_binding(
+                operation_binding, board_id=board_id,
+            )
+        )
+    return binding
+
+
+def _olympus_authority_request(
+    context: dict[str, Any], *, subject_id: str, subject_revision: int,
+    assignee: str, action: str, capability: str, actor: str,
+    principal: OlympusMutationAuth, operation_id: str, expected_status: str,
+    board_id: str, authorization_root: Optional[dict[str, Any]] = None,
+    operation_binding: Optional[dict[str, Any]] = None,
+    now: Optional[float] = None,
+) -> dict[str, Any]:
+    target = _olympus_subject(
+        context, subject_id=subject_id, subject_revision=subject_revision,
+        subject_status=expected_status, assignee=assignee,
+    )
+    root = None
+    if authorization_root is not None:
+        root = _olympus_subject(
+            authorization_root["context"],
+            subject_id=authorization_root["id"],
+            subject_revision=authorization_root["record_revision"],
+            subject_status=authorization_root["status"],
+            assignee=authorization_root["assignee"],
+        )
+    return profile_authority_request(
+        target=target, authorization_root=root, action=action,
+        capability=capability, actor=actor,
+        principal_binding=_olympus_principal_binding(
+            principal,
+            board_id=board_id,
+            operation_binding=operation_binding,
+        ),
+        operation_id=operation_id, now=now,
+    )
 
 
 def require_olympus_authority_verification(
-    context: Any,
-    *,
-    task_id: str,
-    assignee: str,
-    action: str,
-    capability: str,
-    actor: str,
-    expected_revision: int,
-    operation_id: str,
-    verifier: Optional[AuthorityVerifier],
-    now: Optional[int] = None,
-    allow_inactive: bool = False,
-    source_identity: Optional[dict[str, Any]] = None,
-    target_identity: Optional[dict[str, Any]] = None,
+    context: Any, *, subject_id: str, subject_revision: int, assignee: str,
+    action: str, capability: str, actor: str, operation_id: str,
+    principal: Optional[OlympusMutationAuth], expected_status: str,
+    authorization_root: Optional[dict[str, Any]] = None,
+    mutation_target: Optional[dict[str, Any]] = None,
+    operation_binding: Optional[dict[str, Any]] = None,
+    now: Optional[int] = None, allow_inactive: bool = False,
+    board_id: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Require the shared Mission Control exact-request/result contract.
-
-    Stored references and caller assertions are request inputs only.  They can
-    never produce an allow decision.  The verifier is a callable controlled by
-    the embedding canonical issuer; callers cannot submit a pre-built result.
-    """
-    if allow_inactive:
+    """Require one exact nested v3 request/result with no v1/v2 fallback."""
+    del mutation_target  # v3 binds the canonical target directly in the request.
+    emergency = action in TELEGRAM_EMERGENCY_ACTIONS
+    if allow_inactive and not emergency:
+        raise OlympusContextError(
+            "olympus_inactive_authority_forbidden",
+            "inactive authority is valid only for interrupt/cancel containment",
+        )
+    if emergency:
         normalized = normalize_olympus_context(context)
         lease = normalized["lease"]
         if lease["mission_id"] != normalized["mission_id"]:
             raise OlympusContextError(
-                "olympus_lease_foreign_mission",
-                "lease mission does not match task mission",
+                "olympus_lease_foreign_mission", "lease mission does not match task mission"
             )
         if not (
             normalized["agent_id"] == lease["agent_id"] == lease["holder"] == assignee
@@ -657,120 +2465,72 @@ def require_olympus_authority_verification(
         raise OlympusContextError(
             "olympus_context_missing", "a governed operation requires Olympus context"
         )
-    if not callable(verifier):
+    if principal is None or not callable(principal.verifier):
         raise OlympusContextError(
             "olympus_authority_verification_unavailable",
             "canonical authority verifier is unavailable",
         )
-    if not all(str(value).strip() for value in (task_id, assignee, action, capability, actor, operation_id)):
+    expected_capability = KANBAN_TASK_ACTION_CAPABILITIES.get(action)
+    if expected_capability is None or capability != expected_capability:
         raise OlympusContextError(
-            "olympus_authority_request_invalid",
-            "authority request identity is incomplete",
+            "olympus_action_capability_mismatch",
+            "action and capability are not the frozen v3 pair",
         )
-    if actor != assignee:
+    actor_subject = authorization_root or {
+        "assignee": assignee, "context": normalized,
+    }
+    if actor != actor_subject["context"]["lease"]["holder"]:
         raise OlympusContextError(
-            "olympus_actor_mismatch",
-            "verified actor must match the governed task assignee",
-        )
-    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) \
-            or expected_revision < 0:
-        raise OlympusContextError(
-            "olympus_authority_request_invalid",
-            "expected revision must be a non-negative integer",
+            "olympus_actor_mismatch", "actor must match the authorizing lease holder"
         )
     authority = normalized["authority"]
-    if expected_revision != authority["revision"]:
-        raise OlympusContextError(
-            "olympus_revision_mismatch",
-            "expected canonical revision does not match stored authority revision",
-        )
-    if capability not in authority["capabilities"]:
+    if not emergency and capability not in authority["capabilities"]:
         raise OlympusContextError(
             "olympus_capability_missing", "required canonical capability is absent"
         )
-    if "*" not in authority["scope"] and normalized["mission_id"] not in authority["scope"] \
-            and normalized["program_id"] not in authority["scope"]:
+    if not emergency and "*" not in authority["scope"] \
+            and not {
+                subject_id, normalized["mission_id"], normalized["program_id"],
+                normalized["goal_id"], normalized["milestone_id"],
+            }.intersection(authority["scope"]):
         raise OlympusContextError(
             "olympus_scope_mismatch", "task mission is outside authority scope"
         )
-    normalized_source: Optional[dict[str, str]] = None
-    if source_identity is not None:
-        if not isinstance(source_identity, dict):
-            raise OlympusContextError(
-                "olympus_source_identity_invalid",
-                "source identity must be an object",
-            )
-        _reject_unknown_olympus_keys(
-            source_identity,
-            allowed=OLYMPUS_SOURCE_IDENTITY_KEYS,
-            field_name="source_identity",
-        )
-        normalized_source = {}
-        for key in sorted(OLYMPUS_SOURCE_IDENTITY_KEYS):
-            value = source_identity.get(key)
-            if key == "thread_id" and value in (None, ""):
-                normalized_source[key] = ""
-                continue
-            normalized_source[key] = _olympus_required_text(
-                value,
-                reason="olympus_source_identity_invalid",
-                field_name=f"source_identity.{key}",
-            )
-        if normalized_source["platform"] != "telegram":
-            raise OlympusContextError(
-                "olympus_source_identity_invalid",
-                "governed Telegram operations require platform=telegram",
-            )
-    normalized_target: Optional[dict[str, Any]] = None
-    if target_identity is not None:
-        if not isinstance(target_identity, dict) or not target_identity:
-            raise OlympusContextError(
-                "olympus_target_identity_invalid",
-                "target identity must be a non-empty object",
-            )
-        normalized_target = json.loads(
-            json.dumps(target_identity, sort_keys=True, separators=(",", ":"))
-        )
-    request = _olympus_authority_request(
-        normalized,
-        task_id=task_id,
-        assignee=assignee,
-        action=action,
-        capability=capability,
-        actor=actor,
-        expected_revision=expected_revision,
-        operation_id=operation_id,
-        source_identity=normalized_source,
-        target_identity=normalized_target,
-    )
+    current = float(int(time.time()) if now is None else now)
     try:
-        result = verifier(dict(request))
+        request = _olympus_authority_request(
+            normalized, subject_id=subject_id, subject_revision=subject_revision,
+            assignee=assignee, action=action, capability=capability, actor=actor,
+            principal=principal, operation_id=operation_id,
+            expected_status=expected_status,
+            board_id=board_id or "unbound-board",
+            authorization_root=authorization_root, now=current,
+            operation_binding=operation_binding,
+        )
+    except (AuthorityContractError, TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_authority_request_invalid", str(exc)
+        ) from exc
+    try:
+        issuer_request = json.loads(json.dumps(
+            request, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        ))
+        result = principal.verifier(issuer_request)
     except Exception as exc:
         raise OlympusContextError(
             "olympus_authority_verification_failed",
             f"canonical authority verification failed: {type(exc).__name__}",
         ) from exc
-    if not isinstance(result, dict):
+    accepted = validate_authority_verification(request, result, now=current)
+    if not accepted["valid"]:
         raise OlympusContextError(
-            "olympus_authority_verification_invalid",
-            "canonical authority verifier returned no structured result",
+            "olympus_authority_verification_denied", accepted["reason"]
         )
-    exact = (
-        result.get("schema_version") == AUTHORITY_VERIFICATION_SCHEMA
-        and result.get("decision") == "ALLOW"
-        and result.get("current") is True
-        and result.get("source") == authority["source"]
-        and result.get("source_revision") == authority["revision"]
-        and result.get("request_id") == request["request_id"]
-        and result.get("request") == request
-        and str(result.get("verification_id", "")).strip()
-    )
-    if not exact:
-        raise OlympusContextError(
-            "olympus_authority_verification_denied",
-            "authority verification is missing, stale, foreign, ambiguous, or contradictory",
-        )
-    return {"request": request, "verification": dict(result), "context": normalized}
+    return {
+        "request": request,
+        "verification": accepted["verification"],
+        "context": normalized,
+    }
 
 
 def _require_matching_olympus_run_context(
@@ -779,6 +2539,8 @@ def _require_matching_olympus_run_context(
     task_context: Optional[dict[str, Any]],
     assignee: Optional[str],
     now: int,
+    run_subject_revision: Optional[int],
+    task_record_revision: int,
 ) -> Optional[dict[str, Any]]:
     """Validate the immutable attempt snapshot against current task scope."""
     if task_context is None:
@@ -791,6 +2553,15 @@ def _require_matching_olympus_run_context(
     run_context = _require_current_olympus_context(
         raw, assignee=assignee, now=now
     )
+    if (
+        run_subject_revision is None
+        or int(run_subject_revision) < 1
+        or int(run_subject_revision) > int(task_record_revision)
+    ):
+        raise OlympusContextError(
+            "olympus_run_revision_mismatch",
+            "active governed run origin is missing or newer than the task aggregate",
+        )
     if run_context is None or any(
         run_context[key] != task_context[key]
         for key in (
@@ -1223,7 +2994,158 @@ def attachments_root(board: Optional[str] = None) -> Path:
 
 def task_attachments_dir(task_id: str, board: Optional[str] = None) -> Path:
     """Return the per-task attachment directory ``<root>/<task_id>/``."""
-    return attachments_root(board=board) / task_id
+    task_component = str(task_id).strip()
+    if (
+        not task_component
+        or task_component in {".", ".."}
+        or Path(task_component).name != task_component
+        or "/" in task_component
+        or "\\" in task_component
+    ):
+        raise ValueError("invalid attachment task id")
+    return attachments_root(board=board) / task_component
+
+
+def validated_attachment_path(
+    task_id: str,
+    stored_path: str | Path,
+    *,
+    board: Optional[str] = None,
+    require_file: bool = False,
+) -> Path:
+    """Return a canonical non-symlink attachment path for one task.
+
+    Metadata may never name an arbitrary absolute file.  The path must be a
+    direct child of the task's directory beneath the selected board root;
+    ``..`` traversal and every symlinked path component are rejected.  The
+    board root itself may resolve through an operator-configured symlink, but
+    stored metadata is always canonicalized to the resolved root.
+    """
+    root = attachments_root(board=board).expanduser().resolve(strict=False)
+    task_root = (root / task_attachments_dir(task_id, board=board).name).resolve(
+        strict=False
+    )
+    if task_root.parent != root:
+        raise ValueError("attachment task directory escapes the board root")
+    candidate = Path(stored_path).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("attachment stored_path must be absolute")
+    lexical = Path(os.path.abspath(str(candidate)))
+    resolved = candidate.resolve(strict=False)
+    if lexical != resolved:
+        raise ValueError("attachment stored_path may not traverse a symlink")
+    if resolved.parent != task_root:
+        raise ValueError("attachment stored_path is outside the task attachment root")
+    if require_file and (not resolved.is_file() or resolved.is_symlink()):
+        raise ValueError("attachment file is missing or is a symlink")
+    return resolved
+
+
+def _open_attachment_task_dir(
+    task_id: str,
+    *,
+    board: Optional[str] = None,
+    create: bool = False,
+) -> tuple[int, Path]:
+    """Open the exact task attachment directory without following links.
+
+    The returned descriptor pins the directory for a subsequent ``openat`` or
+    ``unlinkat`` operation, closing the validation/use race that exists when a
+    path is resolved and opened later.  The operator-configured attachment root
+    itself may be a symlink; everything below its resolved target may not be.
+    """
+    task_component = task_attachments_dir(task_id, board=board).name
+    root = attachments_root(board=board).expanduser().resolve(strict=False)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root_fd = os.open(root, flags)
+    try:
+        if create:
+            try:
+                os.mkdir(task_component, mode=0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        task_flags = flags | getattr(os, "O_NOFOLLOW", 0)
+        task_fd = os.open(task_component, task_flags, dir_fd=root_fd)
+    finally:
+        os.close(root_fd)
+    return task_fd, root / task_component
+
+
+def open_attachment_for_write(
+    task_id: str,
+    filename: str,
+    *,
+    board: Optional[str] = None,
+):
+    """Exclusively create one regular attachment via ``openat``/NOFOLLOW."""
+    name = str(filename).strip()
+    if not name or Path(name).name != name or name in {".", ".."}:
+        raise ValueError("attachment filename must be a single path component")
+    task_fd, task_root = _open_attachment_task_dir(
+        task_id, board=board, create=True,
+    )
+    try:
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        fd = os.open(name, flags, 0o600, dir_fd=task_fd)
+    finally:
+        os.close(task_fd)
+    return os.fdopen(fd, "wb"), task_root / name
+
+
+def open_attachment_for_read(
+    task_id: str,
+    stored_path: str | Path,
+    *,
+    board: Optional[str] = None,
+):
+    """Open and pin one regular attachment without a path-based TOCTOU gap."""
+    canonical = validated_attachment_path(
+        task_id, stored_path, board=board, require_file=False,
+    )
+    task_fd, _ = _open_attachment_task_dir(task_id, board=board, create=False)
+    try:
+        fd = os.open(
+            canonical.name,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=task_fd,
+        )
+    finally:
+        os.close(task_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("attachment is not a regular file")
+        return os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def unlink_attachment_blob(
+    task_id: str,
+    stored_path: str | Path,
+    *,
+    board: Optional[str] = None,
+) -> None:
+    """Unlink the exact direct-child name via a pinned task directory."""
+    canonical = validated_attachment_path(
+        task_id, stored_path, board=board, require_file=False,
+    )
+    try:
+        task_fd, _ = _open_attachment_task_dir(task_id, board=board, create=False)
+    except FileNotFoundError:
+        return
+    try:
+        try:
+            os.unlink(canonical.name, dir_fd=task_fd)
+        except FileNotFoundError:
+            pass
+    finally:
+        os.close(task_fd)
 
 
 def worker_logs_dir(board: Optional[str] = None) -> Path:
@@ -1436,6 +3358,47 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     if not d.exists():
         raise ValueError(f"board {normed!r} does not exist")
 
+    # Board removal has filesystem and active-board side effects before any
+    # normal Kanban transaction exists. Inspect the existing DB read-only and
+    # refuse a generic removal if it contains governed state. Failure to read
+    # governance state also fails closed and leaves the directory, selector,
+    # and initialization cache untouched.
+    db_file = d / "kanban.db"
+    if db_file.exists():
+        try:
+            ro = sqlite3.connect(
+                f"{db_file.resolve().as_uri()}?mode=ro",
+                uri=True,
+            )
+            try:
+                has_tasks = ro.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'tasks'"
+                ).fetchone() is not None
+                columns = (
+                    {row[1] for row in ro.execute("PRAGMA table_info(tasks)")}
+                    if has_tasks else set()
+                )
+                governed = (
+                    ro.execute(
+                        "SELECT 1 FROM tasks "
+                        "WHERE olympus_context IS NOT NULL LIMIT 1"
+                    ).fetchone() is not None
+                    if "olympus_context" in columns else False
+                )
+            finally:
+                ro.close()
+        except sqlite3.Error as exc:
+            raise OlympusContextError(
+                "olympus_board_governance_unreadable",
+                "cannot prove that board removal contains no governed state",
+            ) from exc
+        if governed:
+            raise OlympusContextError(
+                "olympus_board_removal_forbidden",
+                "generic board removal cannot archive or delete governed state",
+            )
+
     # If the user removed the currently-active board, revert to default.
     if get_current_board() == normed:
         clear_current_board()
@@ -1543,6 +3506,9 @@ class Task:
     # a present-but-invalid document stays visibly invalid and is denied by
     # every governed claim/start gate rather than silently becoming legacy.
     olympus_context: Optional[dict] = None
+    # Current revision of the local Kanban task aggregate. This is distinct
+    # from both MissionStore mission revision and authority/lease revisions.
+    record_revision: int = 0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1622,6 +3588,10 @@ class Task:
                 _decode_olympus_context(row["olympus_context"])
                 if "olympus_context" in keys else None
             ),
+            record_revision=(
+                int(row["record_revision"])
+                if "record_revision" in keys else 0
+            ),
         )
 
 
@@ -1653,6 +3623,18 @@ class Run:
     metadata: Optional[dict]
     error: Optional[str]
     olympus_context: Optional[dict] = None
+    subject_revision: Optional[int] = None
+    process_state: str = "legacy"
+    launch_token: Optional[str] = None
+    workspace_snapshot: Optional[dict] = None
+    auth_root_id: Optional[str] = None
+    auth_root_revision: Optional[int] = None
+    verification_id: Optional[str] = None
+    worker_host_id: Optional[str] = None
+    worker_boot_id: Optional[str] = None
+    worker_start_token: Optional[str] = None
+    worker_registered_at: Optional[int] = None
+    dispatcher_instance_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -1660,6 +3642,14 @@ class Run:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
             meta = None
+        try:
+            workspace_snapshot = (
+                json.loads(row["workspace_snapshot"])
+                if "workspace_snapshot" in row.keys()
+                and row["workspace_snapshot"] else None
+            )
+        except Exception:
+            workspace_snapshot = None
         return cls(
             id=int(row["id"]),
             task_id=row["task_id"],
@@ -1680,6 +3670,53 @@ class Run:
             olympus_context=(
                 _decode_olympus_context(row["olympus_context"])
                 if "olympus_context" in row.keys() else None
+            ),
+            subject_revision=(
+                int(row["subject_revision"])
+                if "subject_revision" in row.keys()
+                and row["subject_revision"] is not None else None
+            ),
+            process_state=(
+                str(row["process_state"])
+                if "process_state" in row.keys() and row["process_state"]
+                else "legacy"
+            ),
+            launch_token=(
+                row["launch_token"] if "launch_token" in row.keys() else None
+            ),
+            workspace_snapshot=workspace_snapshot,
+            auth_root_id=(
+                row["auth_root_id"] if "auth_root_id" in row.keys() else None
+            ),
+            auth_root_revision=(
+                int(row["auth_root_revision"])
+                if "auth_root_revision" in row.keys()
+                and row["auth_root_revision"] is not None else None
+            ),
+            verification_id=(
+                row["verification_id"]
+                if "verification_id" in row.keys() else None
+            ),
+            worker_host_id=(
+                row["worker_host_id"]
+                if "worker_host_id" in row.keys() else None
+            ),
+            worker_boot_id=(
+                row["worker_boot_id"]
+                if "worker_boot_id" in row.keys() else None
+            ),
+            worker_start_token=(
+                row["worker_start_token"]
+                if "worker_start_token" in row.keys() else None
+            ),
+            worker_registered_at=(
+                int(row["worker_registered_at"])
+                if "worker_registered_at" in row.keys()
+                and row["worker_registered_at"] is not None else None
+            ),
+            dispatcher_instance_id=(
+                row["dispatcher_instance_id"]
+                if "dispatcher_instance_id" in row.keys() else None
             ),
         )
 
@@ -1792,7 +3829,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- Versioned Olympus goal/program/mission, authority, lease, risk,
     -- agent, review, and evidence references. NULL preserves ordinary Kanban
     -- compatibility; any non-NULL value is fail-closed at claim/start.
-    olympus_context      TEXT
+    olympus_context      TEXT,
+    -- CAS revision for the Kanban task aggregate. Ordinary/legacy rows retain
+    -- zero; a governed row starts at one and every authorized aggregate
+    -- mutation advances it exactly once.
+    record_revision      INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1847,7 +3888,21 @@ CREATE TABLE IF NOT EXISTS task_runs (
     error               TEXT,
     -- Immutable Olympus task-context snapshot at the start of this attempt.
     -- Later lease renewal/revocation updates the task row, not history.
-    olympus_context     TEXT
+    olympus_context     TEXT,
+    -- Exact governed task revision that admitted this run.
+    subject_revision   INTEGER,
+    -- Durable process fence. Legacy rows never acquire signal authority.
+    process_state      TEXT NOT NULL DEFAULT 'legacy',
+    launch_token       TEXT,
+    workspace_snapshot TEXT,
+    auth_root_id       TEXT,
+    auth_root_revision INTEGER,
+    verification_id   TEXT,
+    worker_host_id     TEXT,
+    worker_boot_id     TEXT,
+    worker_start_token TEXT,
+    worker_registered_at INTEGER,
+    dispatcher_instance_id TEXT
 );
 
 -- Files attached to a task (PDFs, images, source documents). The blob
@@ -1883,37 +3938,99 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
     PRIMARY KEY (task_id, platform, chat_id, thread_id)
 );
 
--- Immutable Telegram delivery journal.  The primary key is derived only from
--- the Telegram bot/profile/update identity, never from mutable mission
--- selection.  Keeping this in the Kanban database makes task creation and
--- delivery reservation one transaction.
-CREATE TABLE IF NOT EXISTS olympus_telegram_deliveries (
-    delivery_key       TEXT PRIMARY KEY,
-    task_id            TEXT NOT NULL UNIQUE,
-    immutable_context  TEXT NOT NULL,
-    created_at         INTEGER NOT NULL
+-- Durable exact request identity for governed idempotent creation. The task
+-- row is mutable after creation, so replay safety cannot be reconstructed from
+-- its current status or dispatcher-owned fields.
+CREATE TABLE IF NOT EXISTS kanban_olympus_create_receipts (
+    idempotency_key TEXT PRIMARY KEY,
+    task_id         TEXT NOT NULL UNIQUE,
+    payload         TEXT NOT NULL,
+    payload_sha256  TEXT NOT NULL,
+    created_at      INTEGER NOT NULL
 );
 
--- Single-application journal for governed Telegram controls.  Running-task
--- termination is intentionally a reconciled side effect: the Kanban state and
--- pending termination record commit atomically, and a retry/restart can safely
--- finish the host-local signal step.
-CREATE TABLE IF NOT EXISTS olympus_telegram_controls (
-    operation_id       TEXT PRIMARY KEY,
-    action             TEXT NOT NULL,
-    authorization_task_id TEXT NOT NULL,
-    target_task_id     TEXT NOT NULL,
-    source_identity    TEXT NOT NULL,
-    target_identity    TEXT NOT NULL DEFAULT '{}',
+-- Crash-safe release evidence. A retry reads this immutable receipt even when
+-- the dispatcher has already claimed the newly-ready task.
+CREATE TABLE IF NOT EXISTS kanban_olympus_release_receipts (
+    operation_id      TEXT PRIMARY KEY,
+    task_id           TEXT NOT NULL,
+    subject_revision  INTEGER NOT NULL,
+    record_revision   INTEGER NOT NULL,
     verification_id   TEXT NOT NULL,
-    result_status      TEXT NOT NULL,
-    termination_state  TEXT NOT NULL,
-    previous_worker_pid INTEGER,
-    previous_process_create_time REAL,
-    previous_claim_lock TEXT,
-    termination_result TEXT,
+    request_id        TEXT NOT NULL,
+    receipt            TEXT NOT NULL,
+    receipt_sha256     TEXT NOT NULL,
     created_at         INTEGER NOT NULL,
-    updated_at         INTEGER NOT NULL
+    UNIQUE(task_id, subject_revision)
+);
+
+-- One immutable Telegram delivery may create exactly one governed task. The
+-- payload includes the authenticated source, selected authorization root,
+-- delegated agent, task request, and notification destination.
+CREATE TABLE IF NOT EXISTS olympus_telegram_deliveries (
+    delivery_key                 TEXT PRIMARY KEY,
+    authorization_task_id        TEXT NOT NULL,
+    authorization_task_revision  INTEGER NOT NULL,
+    task_id                      TEXT NOT NULL UNIQUE,
+    payload                      TEXT NOT NULL,
+    payload_sha256               TEXT NOT NULL,
+    created_at                   INTEGER NOT NULL
+);
+
+-- Immutable request/result receipt for an operator control. Running-task
+-- interruption is represented by the certified worker effect journal; this
+-- table never owns PIDs or process execution state.
+CREATE TABLE IF NOT EXISTS olympus_telegram_controls (
+    operation_id                 TEXT PRIMARY KEY,
+    action                       TEXT NOT NULL,
+    authorization_task_id        TEXT NOT NULL,
+    authorization_task_revision  INTEGER NOT NULL,
+    target_task_id               TEXT NOT NULL,
+    target_task_revision         INTEGER NOT NULL,
+    source_identity              TEXT NOT NULL,
+    request_payload              TEXT NOT NULL,
+    payload_sha256               TEXT NOT NULL,
+    verification_id              TEXT NOT NULL,
+    result_status                TEXT,
+    effect_operation_id          TEXT,
+    created_at                   INTEGER NOT NULL
+);
+
+-- Durable completion markers for migrations whose columns and data backfills
+-- must be treated as one crash-recoverable unit.
+CREATE TABLE IF NOT EXISTS kanban_schema_migrations (
+    name         TEXT PRIMARY KEY,
+    completed_at INTEGER NOT NULL
+);
+
+-- Fixed-purpose side-effect journal.  It is intentionally not a general job
+-- queue: only worker termination and notification delivery may be recorded.
+CREATE TABLE IF NOT EXISTS kanban_effect_journal (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    effect_kind          TEXT NOT NULL,
+    operation_id         TEXT NOT NULL,
+    task_id              TEXT NOT NULL,
+    run_id               INTEGER,
+    event_id             INTEGER,
+    destination_key      TEXT,
+    part                 TEXT,
+    auth_root_id         TEXT,
+    auth_root_revision   INTEGER,
+    target_pre_revision  INTEGER NOT NULL,
+    target_post_revision INTEGER,
+    worker_host_id       TEXT,
+    worker_boot_id       TEXT,
+    worker_pid           INTEGER,
+    worker_start_token   TEXT,
+    source_identity      TEXT,
+    payload              TEXT NOT NULL,
+    payload_sha256       TEXT NOT NULL,
+    state                TEXT NOT NULL,
+    error                TEXT,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    applied_at           INTEGER,
+    UNIQUE(effect_kind, operation_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
@@ -1926,8 +4043,35 @@ CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, start
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
-CREATE INDEX IF NOT EXISTS idx_olympus_control_pending
-    ON olympus_telegram_controls(termination_state, created_at);
+CREATE INDEX IF NOT EXISTS idx_effects_state          ON kanban_effect_journal(state, effect_kind);
+CREATE INDEX IF NOT EXISTS idx_effects_task_event     ON kanban_effect_journal(task_id, event_id, id);
+
+CREATE TRIGGER IF NOT EXISTS effect_journal_immutable
+BEFORE UPDATE ON kanban_effect_journal
+WHEN olympus_schema_migration_active() != 1 AND (
+  NEW.effect_kind IS NOT OLD.effect_kind
+  OR NEW.operation_id IS NOT OLD.operation_id
+  OR NEW.task_id IS NOT OLD.task_id
+  OR NEW.run_id IS NOT OLD.run_id
+  OR NEW.event_id IS NOT OLD.event_id
+  OR NEW.destination_key IS NOT OLD.destination_key
+  OR NEW.part IS NOT OLD.part
+  OR NEW.auth_root_id IS NOT OLD.auth_root_id
+  OR NEW.auth_root_revision IS NOT OLD.auth_root_revision
+  OR NEW.target_pre_revision IS NOT OLD.target_pre_revision
+  OR NEW.target_post_revision IS NOT OLD.target_post_revision
+  OR NEW.worker_host_id IS NOT OLD.worker_host_id
+  OR NEW.worker_boot_id IS NOT OLD.worker_boot_id
+  OR NEW.worker_pid IS NOT OLD.worker_pid
+  OR NEW.worker_start_token IS NOT OLD.worker_start_token
+  OR NEW.source_identity IS NOT OLD.source_identity
+  OR NEW.payload IS NOT OLD.payload
+  OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+  OR NEW.created_at IS NOT OLD.created_at
+)
+BEGIN
+    SELECT RAISE(ABORT, 'kanban_effect_identity_immutable');
+END;
 """
 
 
@@ -1937,6 +4081,12 @@ CREATE INDEX IF NOT EXISTS idx_olympus_control_pending
 
 _INITIALIZED_PATHS: set[str] = set()
 _INIT_LOCK = threading.RLock()
+_OLYMPUS_GUARD_INSTALL_FAILPOINT: Optional[Callable[[], None]] = None
+_OLYMPUS_REBUILD_FAILPOINT: Optional[Callable[[str], None]] = None
+_OLYMPUS_EFFECT_EXECUTION_FAILPOINT: Optional[Callable[[str], None]] = None
+_OLYMPUS_TELEGRAM_MIGRATION_FAILPOINT: Optional[
+    Callable[[str], None]
+] = None
 _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
 
@@ -1959,6 +4109,143 @@ def _resolve_busy_timeout_ms() -> int:
     return DEFAULT_BUSY_TIMEOUT_MS
 
 
+class _KanbanConnection(sqlite3.Connection):
+    """Connection carrying process-local, SQL-inaccessible permit state."""
+
+
+def _connection_board_identity(conn: sqlite3.Connection) -> str:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    path = row[2] if row is not None else ""
+    if not path:
+        return "memory"
+    return str(Path(path).expanduser().resolve(strict=False))
+
+
+def _local_host_id() -> str:
+    import socket
+    raw = socket.gethostname() or "unknown-host"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def _local_boot_id() -> Optional[str]:
+    candidates = (Path("/proc/sys/kernel/random/boot_id"),)
+    for candidate in candidates:
+        try:
+            value = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    try:
+        proc = subprocess.run(
+            ["sysctl", "-n", "kern.boottime"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        value = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        value = ""
+    if not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _process_start_token(pid: int) -> Optional[str]:
+    if sys.platform == "darwin":
+        # `ps -o lstart` is only second-granular and can alias after a fast
+        # PID recycle.  libproc exposes the kernel's timeval start instant,
+        # including microseconds, without trusting command output.
+        try:
+            import ctypes
+
+            class _ProcBsdInfo(ctypes.Structure):
+                _fields_ = [
+                    ("pbi_flags", ctypes.c_uint32),
+                    ("pbi_status", ctypes.c_uint32),
+                    ("pbi_xstatus", ctypes.c_uint32),
+                    ("pbi_pid", ctypes.c_uint32),
+                    ("pbi_ppid", ctypes.c_uint32),
+                    ("pbi_uid", ctypes.c_uint32),
+                    ("pbi_gid", ctypes.c_uint32),
+                    ("pbi_ruid", ctypes.c_uint32),
+                    ("pbi_rgid", ctypes.c_uint32),
+                    ("pbi_svuid", ctypes.c_uint32),
+                    ("pbi_svgid", ctypes.c_uint32),
+                    ("rfu_1", ctypes.c_uint32),
+                    ("pbi_comm", ctypes.c_char * 16),
+                    ("pbi_name", ctypes.c_char * 32),
+                    ("pbi_nfiles", ctypes.c_uint32),
+                    ("pbi_pgid", ctypes.c_uint32),
+                    ("pbi_pjobc", ctypes.c_uint32),
+                    ("e_tdev", ctypes.c_uint32),
+                    ("e_tpgid", ctypes.c_uint32),
+                    ("pbi_nice", ctypes.c_int32),
+                    ("pbi_start_tvsec", ctypes.c_uint64),
+                    ("pbi_start_tvusec", ctypes.c_uint64),
+                ]
+
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            libproc.proc_pidinfo.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                ctypes.c_void_p, ctypes.c_int,
+            ]
+            libproc.proc_pidinfo.restype = ctypes.c_int
+            info = _ProcBsdInfo()
+            copied = libproc.proc_pidinfo(
+                int(pid), 3, 0, ctypes.byref(info), ctypes.sizeof(info)
+            )
+            if copied == ctypes.sizeof(info) and info.pbi_start_tvsec:
+                return (
+                    f"darwin:{int(info.pbi_start_tvsec)}:"
+                    f"{int(info.pbi_start_tvusec)}"
+                )
+        except (OSError, TypeError, ValueError):
+            pass
+        # Never weaken Darwin identity to the second-granular `ps` value.
+        return None
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        raw = stat_path.read_text(encoding="utf-8")
+        closing = raw.rfind(")")
+        fields = raw[closing + 2:].split()
+        if closing >= 0 and len(fields) > 19:
+            return fields[19]
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        value = proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        value = ""
+    if not value:
+        return None
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def read_process_identity(pid: int) -> Optional[ProcessIdentity]:
+    """Read an exact live process identity or return ``None`` fail-closed."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    boot_id = _local_boot_id()
+    start_token = _process_start_token(pid)
+    if not boot_id or not start_token:
+        return None
+    return ProcessIdentity(
+        host_id=_local_host_id(),
+        boot_id=boot_id,
+        pid=int(pid),
+        start_token=start_token,
+    )
+
+
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
     """Open a Kanban SQLite connection with consistent lock waiting."""
     busy_timeout_ms = _resolve_busy_timeout_ms()
@@ -1966,7 +4253,12 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
         str(path),
         isolation_level=None,
         timeout=busy_timeout_ms / 1000.0,
+        factory=_KanbanConnection,
     )
+    conn._olympus_permit_registry = {}
+    conn._olympus_audit_registry = set()
+    conn._olympus_managed_txn_depth = 0
+    conn._olympus_external_txn = False
     # ``sqlite3.connect(timeout=...)`` normally maps to busy_timeout, but set
     # the PRAGMA explicitly so it is observable and survives future wrapper
     # changes. Parameter binding is not supported for PRAGMA assignments.
@@ -2245,6 +4537,18 @@ def connect(
         conn = _sqlite_connect(path)
         try:
             conn.row_factory = sqlite3.Row
+            # SCHEMA_SQL installs a fail-closed immutable-effect trigger before
+            # the full Olympus guard set is available on a legacy database.
+            # Register only its migration-state predicate up front so an exact
+            # transactional identity remap can proceed; external connections
+            # lack this UDF and therefore still fail closed.
+            conn.create_function(
+                "olympus_schema_migration_active",
+                0,
+                lambda: int(
+                    int(getattr(conn, "_olympus_schema_migration_depth", 0)) > 0
+                ),
+            )
             with _INIT_LOCK:
                 # WAL activation can take an exclusive lock while SQLite creates the
                 # sidecar files for a fresh database. Keep it in the same process-local
@@ -2274,12 +4578,1200 @@ def connect(
                     # threads from racing through the additive ALTER TABLE pass with
                     # stale PRAGMA snapshots during gateway startup.
                     conn.executescript(SCHEMA_SQL)
+                    # Persistent Olympus triggers survive process restart and
+                    # call connection-local UDFs.  If this DB already has the
+                    # guard, register those UDFs before any migration write;
+                    # otherwise SQLite would fail with "no such function" (or,
+                    # worse, a migration author might be tempted to drop the
+                    # guard). Fresh legacy DBs have no guard and migrate first.
+                    has_persistent_guard = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                        "AND name='olympus_tasks_update_guard'"
+                    ).fetchone() is not None
+                    if has_persistent_guard:
+                        _install_olympus_write_guard(conn)
                     _migrate_add_optional_columns(conn)
                     _INITIALIZED_PATHS.add(resolved)
+                _install_olympus_write_guard(conn)
         except Exception:
             conn.close()
             raise
     return conn
+
+
+def _olympus_telegram_journal_guard_sql(
+    conn: sqlite3.Connection,
+) -> str:
+    """Build v3 journal guards only after their exact schemas exist.
+
+    A pre-v3 WIP database can already have persistent task guards, which means
+    :func:`connect` must register the general guard UDFs before migration.  It
+    must not create v3 ``NEW.column`` triggers against the legacy Telegram
+    table shape, however, because SQLite then cannot rename that table.  Schema
+    migration preserves/replaces the legacy tables first; the second guard
+    installation pass calls this helper again and installs these triggers.
+    """
+    expected = {
+        "olympus_telegram_deliveries": {
+            "delivery_key", "authorization_task_id",
+            "authorization_task_revision", "task_id", "payload",
+            "payload_sha256", "created_at",
+        },
+        "olympus_telegram_controls": {
+            "operation_id", "action", "authorization_task_id",
+            "authorization_task_revision", "target_task_id",
+            "target_task_revision", "source_identity", "request_payload",
+            "payload_sha256", "verification_id", "result_status",
+            "effect_operation_id", "created_at",
+        },
+    }
+    exact = {
+        table: {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})")
+        } == columns
+        for table, columns in expected.items()
+    }
+    statements: list[str] = []
+    if exact["olympus_telegram_deliveries"]:
+        statements.extend((
+            "CREATE TRIGGER olympus_telegram_delivery_insert_guard "
+            "BEFORE INSERT ON olympus_telegram_deliveries "
+            "WHEN olympus_telegram_delivery_insert_allowed("
+            "NEW.delivery_key,NEW.authorization_task_id,"
+            "NEW.authorization_task_revision,NEW.task_id,NEW.payload,"
+            "NEW.payload_sha256,NEW.created_at) != 1 "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_delivery_authority_required'); END;",
+            "CREATE TRIGGER olympus_telegram_delivery_update_guard "
+            "BEFORE UPDATE ON olympus_telegram_deliveries "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_delivery_immutable'); END;",
+            "CREATE TRIGGER olympus_telegram_delivery_delete_guard "
+            "BEFORE DELETE ON olympus_telegram_deliveries "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_delivery_immutable'); END;",
+        ))
+    if exact["olympus_telegram_controls"]:
+        statements.extend((
+            "CREATE TRIGGER olympus_telegram_control_insert_guard "
+            "BEFORE INSERT ON olympus_telegram_controls "
+            "WHEN olympus_telegram_control_insert_allowed("
+            "NEW.operation_id,NEW.action,NEW.authorization_task_id,"
+            "NEW.authorization_task_revision,NEW.target_task_id,"
+            "NEW.target_task_revision,NEW.source_identity,"
+            "NEW.request_payload,NEW.payload_sha256,NEW.verification_id,"
+            "NEW.result_status,NEW.effect_operation_id,NEW.created_at) != 1 "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_control_authority_required'); END;",
+            "CREATE TRIGGER olympus_telegram_control_update_guard "
+            "BEFORE UPDATE ON olympus_telegram_controls "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_control_immutable'); END;",
+            "CREATE TRIGGER olympus_telegram_control_delete_guard "
+            "BEFORE DELETE ON olympus_telegram_controls "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'olympus_telegram_control_immutable'); END;",
+        ))
+    return "\n".join(statements)
+
+
+def _install_olympus_write_guard(conn: sqlite3.Connection) -> None:
+    """Install persistent main-schema guards backed by process-local UDFs.
+
+    The triggers live in ``sqlite_master``.  A plain external ``sqlite3``
+    connection therefore reaches the same boundary but has no registered UDF
+    and aborts instead of bypassing governance.  The permit itself never lives
+    in SQL: it is one process-local exact revision/action/capability tuple.
+    """
+    registry = getattr(conn, "_olympus_permit_registry", None)
+    if registry is None:
+        raise RuntimeError("Kanban connection lacks process-local permit state")
+
+    def _schema_migration_active() -> int:
+        return int(int(getattr(conn, "_olympus_schema_migration_depth", 0)) > 0)
+
+    def _guard_install_failpoint() -> int:
+        hook = _OLYMPUS_GUARD_INSTALL_FAILPOINT
+        if callable(hook):
+            hook()
+        return 0
+
+    def _permit(task_id: Any):
+        return registry.get(str(task_id))
+
+    def _permit_write_binding(issued: Any) -> Optional[dict[str, Any]]:
+        if issued is None or len(issued) < 8 or issued[7] is None:
+            return None
+        try:
+            decoded = json.loads(str(issued[7]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
+    def _permit_allows(
+        task_id: Any, subject_revision: Any, capability: Any, actions_csv: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        if issued is None:
+            return 0
+        try:
+            revision = int(subject_revision)
+        except (TypeError, ValueError):
+            return 0
+        actions = {item for item in str(actions_csv).split(",") if item}
+        return int(
+            revision in {issued[0], issued[0] + 1}
+            and issued[2] in actions
+            and issued[3] == str(capability)
+        )
+
+    def _task_insert_allowed(
+        task_id: Any, record_revision: Any, status: Any, assignee: Any,
+        olympus_context: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        return int(
+            issued is not None
+            and issued[0] == 0
+            and issued[2:4] == ("create", OLYMPUS_CAPABILITY_CREATE)
+            and record_revision == 1
+            and isinstance(status, str) and status in VALID_STATUSES
+            and isinstance(assignee, str) and bool(assignee.strip())
+            and isinstance(olympus_context, str) and bool(olympus_context)
+        )
+
+    def _columns_allowed(
+        mapping: Mapping[tuple[str, str], frozenset[str]],
+        columns: tuple[str, ...], task_id: Any, subject_revision: Any,
+        values: tuple[Any, ...],
+    ) -> int:
+        issued = _permit(task_id)
+        if issued is None or len(values) != 2 * len(columns):
+            return 0
+        try:
+            if int(subject_revision) not in {issued[0], issued[0] + 1}:
+                return 0
+        except (TypeError, ValueError):
+            return 0
+        allowed = mapping.get((issued[2], issued[3]))
+        if allowed is None:
+            return 0
+        changed = {
+            column
+            for index, column in enumerate(columns)
+            if values[index * 2] != values[index * 2 + 1]
+        }
+        return int(changed.issubset(allowed))
+
+    def _task_update_allowed(task_id: Any, subject_revision: Any, *values: Any) -> int:
+        return _columns_allowed(
+            _OLYMPUS_TASK_WRITE_COLUMNS, _OLYMPUS_TASK_MUTABLE_COLUMNS,
+            task_id, subject_revision, values,
+        )
+
+    def _revision_advance_allowed(
+        task_id: Any, old_revision: Any, new_revision: Any, *values: Any,
+    ) -> int:
+        """Admit only the trigger-generated one-step revision CAS.
+
+        The AFTER UPDATE revision trigger necessarily re-enters the persistent
+        BEFORE UPDATE guard.  Its second statement is safe only when the exact
+        verified permit still binds the old revision and no task payload column
+        changes in that statement.
+        """
+        issued = _permit(task_id)
+        if issued is None or len(values) != 2 * len(_OLYMPUS_TASK_MUTABLE_COLUMNS):
+            return 0
+        try:
+            exact_revision = (
+                issued[0] == int(old_revision)
+                and int(new_revision) == int(old_revision) + 1
+            )
+        except (TypeError, ValueError):
+            return 0
+        unchanged = all(
+            values[index * 2] == values[index * 2 + 1]
+            for index in range(len(_OLYMPUS_TASK_MUTABLE_COLUMNS))
+        )
+        return int(exact_revision and unchanged)
+
+    def _run_update_allowed(task_id: Any, subject_revision: Any, *values: Any) -> int:
+        allowed = _columns_allowed(
+            _OLYMPUS_RUN_WRITE_COLUMNS, _OLYMPUS_RUN_MUTABLE_COLUMNS,
+            task_id, subject_revision, values,
+        )
+        issued = _permit(task_id)
+        if not allowed or issued is None or issued[2] != "register_worker_process":
+            return allowed
+        binding = _permit_write_binding(issued)
+        dispatcher_index = _OLYMPUS_RUN_MUTABLE_COLUMNS.index(
+            "dispatcher_instance_id"
+        )
+        return int(
+            binding == {
+                "schema_version": WORKER_REGISTRATION_WRITE_SCHEMA,
+                "action": "register_worker_process",
+                "task_id": str(task_id),
+                "task_record_revision": int(issued[0]),
+                "dispatcher_instance_id": values[dispatcher_index * 2 + 1],
+            }
+        )
+
+    def _run_insert_allowed(
+        task_id: Any, subject_revision: Any, olympus_context: Any,
+        auth_root_id: Any, auth_root_revision: Any, verification_id: Any,
+        process_state: Any, launch_token: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        if issued is None:
+            return 0
+        allowed = _OLYMPUS_RUN_WRITE_COLUMNS.get((issued[2], issued[3]))
+        try:
+            exact = (
+                issued[0] == int(subject_revision)
+                and issued[4] == str(auth_root_id)
+                and issued[5] == int(auth_root_revision)
+                and issued[6] == str(verification_id)
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(
+            exact and allowed is not None and "__insert__" in allowed
+            and isinstance(olympus_context, str) and bool(olympus_context)
+            and process_state in {"workspace_pending", "terminal"}
+            and (
+                process_state == "terminal"
+                or (isinstance(launch_token, str) and bool(launch_token))
+            )
+        )
+
+    def _task_should_advance(
+        task_id: Any, subject_revision: Any, *values: Any,
+    ) -> int:
+        if not _task_update_allowed(task_id, subject_revision, *values):
+            return 0
+        issued = _permit(task_id)
+        try:
+            if issued is None or int(subject_revision) != issued[0]:
+                return 0
+        except (TypeError, ValueError):
+            return 0
+        changed = any(
+            values[index * 2] != values[index * 2 + 1]
+            for index in range(len(_OLYMPUS_TASK_MUTABLE_COLUMNS))
+        )
+        return int(changed or (issued is not None and issued[2] in _OLYMPUS_FORCE_TOUCH_ACTIONS))
+
+    def _audit_allowed(task_id: Any, run_id: Any, kind: Any, payload: Any, created_at: Any) -> int:
+        audit_registry = getattr(conn, "_olympus_audit_registry", set())
+        key = (
+            str(task_id), int(run_id) if run_id is not None else None,
+            str(kind), str(payload) if payload is not None else None,
+            int(created_at),
+        )
+        if str(kind) in _OLYMPUS_PROTECTED_AUDIT_KINDS:
+            return int(key in audit_registry)
+        return int(_permit(task_id) is not None)
+
+    def _notify_insert_allowed(
+        task_id: Any, platform: Any, chat_id: Any, thread_id: Any,
+        user_id: Any, notifier_profile: Any, created_at: Any,
+        last_event_id: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        binding = _permit_write_binding(issued)
+        if issued is None or binding is None:
+            return 0
+        try:
+            exact = (
+                issued[2:4] == (
+                    "add_notification_subscription", OLYMPUS_CAPABILITY_NOTIFY,
+                )
+                and binding == {
+                    "schema_version": NOTIFICATION_SUBSCRIPTION_OPERATION_SCHEMA,
+                    "action": "add_notification_subscription",
+                    "board_id": _connection_board_identity(conn),
+                    "task_id": str(task_id),
+                    "task_record_revision": int(issued[0]),
+                    "platform": platform,
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "notifier_profile": notifier_profile,
+                }
+                and isinstance(created_at, int)
+                and created_at >= 0
+                and isinstance(last_event_id, int)
+                and last_event_id == 0
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(exact)
+
+    def _notifier_row_matches(
+        binding: Optional[dict[str, Any]],
+        *,
+        task_id: Any,
+        platform: Any,
+        chat_id: Any,
+        thread_id: Any,
+        user_id: Any,
+        notifier_profile: Any,
+        created_at: Any,
+        last_event_id: Any,
+    ) -> bool:
+        if binding is None:
+            return False
+        return bool(
+            binding.get("task_id") == str(task_id)
+            and binding.get("platform") == platform
+            and binding.get("chat_id") == chat_id
+            and binding.get("thread_id") == thread_id
+            and binding.get("user_id") == user_id
+            and binding.get("notifier_profile") == notifier_profile
+            and binding.get("created_at") == created_at
+            and binding.get("last_event_id") == last_event_id
+        )
+
+    def _notify_update_allowed(
+        old_task_id: Any, old_platform: Any, old_chat_id: Any,
+        old_thread_id: Any, old_user_id: Any, old_notifier_profile: Any,
+        old_created_at: Any, old_last_event_id: Any,
+        new_task_id: Any, new_platform: Any, new_chat_id: Any,
+        new_thread_id: Any, new_user_id: Any, new_notifier_profile: Any,
+        new_created_at: Any, new_last_event_id: Any,
+    ) -> int:
+        issued = _permit(old_task_id)
+        binding = _permit_write_binding(issued)
+        if issued is None or issued[3] != OLYMPUS_CAPABILITY_NOTIFY:
+            return 0
+        action = issued[2]
+        if action not in {
+            "claim_notification_delivery", "advance_notification_cursor",
+            "rewind_notification_cursor",
+        }:
+            return 0
+        if not _notifier_row_matches(
+            binding,
+            task_id=old_task_id,
+            platform=old_platform,
+            chat_id=old_chat_id,
+            thread_id=old_thread_id,
+            user_id=old_user_id,
+            notifier_profile=old_notifier_profile,
+            created_at=old_created_at,
+            last_event_id=old_last_event_id,
+        ):
+            return 0
+        immutable = (
+            new_task_id == old_task_id
+            and new_platform == old_platform
+            and new_chat_id == old_chat_id
+            and new_thread_id == old_thread_id
+            and new_user_id == old_user_id
+            and new_notifier_profile == old_notifier_profile
+            and new_created_at == old_created_at
+        )
+        if not immutable:
+            return 0
+        try:
+            old_cursor = int(old_last_event_id)
+            new_cursor = int(new_last_event_id)
+        except (TypeError, ValueError):
+            return 0
+        if action == "rewind_notification_cursor":
+            return int(new_cursor <= old_cursor)
+        return int(new_cursor >= old_cursor)
+
+    def _notify_delete_allowed(
+        task_id: Any, platform: Any, chat_id: Any, thread_id: Any,
+        user_id: Any, notifier_profile: Any, created_at: Any,
+        last_event_id: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        if (
+            issued is None
+            or issued[2:4] != (
+                "remove_notification_subscription", OLYMPUS_CAPABILITY_NOTIFY,
+            )
+        ):
+            return 0
+        return int(_notifier_row_matches(
+            _permit_write_binding(issued),
+            task_id=task_id,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            notifier_profile=notifier_profile,
+            created_at=created_at,
+            last_event_id=last_event_id,
+        ))
+
+    def _canonical_receipt_payload(
+        payload: Any, payload_sha256: Any,
+    ) -> Optional[dict[str, Any]]:
+        if not isinstance(payload, str) or not isinstance(payload_sha256, str):
+            return None
+        if hashlib.sha256(payload.encode("utf-8")).hexdigest() != payload_sha256:
+            return None
+        try:
+            decoded = json.loads(payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(decoded, dict):
+            return None
+        canonical = json.dumps(
+            decoded, sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+        return decoded if canonical == payload else None
+
+    def _create_receipt_insert_allowed(
+        idempotency_key: Any, task_id: Any, payload: Any,
+        payload_sha256: Any, created_at: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        decoded = _canonical_receipt_payload(payload, payload_sha256)
+        binding = _permit_write_binding(issued)
+        return int(
+            issued is not None
+            and issued[0] == 0
+            and issued[2:4] == ("create", OLYMPUS_CAPABILITY_CREATE)
+            and decoded is not None
+            and decoded.get("schema_version") == "olympus-task-create-request/1"
+            and decoded.get("idempotency_key") == idempotency_key
+            and decoded.get("task_id") == task_id
+            and isinstance(created_at, int)
+            and created_at >= 0
+            and binding == {
+                "schema_version": CREATE_RECEIPT_WRITE_SCHEMA,
+                "idempotency_key": idempotency_key,
+                "task_id": task_id,
+                "payload": payload,
+                "payload_sha256": payload_sha256,
+                "created_at": created_at,
+            }
+        )
+
+    def _release_receipt_insert_allowed(
+        operation_id: Any, task_id: Any, subject_revision: Any,
+        record_revision: Any, verification_id: Any, request_id: Any,
+        receipt: Any, receipt_sha256: Any, created_at: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        decoded = _canonical_receipt_payload(receipt, receipt_sha256)
+        binding = _permit_write_binding(issued)
+        try:
+            exact = (
+                issued is not None
+                and issued[2:4] == (
+                    "release_blocked_task", OLYMPUS_CAPABILITY_RELEASE,
+                )
+                and issued[0] == int(subject_revision)
+                and int(record_revision) == issued[0] + 1
+                and str(operation_id) == issued[1]
+                and str(verification_id) == issued[6]
+                and decoded is not None
+                and decoded.get("schema_version") == "olympus-task-release-receipt/1"
+                and decoded.get("operation_id") == operation_id
+                and decoded.get("task_id") == task_id
+                and decoded.get("previous_revision") == int(subject_revision)
+                and decoded.get("record_revision") == int(record_revision)
+                and decoded.get("verification_id") == verification_id
+                and decoded.get("request_id") == request_id
+                and isinstance(created_at, int)
+                and created_at >= 0
+                and binding == {
+                    "schema_version": RELEASE_RECEIPT_WRITE_SCHEMA,
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                    "subject_revision": int(subject_revision),
+                    "record_revision": int(record_revision),
+                    "verification_id": verification_id,
+                    "request_id": request_id,
+                    "receipt": receipt,
+                    "receipt_sha256": receipt_sha256,
+                    "created_at": created_at,
+                }
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(exact)
+
+    def _telegram_delivery_insert_allowed(
+        delivery_key: Any, authorization_task_id: Any,
+        authorization_task_revision: Any, task_id: Any, payload: Any,
+        payload_sha256: Any, created_at: Any,
+    ) -> int:
+        issued = _permit(authorization_task_id)
+        binding = _permit_write_binding(issued)
+        try:
+            exact = (
+                issued is not None
+                and issued[2:4] == (
+                    "telegram-intake", TELEGRAM_ACTION_CAPABILITIES["telegram-intake"],
+                )
+                and issued[0] == int(authorization_task_revision)
+                and binding == {
+                    "schema_version": TELEGRAM_DELIVERY_WRITE_SCHEMA,
+                    "action": "telegram-intake",
+                    "task_id": str(authorization_task_id),
+                    "task_record_revision": int(authorization_task_revision),
+                    "delivery_key": delivery_key,
+                    "authorization_task_id": authorization_task_id,
+                    "authorization_task_revision": int(
+                        authorization_task_revision
+                    ),
+                    "created_task_id": task_id,
+                    "payload": payload,
+                    "payload_sha256": payload_sha256,
+                    "created_at": int(created_at),
+                }
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(exact)
+
+    def _telegram_control_insert_allowed(
+        operation_id: Any, action: Any, authorization_task_id: Any,
+        authorization_task_revision: Any, target_task_id: Any,
+        target_task_revision: Any, source_identity: Any,
+        request_payload: Any, payload_sha256: Any, verification_id: Any,
+        result_status: Any, effect_operation_id: Any, created_at: Any,
+    ) -> int:
+        issued = _permit(target_task_id)
+        binding = _permit_write_binding(issued)
+        try:
+            exact = (
+                issued is not None
+                and issued[2] == action
+                and issued[3] == TELEGRAM_ACTION_CAPABILITIES.get(str(action))
+                and issued[0] == int(target_task_revision)
+                and issued[6] == verification_id
+                and binding == {
+                    "schema_version": TELEGRAM_CONTROL_WRITE_SCHEMA,
+                    "action": action,
+                    "task_id": str(target_task_id),
+                    "task_record_revision": int(target_task_revision),
+                    "operation_id": operation_id,
+                    "authorization_task_id": authorization_task_id,
+                    "authorization_task_revision": int(
+                        authorization_task_revision
+                    ),
+                    "source_identity": source_identity,
+                    "request_payload": request_payload,
+                    "payload_sha256": payload_sha256,
+                    "result_status": result_status,
+                    "effect_operation_id": effect_operation_id,
+                    "created_at": int(created_at),
+                }
+            )
+        except (TypeError, ValueError):
+            return 0
+        return int(exact)
+
+    def _notifier_effect_matches(
+        issued: Any, *, task_id: Any, event_id: Any,
+        operation_id: Any, destination_key: Any, effect_state: Any,
+    ) -> bool:
+        binding = _permit_write_binding(issued)
+        if binding is None:
+            return False
+        if binding.get("schema_version") == NOTIFIER_MUTATION_WRITE_SCHEMA:
+            binding = binding.get("notifier")
+        if not isinstance(binding, dict):
+            return False
+        expected_destination = ":".join((
+            str(binding.get("platform", "")),
+            str(binding.get("chat_id", "")),
+            str(binding.get("thread_id") or ""),
+        ))
+        return bool(
+            binding.get("task_id") == str(task_id)
+            and binding.get("source_event_id") == event_id
+            and binding.get("effect_id") == operation_id
+            and binding.get("effect_state") == effect_state
+            and destination_key == expected_destination
+        )
+
+    def _effect_insert_allowed(
+        task_id: Any, state: Any, effect_kind: Any, auth_root_id: Any,
+        auth_root_revision: Any, target_pre_revision: Any,
+        target_post_revision: Any, run_id: Any, event_id: Any,
+        operation_id: Any, destination_key: Any, part: Any,
+        worker_host_id: Any, worker_boot_id: Any, worker_pid: Any,
+        worker_start_token: Any, source_identity: Any, payload: Any,
+        payload_sha256: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        if issued is None or state != "pending":
+            return 0
+        expected = {
+            "terminate_worker": {"stage_worker_termination"},
+            "notify_text": {"reserve_notification_effect"},
+            "notify_artifact": {"reserve_notification_effect"},
+        }.get(str(effect_kind), set())
+        try:
+            exact_authority = (
+                str(auth_root_id) == issued[4]
+                and int(auth_root_revision) == issued[5]
+                and int(target_pre_revision) == issued[0]
+            )
+        except (TypeError, ValueError):
+            return 0
+        common = (
+            exact_authority
+            and issued[2] in expected
+            and isinstance(operation_id, str) and bool(operation_id)
+            and isinstance(source_identity, str) and bool(source_identity)
+            and isinstance(payload, str) and bool(payload)
+            and isinstance(payload_sha256, str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", payload_sha256))
+        )
+        if not common:
+            return 0
+        if effect_kind == "terminate_worker":
+            return int(
+                int(target_post_revision) in {issued[0], issued[0] + 1}
+                and run_id is not None and event_id is None
+                and destination_key is None and part is None
+                and isinstance(worker_host_id, str) and bool(worker_host_id)
+                and isinstance(worker_boot_id, str) and bool(worker_boot_id)
+                and isinstance(worker_pid, int) and worker_pid > 0
+                and isinstance(worker_start_token, str) and bool(worker_start_token)
+            )
+        binding = _permit_write_binding(issued)
+        mutation = (
+            binding.get("mutation")
+            if isinstance(binding, dict)
+            and binding.get("schema_version") == NOTIFIER_MUTATION_WRITE_SCHEMA
+            else None
+        )
+        try:
+            decoded_source = json.loads(source_identity)
+            canonical_source = json.dumps(
+                decoded_source, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+            decoded_payload = json.loads(payload)
+            canonical_payload = json.dumps(
+                decoded_payload, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return 0
+        exact_effect = {
+            "schema_version": NOTIFICATION_EFFECT_RESERVATION_SCHEMA,
+            "action": "reserve_notification_effect",
+            "task_id": str(task_id),
+            "task_record_revision": int(issued[0]),
+            "effect_kind": effect_kind,
+            "operation_id": operation_id,
+            "event_id": event_id,
+            "destination_key": destination_key,
+            "part": part,
+            "source_identity": source_identity,
+            "payload": payload,
+            "payload_sha256": payload_sha256,
+            "target_post_revision": target_post_revision,
+        }
+        return int(
+            run_id is None and isinstance(event_id, int) and event_id > 0
+            and isinstance(destination_key, str) and bool(destination_key)
+            and isinstance(part, str) and bool(part)
+            and worker_host_id is None and worker_boot_id is None
+            and worker_pid is None and worker_start_token is None
+            and int(target_post_revision) == issued[0]
+            and canonical_source == source_identity
+            and canonical_payload == payload
+            and hashlib.sha256(payload.encode("utf-8")).hexdigest()
+                == payload_sha256
+            and mutation == exact_effect
+            and _notifier_effect_matches(
+                issued,
+                task_id=task_id,
+                event_id=event_id,
+                operation_id=operation_id,
+                destination_key=destination_key,
+                effect_state="unreserved",
+            )
+        )
+
+    def _effect_update_allowed(
+        task_id: Any, effect_row_id: Any, effect_kind: Any,
+        old_state: Any, new_state: Any, event_id: Any, operation_id: Any,
+        destination_key: Any, old_error: Any, new_error: Any,
+        old_updated_at: Any, new_updated_at: Any,
+        old_applied_at: Any, new_applied_at: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        if issued is None:
+            return 0
+        transition = (str(old_state), str(new_state))
+        action = issued[2]
+        allowed = {
+            "claim_notification_effect": {("pending", "applying")},
+            "execute_worker_termination_effect": {
+                ("pending", "applying"), ("applying", "applied"),
+                ("applying", "gone"), ("applying", "unknown"),
+                ("applying", "failed"),
+                ("applying", "identity_mismatch"),
+                ("applying", "identity_unverified"),
+            },
+            "finish_notification_effect": {
+                ("applying", "applied"), ("applying", "not_sent"),
+                ("applying", "unknown"),
+            },
+            "reconcile_effect_journal": {
+                ("applying", "unknown"), ("applying", "gone"),
+                ("applying", "identity_mismatch"),
+                ("applying", "identity_unverified"),
+            },
+            "settle_worker_termination": {
+                ("applying", "applied"), ("applying", "gone"),
+                ("applying", "unknown"), ("applied", "gone"),
+                ("applied", "identity_mismatch"),
+            },
+        }.get(action, set())
+        if str(effect_kind).startswith("notify_") and action.startswith("execute_worker"):
+            return 0
+        if action in {"claim_notification_effect", "finish_notification_effect"}:
+            if not _notifier_effect_matches(
+                issued,
+                task_id=task_id,
+                event_id=event_id,
+                operation_id=operation_id,
+                destination_key=destination_key,
+                effect_state=old_state,
+            ):
+                return 0
+            binding = _permit_write_binding(issued)
+            mutation = (
+                binding.get("mutation")
+                if isinstance(binding, dict)
+                and binding.get("schema_version") == NOTIFIER_MUTATION_WRITE_SCHEMA
+                else None
+            )
+            exact_transition = {
+                "schema_version": NOTIFICATION_EFFECT_TRANSITION_SCHEMA,
+                "action": action,
+                "task_id": str(task_id),
+                "task_record_revision": int(issued[0]),
+                "effect_row_id": effect_row_id,
+                "effect_kind": effect_kind,
+                "operation_id": operation_id,
+                "event_id": event_id,
+                "destination_key": destination_key,
+                "old_state": old_state,
+                "new_state": new_state,
+                "error": new_error,
+                "updated_at": new_updated_at,
+                "applied_at": new_applied_at,
+            }
+            return int(
+                transition in allowed
+                and mutation == exact_transition
+                and new_updated_at >= old_updated_at
+            )
+        evidence_unchanged = (
+            new_error == old_error and new_applied_at == old_applied_at
+        )
+        if action == "reconcile_effect_journal" and not evidence_unchanged:
+            return 0
+        return int(transition in allowed and new_updated_at >= old_updated_at)
+
+    conn.create_function("olympus_permit_allows", 4, _permit_allows)
+    conn.create_function("olympus_task_insert_allowed", 5, _task_insert_allowed)
+    conn.create_function("olympus_task_update_allowed", -1, _task_update_allowed)
+    conn.create_function(
+        "olympus_revision_advance_allowed", -1, _revision_advance_allowed
+    )
+    conn.create_function("olympus_task_should_advance", -1, _task_should_advance)
+    conn.create_function("olympus_run_insert_allowed", 8, _run_insert_allowed)
+    conn.create_function("olympus_run_update_allowed", -1, _run_update_allowed)
+    conn.create_function("olympus_audit_allowed", 5, _audit_allowed)
+    conn.create_function("olympus_notify_insert_allowed", 8, _notify_insert_allowed)
+    conn.create_function("olympus_notify_update_allowed", 16, _notify_update_allowed)
+    conn.create_function("olympus_notify_delete_allowed", 8, _notify_delete_allowed)
+    conn.create_function(
+        "olympus_create_receipt_insert_allowed", 5,
+        _create_receipt_insert_allowed,
+    )
+    conn.create_function(
+        "olympus_release_receipt_insert_allowed", 9,
+        _release_receipt_insert_allowed,
+    )
+    conn.create_function(
+        "olympus_telegram_delivery_insert_allowed", 7,
+        _telegram_delivery_insert_allowed,
+    )
+    conn.create_function(
+        "olympus_telegram_control_insert_allowed", 13,
+        _telegram_control_insert_allowed,
+    )
+    conn.create_function("olympus_effect_insert_allowed", 19, _effect_insert_allowed)
+    conn.create_function("olympus_effect_update_allowed", 14, _effect_update_allowed)
+    conn.create_function(
+        "olympus_schema_migration_active", 0, _schema_migration_active
+    )
+    conn.create_function(
+        "olympus_guard_install_failpoint", 0, _guard_install_failpoint
+    )
+    task_values = ", ".join(
+        f"OLD.{column}, NEW.{column}" for column in _OLYMPUS_TASK_MUTABLE_COLUMNS
+    )
+    run_values = ", ".join(
+        f"OLD.{column}, NEW.{column}" for column in _OLYMPUS_RUN_MUTABLE_COLUMNS
+    )
+    telegram_guard_sql = _olympus_telegram_journal_guard_sql(conn)
+    script = f"""
+        BEGIN IMMEDIATE;
+        DROP TRIGGER IF EXISTS effect_journal_immutable;
+        DROP TRIGGER IF EXISTS olympus_tasks_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_tasks_update_guard;
+        DROP TRIGGER IF EXISTS olympus_tasks_opt_in_guard;
+        DROP TRIGGER IF EXISTS olympus_tasks_revision_advance;
+        DROP TRIGGER IF EXISTS olympus_tasks_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_links_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_links_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_links_update_guard;
+        DROP TRIGGER IF EXISTS olympus_comments_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_comments_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_comments_update_guard;
+        DROP TRIGGER IF EXISTS olympus_attachments_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_attachments_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_attachments_update_guard;
+        DROP TRIGGER IF EXISTS olympus_notify_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_notify_update_guard;
+        DROP TRIGGER IF EXISTS olympus_notify_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_create_receipt_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_create_receipt_update_guard;
+        DROP TRIGGER IF EXISTS olympus_create_receipt_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_release_receipt_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_release_receipt_update_guard;
+        DROP TRIGGER IF EXISTS olympus_release_receipt_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_delivery_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_delivery_update_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_delivery_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_control_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_control_update_guard;
+        DROP TRIGGER IF EXISTS olympus_telegram_control_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_runs_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_runs_update_guard;
+        DROP TRIGGER IF EXISTS olympus_runs_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_events_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_events_update_guard;
+        DROP TRIGGER IF EXISTS olympus_events_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_effects_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_effects_update_guard;
+        DROP TRIGGER IF EXISTS olympus_effects_delete_guard;
+
+        SELECT olympus_guard_install_failpoint();
+
+        CREATE TRIGGER effect_journal_immutable
+        BEFORE UPDATE ON kanban_effect_journal
+        WHEN olympus_schema_migration_active() != 1 AND (
+          NEW.effect_kind IS NOT OLD.effect_kind
+          OR NEW.operation_id IS NOT OLD.operation_id
+          OR NEW.task_id IS NOT OLD.task_id
+          OR NEW.run_id IS NOT OLD.run_id
+          OR NEW.event_id IS NOT OLD.event_id
+          OR NEW.destination_key IS NOT OLD.destination_key
+          OR NEW.part IS NOT OLD.part
+          OR NEW.auth_root_id IS NOT OLD.auth_root_id
+          OR NEW.auth_root_revision IS NOT OLD.auth_root_revision
+          OR NEW.target_pre_revision IS NOT OLD.target_pre_revision
+          OR NEW.target_post_revision IS NOT OLD.target_post_revision
+          OR NEW.worker_host_id IS NOT OLD.worker_host_id
+          OR NEW.worker_boot_id IS NOT OLD.worker_boot_id
+          OR NEW.worker_pid IS NOT OLD.worker_pid
+          OR NEW.worker_start_token IS NOT OLD.worker_start_token
+          OR NEW.source_identity IS NOT OLD.source_identity
+          OR NEW.payload IS NOT OLD.payload
+          OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+          OR NEW.created_at IS NOT OLD.created_at
+        )
+        BEGIN SELECT RAISE(ABORT, 'kanban_effect_identity_immutable'); END;
+
+        CREATE TRIGGER olympus_tasks_insert_guard BEFORE INSERT ON tasks
+        WHEN NEW.olympus_context IS NOT NULL AND olympus_task_insert_allowed(
+            NEW.id, NEW.record_revision, NEW.status, NEW.assignee,
+            NEW.olympus_context
+        ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_authority_required'); END;
+
+        CREATE TRIGGER olympus_tasks_opt_in_guard BEFORE UPDATE ON tasks
+        WHEN OLD.olympus_context IS NULL AND NEW.olympus_context IS NOT NULL
+        BEGIN SELECT RAISE(ABORT, 'olympus_legacy_opt_in_forbidden'); END;
+
+        CREATE TRIGGER olympus_tasks_update_guard BEFORE UPDATE ON tasks
+        WHEN OLD.olympus_context IS NOT NULL
+         AND olympus_schema_migration_active() != 1
+        BEGIN
+            SELECT CASE WHEN NEW.id != OLD.id
+                THEN RAISE(ABORT, 'olympus_task_identity_change_forbidden') END;
+            SELECT CASE WHEN NEW.olympus_context IS NULL
+                THEN RAISE(ABORT, 'olympus_governance_downgrade_forbidden') END;
+            SELECT CASE WHEN OLD.record_revision != NEW.record_revision
+                AND olympus_revision_advance_allowed(
+                    OLD.id, OLD.record_revision, NEW.record_revision, {task_values}
+                ) != 1
+                THEN RAISE(ABORT, 'olympus_subject_revision_invalid') END;
+            SELECT CASE WHEN OLD.record_revision = NEW.record_revision
+                AND olympus_task_update_allowed(
+                OLD.id, OLD.record_revision, {task_values}
+            ) != 1 THEN RAISE(ABORT, 'olympus_authority_required') END;
+        END;
+
+        CREATE TRIGGER olympus_tasks_revision_advance AFTER UPDATE ON tasks
+        WHEN OLD.olympus_context IS NOT NULL
+         AND olympus_schema_migration_active() != 1
+         AND NEW.record_revision = OLD.record_revision
+         AND olympus_task_should_advance(
+             OLD.id, OLD.record_revision, {task_values}
+         ) = 1
+        BEGIN
+            UPDATE tasks SET record_revision = OLD.record_revision + 1
+             WHERE id = OLD.id AND record_revision = OLD.record_revision;
+        END;
+
+        CREATE TRIGGER olympus_tasks_delete_guard BEFORE DELETE ON tasks
+        WHEN OLD.olympus_context IS NOT NULL AND olympus_permit_allows(
+            OLD.id, OLD.record_revision, 'kanban.task.delete',
+            'delete,delete_archived'
+        ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_authority_required'); END;
+
+        CREATE TRIGGER olympus_links_insert_guard BEFORE INSERT ON task_links
+        WHEN (
+            EXISTS (SELECT 1 FROM tasks WHERE id=NEW.parent_id AND olympus_context IS NOT NULL)
+            AND olympus_permit_allows(NEW.parent_id,
+                (SELECT record_revision FROM tasks WHERE id=NEW.parent_id),
+                'kanban.task.link','link,link_governed_child') != 1
+        ) OR (
+            EXISTS (SELECT 1 FROM tasks WHERE id=NEW.child_id AND olympus_context IS NOT NULL)
+            AND olympus_permit_allows(NEW.child_id,
+                (SELECT record_revision FROM tasks WHERE id=NEW.child_id),
+                'kanban.task.link','link,link_governed_child') != 1
+        )
+        BEGIN SELECT RAISE(ABORT, 'olympus_link_authority_required'); END;
+
+        CREATE TRIGGER olympus_links_delete_guard BEFORE DELETE ON task_links
+        WHEN EXISTS (
+            SELECT 1 FROM tasks t WHERE t.id IN (OLD.parent_id,OLD.child_id)
+             AND t.olympus_context IS NOT NULL
+             AND olympus_permit_allows(t.id,t.record_revision,'kanban.task.link',
+                 'unlink,unlink_deleted_task') != 1
+             AND olympus_permit_allows(t.id,t.record_revision,'kanban.task.delete',
+                 'delete,delete_archived') != 1
+        )
+        BEGIN SELECT RAISE(ABORT, 'olympus_link_authority_required'); END;
+
+        CREATE TRIGGER olympus_links_update_guard BEFORE UPDATE ON task_links
+        WHEN EXISTS (SELECT 1 FROM tasks t WHERE t.id IN (
+            OLD.parent_id,OLD.child_id,NEW.parent_id,NEW.child_id
+        ) AND t.olympus_context IS NOT NULL)
+        BEGIN SELECT RAISE(ABORT, 'olympus_link_update_forbidden'); END;
+
+        CREATE TRIGGER olympus_comments_insert_guard BEFORE INSERT ON task_comments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(NEW.task_id,
+             (SELECT record_revision FROM tasks WHERE id=NEW.task_id),
+             'kanban.task.comment','comment') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_comment_authority_required'); END;
+        CREATE TRIGGER olympus_comments_update_guard BEFORE UPDATE ON task_comments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id IN (OLD.task_id,NEW.task_id)
+            AND olympus_context IS NOT NULL)
+        BEGIN SELECT RAISE(ABORT, 'olympus_comment_update_forbidden'); END;
+        CREATE TRIGGER olympus_comments_delete_guard BEFORE DELETE ON task_comments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_comment_authority_required'); END;
+
+        CREATE TRIGGER olympus_attachments_insert_guard BEFORE INSERT ON task_attachments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(NEW.task_id,
+             (SELECT record_revision FROM tasks WHERE id=NEW.task_id),
+             'kanban.task.attachment','add_attachment') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_attachment_authority_required'); END;
+        CREATE TRIGGER olympus_attachments_update_guard BEFORE UPDATE ON task_attachments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id IN (OLD.task_id,NEW.task_id)
+            AND olympus_context IS NOT NULL)
+        BEGIN SELECT RAISE(ABORT, 'olympus_attachment_update_forbidden'); END;
+        CREATE TRIGGER olympus_attachments_delete_guard BEFORE DELETE ON task_attachments
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.attachment','delete_attachment') != 1
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_attachment_authority_required'); END;
+
+        CREATE TRIGGER olympus_notify_insert_guard BEFORE INSERT ON kanban_notify_subs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_notify_insert_allowed(
+             NEW.task_id,NEW.platform,NEW.chat_id,NEW.thread_id,NEW.user_id,
+             NEW.notifier_profile,NEW.created_at,NEW.last_event_id
+         ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_notify_authority_required'); END;
+        CREATE TRIGGER olympus_notify_update_guard BEFORE UPDATE ON kanban_notify_subs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id IN (OLD.task_id,NEW.task_id)
+            AND olympus_context IS NOT NULL)
+         AND olympus_schema_migration_active() != 1
+         AND olympus_notify_update_allowed(
+             OLD.task_id,OLD.platform,OLD.chat_id,OLD.thread_id,OLD.user_id,
+             OLD.notifier_profile,OLD.created_at,OLD.last_event_id,
+             NEW.task_id,NEW.platform,NEW.chat_id,NEW.thread_id,NEW.user_id,
+             NEW.notifier_profile,NEW.created_at,NEW.last_event_id
+         ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_notify_authority_required'); END;
+        CREATE TRIGGER olympus_notify_delete_guard BEFORE DELETE ON kanban_notify_subs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_notify_delete_allowed(
+             OLD.task_id,OLD.platform,OLD.chat_id,OLD.thread_id,OLD.user_id,
+             OLD.notifier_profile,OLD.created_at,OLD.last_event_id
+         ) != 1
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_notify_authority_required'); END;
+
+        CREATE TRIGGER olympus_create_receipt_insert_guard
+        BEFORE INSERT ON kanban_olympus_create_receipts
+        WHEN olympus_create_receipt_insert_allowed(
+            NEW.idempotency_key,NEW.task_id,NEW.payload,NEW.payload_sha256,
+            NEW.created_at
+        ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_create_receipt_authority_required'); END;
+        CREATE TRIGGER olympus_create_receipt_update_guard
+        BEFORE UPDATE ON kanban_olympus_create_receipts
+        BEGIN SELECT RAISE(ABORT, 'olympus_create_receipt_immutable'); END;
+        CREATE TRIGGER olympus_create_receipt_delete_guard
+        BEFORE DELETE ON kanban_olympus_create_receipts
+        BEGIN SELECT RAISE(ABORT, 'olympus_create_receipt_immutable'); END;
+
+        CREATE TRIGGER olympus_release_receipt_insert_guard
+        BEFORE INSERT ON kanban_olympus_release_receipts
+        WHEN olympus_release_receipt_insert_allowed(
+            NEW.operation_id,NEW.task_id,NEW.subject_revision,
+            NEW.record_revision,NEW.verification_id,NEW.request_id,
+            NEW.receipt,NEW.receipt_sha256,NEW.created_at
+        ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_receipt_authority_required'); END;
+        CREATE TRIGGER olympus_release_receipt_update_guard
+        BEFORE UPDATE ON kanban_olympus_release_receipts
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_receipt_immutable'); END;
+        CREATE TRIGGER olympus_release_receipt_delete_guard
+        BEFORE DELETE ON kanban_olympus_release_receipts
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_receipt_immutable'); END;
+
+        {telegram_guard_sql}
+
+        CREATE TRIGGER olympus_runs_insert_guard BEFORE INSERT ON task_runs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_run_insert_allowed(
+             NEW.task_id,NEW.subject_revision,NEW.olympus_context,
+             NEW.auth_root_id,NEW.auth_root_revision,NEW.verification_id,
+             NEW.process_state,NEW.launch_token
+         ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_run_authority_required'); END;
+        CREATE TRIGGER olympus_runs_update_guard BEFORE UPDATE ON task_runs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+        BEGIN
+            SELECT CASE WHEN NEW.id != OLD.id OR NEW.task_id != OLD.task_id
+                THEN RAISE(ABORT, 'olympus_run_identity_change_forbidden') END;
+            SELECT CASE WHEN NEW.subject_revision IS NOT OLD.subject_revision
+                OR NEW.olympus_context IS NOT OLD.olympus_context
+                THEN RAISE(ABORT, 'olympus_run_snapshot_change_forbidden') END;
+            SELECT CASE WHEN olympus_run_update_allowed(
+                OLD.task_id,(SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+                {run_values}
+            ) != 1 THEN RAISE(ABORT, 'olympus_run_authority_required') END;
+        END;
+        CREATE TRIGGER olympus_runs_delete_guard BEFORE DELETE ON task_runs
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_run_delete_authority_required'); END;
+
+        CREATE TRIGGER olympus_events_insert_guard BEFORE INSERT ON task_events
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_audit_allowed(
+             NEW.task_id,NEW.run_id,NEW.kind,NEW.payload,NEW.created_at
+         ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_event_authority_required'); END;
+        CREATE TRIGGER olympus_events_update_guard BEFORE UPDATE ON task_events
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id IN (OLD.task_id,NEW.task_id)
+            AND olympus_context IS NOT NULL)
+        BEGIN SELECT RAISE(ABORT, 'olympus_event_update_forbidden'); END;
+        CREATE TRIGGER olympus_events_delete_guard BEFORE DELETE ON task_events
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_event_delete_authority_required'); END;
+
+        CREATE TRIGGER olympus_effects_insert_guard BEFORE INSERT ON kanban_effect_journal
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
+         AND olympus_effect_insert_allowed(
+             NEW.task_id,NEW.state,NEW.effect_kind,NEW.auth_root_id,
+             NEW.auth_root_revision,NEW.target_pre_revision,NEW.target_post_revision,
+             NEW.run_id,NEW.event_id,NEW.operation_id,NEW.destination_key,NEW.part,
+             NEW.worker_host_id,NEW.worker_boot_id,NEW.worker_pid,
+             NEW.worker_start_token,NEW.source_identity,NEW.payload,NEW.payload_sha256
+         ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_effect_authority_required'); END;
+        CREATE TRIGGER olympus_effects_update_guard BEFORE UPDATE ON kanban_effect_journal
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_schema_migration_active() != 1
+        BEGIN
+            SELECT CASE WHEN
+                NEW.id IS NOT OLD.id OR NEW.effect_kind IS NOT OLD.effect_kind
+                OR NEW.operation_id IS NOT OLD.operation_id
+                OR NEW.task_id IS NOT OLD.task_id OR NEW.run_id IS NOT OLD.run_id
+                OR NEW.event_id IS NOT OLD.event_id
+                OR NEW.destination_key IS NOT OLD.destination_key
+                OR NEW.part IS NOT OLD.part OR NEW.auth_root_id IS NOT OLD.auth_root_id
+                OR NEW.auth_root_revision IS NOT OLD.auth_root_revision
+                OR NEW.target_pre_revision IS NOT OLD.target_pre_revision
+                OR NEW.target_post_revision IS NOT OLD.target_post_revision
+                OR NEW.worker_host_id IS NOT OLD.worker_host_id
+                OR NEW.worker_boot_id IS NOT OLD.worker_boot_id
+                OR NEW.worker_pid IS NOT OLD.worker_pid
+                OR NEW.worker_start_token IS NOT OLD.worker_start_token
+                OR NEW.source_identity IS NOT OLD.source_identity
+                OR NEW.payload IS NOT OLD.payload
+                OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+                OR NEW.created_at IS NOT OLD.created_at
+                THEN RAISE(ABORT, 'olympus_effect_identity_change_forbidden') END;
+            SELECT CASE WHEN NEW.updated_at < OLD.updated_at
+                THEN RAISE(ABORT, 'olympus_effect_time_regression') END;
+            SELECT CASE WHEN olympus_effect_update_allowed(
+                OLD.task_id,OLD.id,OLD.effect_kind,OLD.state,NEW.state,
+                OLD.event_id,OLD.operation_id,OLD.destination_key,
+                OLD.error,NEW.error,OLD.updated_at,NEW.updated_at,
+                OLD.applied_at,NEW.applied_at
+            ) != 1 THEN RAISE(ABORT, 'olympus_effect_transition_forbidden') END;
+        END;
+        CREATE TRIGGER olympus_effects_delete_guard BEFORE DELETE ON kanban_effect_journal
+        WHEN EXISTS (SELECT 1 FROM tasks WHERE id=OLD.task_id AND olympus_context IS NOT NULL)
+         AND olympus_permit_allows(OLD.task_id,
+             (SELECT record_revision FROM tasks WHERE id=OLD.task_id),
+             'kanban.task.delete','delete,delete_archived') != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_effect_delete_forbidden'); END;
+        COMMIT;
+    """
+    try:
+        conn.executescript(script)
+    except Exception:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 @contextlib.contextmanager
@@ -2371,6 +5863,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
 
     Called by ``init_db`` so opening an old DB is always safe.
     """
+    # Direct migration callers and very old/partial schemas predate the
+    # migration ledger itself. Create it before consulting the atomic Olympus
+    # revision marker; this is idempotent on fully initialized databases.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS kanban_schema_migrations ("
+        "name TEXT PRIMARY KEY, completed_at INTEGER NOT NULL)"
+    )
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     if "tenant" not in cols:
         _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
@@ -2497,14 +5996,122 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     runs_table_exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
     ).fetchone() is not None
+    revision_migration = "olympus_task_run_revisions_v1"
+    revision_migration_done = conn.execute(
+        "SELECT 1 FROM kanban_schema_migrations WHERE name = ?",
+        (revision_migration,),
+    ).fetchone() is not None
+    if not revision_migration_done:
+        # ALTER TABLE and both backfills are transactional in SQLite.  The
+        # completion marker is committed in that same transaction, so a crash
+        # can never leave a column-only state that later code mistakes for a
+        # completed revision migration.
+        with write_txn(conn):
+            task_cols = {
+                row["name"] for row in conn.execute("PRAGMA table_info(tasks)")
+            }
+            if "record_revision" not in task_cols:
+                _add_column_if_missing(
+                    conn,
+                    "tasks",
+                    "record_revision",
+                    "record_revision INTEGER NOT NULL DEFAULT 0",
+                )
+            if runs_table_exists:
+                run_cols = {
+                    row["name"]
+                    for row in conn.execute("PRAGMA table_info(task_runs)")
+                }
+                if "olympus_context" not in run_cols:
+                    _add_column_if_missing(
+                        conn,
+                        "task_runs",
+                        "olympus_context",
+                        "olympus_context TEXT",
+                    )
+                if "subject_revision" not in run_cols:
+                    _add_column_if_missing(
+                        conn,
+                        "task_runs",
+                        "subject_revision",
+                        "subject_revision INTEGER",
+                    )
+            ambiguous = conn.execute(
+                "SELECT id FROM tasks WHERE olympus_context IS NOT NULL "
+                "AND record_revision NOT IN (0, 1) LIMIT 1"
+            ).fetchone()
+            if ambiguous is not None:
+                raise sqlite3.DatabaseError(
+                    "incomplete Olympus revision migration has advanced governed data"
+                )
+            conn.execute(
+                "UPDATE tasks SET record_revision = 1 "
+                "WHERE olympus_context IS NOT NULL AND record_revision = 0"
+            )
+            if runs_table_exists:
+                conn.execute(
+                    "UPDATE task_runs SET subject_revision = 1 "
+                    "WHERE olympus_context IS NOT NULL "
+                    "AND subject_revision IS NULL "
+                    "AND EXISTS (SELECT 1 FROM tasks t "
+                    "WHERE t.id = task_runs.task_id "
+                    "AND t.olympus_context IS NOT NULL "
+                    "AND t.record_revision = 1)"
+                )
+                incomplete_run = conn.execute(
+                    "SELECT r.id FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+                    "WHERE r.olympus_context IS NOT NULL "
+                    "AND t.olympus_context IS NOT NULL "
+                    "AND r.subject_revision IS NULL LIMIT 1"
+                ).fetchone()
+                if incomplete_run is not None:
+                    raise sqlite3.DatabaseError(
+                        "Olympus run revision backfill did not complete"
+                    )
+            conn.execute(
+                "INSERT INTO kanban_schema_migrations(name, completed_at) "
+                "VALUES (?, ?)",
+                (revision_migration, int(time.time())),
+            )
+    else:
+        task_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(tasks)")
+        }
+        run_cols = (
+            {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+            if runs_table_exists else set()
+        )
+        if "record_revision" not in task_cols or (
+            runs_table_exists and "subject_revision" not in run_cols
+        ):
+            raise sqlite3.DatabaseError(
+                "Olympus revision migration marker contradicts the live schema"
+            )
+
     if runs_table_exists:
+        process_columns = {
+            "process_state": "process_state TEXT NOT NULL DEFAULT 'legacy'",
+            "launch_token": "launch_token TEXT",
+            "workspace_snapshot": "workspace_snapshot TEXT",
+            "auth_root_id": "auth_root_id TEXT",
+            "auth_root_revision": "auth_root_revision INTEGER",
+            "verification_id": "verification_id TEXT",
+            "worker_host_id": "worker_host_id TEXT",
+            "worker_boot_id": "worker_boot_id TEXT",
+            "worker_start_token": "worker_start_token TEXT",
+            "worker_registered_at": "worker_registered_at INTEGER",
+            "dispatcher_instance_id": "dispatcher_instance_id TEXT",
+        }
         run_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
         }
-        if "olympus_context" not in run_cols:
-            _add_column_if_missing(
-                conn, "task_runs", "olympus_context", "olympus_context TEXT"
-            )
+        for column, ddl in process_columns.items():
+            if column not in run_cols:
+                _add_column_if_missing(conn, "task_runs", column, ddl)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_launch_token "
+            "ON task_runs(launch_token) WHERE launch_token IS NOT NULL"
+        )
 
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
@@ -2547,29 +6154,65 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 conn, "kanban_notify_subs", "notifier_profile", "notifier_profile TEXT"
             )
 
-    control_table_exists = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' "
-        "AND name='olympus_telegram_controls'"
-    ).fetchone() is not None
-    if control_table_exists:
-        control_cols = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(olympus_telegram_controls)")
+    # Pre-v3 Telegram WIP tables carried caller-asserted authority and, for
+    # controls, PID-owned recovery state. Preserve those rows as immutable
+    # legacy evidence but never treat them as executable v3 receipts.
+    telegram_specs = {
+        "olympus_telegram_deliveries": (
+            {
+                "delivery_key", "authorization_task_id",
+                "authorization_task_revision", "task_id", "payload",
+                "payload_sha256", "created_at",
+            },
+            "CREATE TABLE olympus_telegram_deliveries ("
+            "delivery_key TEXT PRIMARY KEY, authorization_task_id TEXT NOT NULL, "
+            "authorization_task_revision INTEGER NOT NULL, task_id TEXT NOT NULL UNIQUE, "
+            "payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL, "
+            "created_at INTEGER NOT NULL)",
+        ),
+        "olympus_telegram_controls": (
+            {
+                "operation_id", "action", "authorization_task_id",
+                "authorization_task_revision", "target_task_id",
+                "target_task_revision", "source_identity", "request_payload",
+                "payload_sha256", "verification_id", "result_status",
+                "effect_operation_id", "created_at",
+            },
+            "CREATE TABLE olympus_telegram_controls ("
+            "operation_id TEXT PRIMARY KEY, action TEXT NOT NULL, "
+            "authorization_task_id TEXT NOT NULL, "
+            "authorization_task_revision INTEGER NOT NULL, "
+            "target_task_id TEXT NOT NULL, target_task_revision INTEGER NOT NULL, "
+            "source_identity TEXT NOT NULL, request_payload TEXT NOT NULL, "
+            "payload_sha256 TEXT NOT NULL, verification_id TEXT NOT NULL, "
+            "result_status TEXT, effect_operation_id TEXT, created_at INTEGER NOT NULL)",
+        ),
+    }
+    for table, (expected_columns, create_sql) in telegram_specs.items():
+        columns = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
         }
-        if "target_identity" not in control_cols:
-            _add_column_if_missing(
-                conn,
-                "olympus_telegram_controls",
-                "target_identity",
-                "target_identity TEXT NOT NULL DEFAULT '{}'",
-            )
-        if "previous_process_create_time" not in control_cols:
-            _add_column_if_missing(
-                conn,
-                "olympus_telegram_controls",
-                "previous_process_create_time",
-                "previous_process_create_time REAL",
-            )
+        if not columns:
+            conn.execute(create_sql)
+        elif columns != expected_columns:
+            legacy = f"{table}_legacy_pre_v3"
+            with write_txn(conn):
+                if conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (legacy,),
+                ).fetchone() is not None:
+                    raise sqlite3.IntegrityError(
+                        f"kanban migration: preserved legacy table {legacy} already exists"
+                    )
+                conn.execute(f"ALTER TABLE {table} RENAME TO {legacy}")
+                failpoint = _OLYMPUS_TELEGRAM_MIGRATION_FAILPOINT
+                if callable(failpoint):
+                    failpoint(table)
+                conn.execute(create_sql)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_olympus_telegram_control_target "
+        "ON olympus_telegram_controls(target_task_id, created_at)"
+    )
 
     # One-shot backfill: any task that is 'running' before runs existed
     # had its claim_lock / claim_expires / worker_pid on the task row.
@@ -2586,7 +6229,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             inflight = conn.execute(
                 "SELECT id, assignee, claim_lock, claim_expires, worker_pid, "
                 "       max_runtime_seconds, last_heartbeat_at, started_at, "
-                "       olympus_context "
+                "       olympus_context, record_revision "
                 "FROM tasks "
                 "WHERE status = 'running' AND current_run_id IS NULL"
             ).fetchall()
@@ -2598,14 +6241,18 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         task_id, profile, status,
                         claim_lock, claim_expires, worker_pid,
                         max_runtime_seconds, last_heartbeat_at,
-                        started_at, olympus_context
-                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+                        started_at, olympus_context, subject_revision
+                    ) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["id"], row["assignee"], row["claim_lock"],
                         row["claim_expires"], row["worker_pid"],
                         row["max_runtime_seconds"], row["last_heartbeat_at"],
                         started, row["olympus_context"],
+                        (
+                            int(row["record_revision"])
+                            if row["olympus_context"] is not None else None
+                        ),
                     ),
                 )
                 # CAS: only install the pointer if nothing else claimed
@@ -2684,10 +6331,17 @@ _REBUILD_SPECS = {
         " worker_pid INTEGER, max_runtime_seconds INTEGER,"
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
-        " error TEXT, olympus_context TEXT)",
+        " error TEXT, olympus_context TEXT, subject_revision INTEGER,"
+        " process_state TEXT NOT NULL DEFAULT 'legacy', launch_token TEXT,"
+        " workspace_snapshot TEXT, auth_root_id TEXT, auth_root_revision INTEGER,"
+        " verification_id TEXT, worker_host_id TEXT, worker_boot_id TEXT,"
+        " worker_start_token TEXT, worker_registered_at INTEGER,"
+        " dispatcher_instance_id TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
+            "CREATE UNIQUE INDEX idx_runs_launch_token ON task_runs(launch_token) "
+            "WHERE launch_token IS NOT NULL",
         ),
     ),
     "kanban_notify_subs": (
@@ -2720,26 +6374,83 @@ def _table_has_drifted(conn: sqlite3.Connection, table: str) -> bool:
 def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
     """Rebuild any kanban table whose column types drifted from SCHEMA_SQL.
 
-    Old boards crash the gateway notifier (``int(None)`` on a NULL id in
-    ``unseen_events_for_sub``) and never match the ``id > cursor`` filter, so
-    every kanban notification is silently lost (#35096). Each affected table is
-    rebuilt with the standard SQLite pattern — CREATE new → INSERT shared
-    columns → DROP old → RENAME — recreating its indexes too (DROP TABLE takes
-    them down). The legacy TEXT ids are dropped (they aren't valid integers);
-    AUTOINCREMENT assigns fresh ones and ``last_event_id`` cursors reset to 0,
-    so the first post-migration tick replays a task's event history once —
-    the safe failure mode for a feature that was already fully broken.
-
-    The whole pass runs in one transaction so an interruption can't leave a
-    table half-renamed, and under ``connect()``'s init locks so nothing races
-    it. Idempotent: a correctly-typed DB skips every table and returns without
-    opening a transaction.
+    Every legacy run/event id is mapped deterministically in rowid order and
+    every dependent reference is remapped in the same transaction. Missing,
+    duplicate, or otherwise unmappable identities abort the whole migration;
+    notification cursors are preserved exactly instead of replaying history.
     """
-    drifted = [t for t in _REBUILD_SPECS if _table_has_drifted(conn, t)]
+    order = ("task_runs", "task_events", "task_comments", "kanban_notify_subs")
+    drifted = [table for table in order if _table_has_drifted(conn, table)]
     if not drifted:
         return
 
+    def identity_key(value: Any, *, table: str) -> str:
+        if value is None:
+            raise sqlite3.IntegrityError(
+                f"kanban migration: {table} contains an unmappable NULL id"
+            )
+        return str(value)
+
+    legacy_ids: dict[str, set[str]] = {}
+    for table in ("task_runs", "task_events"):
+        if table not in drifted:
+            continue
+        keys: set[str] = set()
+        for row in conn.execute(f"SELECT id FROM {table} ORDER BY rowid"):
+            key = identity_key(row["id"], table=table)
+            if key in keys:
+                raise sqlite3.IntegrityError(
+                    f"kanban migration: {table} contains duplicate id {key!r}"
+                )
+            keys.add(key)
+        legacy_ids[table] = keys
+
+    def require_mappable(
+        query: str, keys: set[str], *, label: str,
+    ) -> None:
+        for row in conn.execute(query):
+            value = row[0]
+            if value is not None and str(value) not in keys:
+                raise sqlite3.IntegrityError(
+                    f"kanban migration: unmappable {label} reference {value!r}"
+                )
+
+    if "task_runs" in drifted:
+        run_keys = legacy_ids["task_runs"]
+        require_mappable(
+            "SELECT current_run_id FROM tasks WHERE current_run_id IS NOT NULL",
+            run_keys,
+            label="tasks.current_run_id",
+        )
+        require_mappable(
+            "SELECT run_id FROM task_events WHERE run_id IS NOT NULL",
+            run_keys,
+            label="task_events.run_id",
+        )
+        require_mappable(
+            "SELECT run_id FROM kanban_effect_journal WHERE run_id IS NOT NULL",
+            run_keys,
+            label="kanban_effect_journal.run_id",
+        )
+    if "task_events" in drifted:
+        event_keys = legacy_ids["task_events"]
+        require_mappable(
+            "SELECT event_id FROM kanban_effect_journal WHERE event_id IS NOT NULL",
+            event_keys,
+            label="kanban_effect_journal.event_id",
+        )
+        require_mappable(
+            "SELECT last_event_id FROM kanban_notify_subs "
+            "WHERE last_event_id IS NOT NULL AND CAST(last_event_id AS TEXT) != '0'",
+            event_keys,
+            label="kanban_notify_subs.last_event_id",
+        )
+
+    conn._olympus_schema_migration_depth = (
+        int(getattr(conn, "_olympus_schema_migration_depth", 0)) + 1
+    )
     conn.execute("BEGIN IMMEDIATE")
+    maps: dict[str, dict[str, int]] = {}
     try:
         for table in drifted:
             create_sql, index_sqls = _REBUILD_SPECS[table]
@@ -2748,26 +6459,84 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
             conn.execute(create_sql)
             new_cols = {c["name"] for c in conn.execute(f"PRAGMA table_info({table})")}
-            if table == "kanban_notify_subs":
-                # Cast the legacy TEXT cursor to INTEGER; NULL / non-numeric → 0.
-                shared = [c for c in old_cols if c in new_cols and c != "last_event_id"]
-                cols_csv = ", ".join(shared)
-                conn.execute(
-                    f"INSERT INTO {table} ({cols_csv}, last_event_id) "
-                    f"SELECT {cols_csv}, COALESCE(CAST(last_event_id AS INTEGER), 0) "
-                    f"FROM {table}_legacy"
+            shared = [column for column in old_cols if column in new_cols]
+            if table in {"task_runs", "task_events", "task_comments"}:
+                shared = [column for column in shared if column != "id"]
+            table_map: dict[str, int] = {}
+            rows = conn.execute(
+                f"SELECT rowid AS __legacy_rowid, * FROM {table}_legacy "
+                "ORDER BY rowid"
+            ).fetchall()
+            for row in rows:
+                values = []
+                for column in shared:
+                    value = row[column]
+                    if table == "task_events" and column == "run_id" \
+                            and value is not None and "task_runs" in maps:
+                        value = maps["task_runs"][str(value)]
+                    if table == "kanban_notify_subs" and column == "last_event_id":
+                        if value is None or str(value) == "0":
+                            value = 0
+                        elif "task_events" in maps:
+                            value = maps["task_events"][str(value)]
+                        else:
+                            try:
+                                value = int(value)
+                            except (TypeError, ValueError) as exc:
+                                raise sqlite3.IntegrityError(
+                                    "kanban migration: notification cursor is not integer"
+                                ) from exc
+                    values.append(value)
+                columns_csv = ", ".join(shared)
+                placeholders = ", ".join("?" for _ in shared)
+                cur = conn.execute(
+                    f"INSERT INTO {table} ({columns_csv}) VALUES ({placeholders})",
+                    values,
                 )
-            else:
-                # Drop the legacy TEXT id; AUTOINCREMENT reassigns it.
-                shared = [c for c in old_cols if c in new_cols and c != "id"]
-                cols_csv = ", ".join(shared)
-                conn.execute(
-                    f"INSERT INTO {table} ({cols_csv}) "
-                    f"SELECT {cols_csv} FROM {table}_legacy"
-                )
+                if table in {"task_runs", "task_events"}:
+                    table_map[identity_key(row["id"], table=table)] = int(
+                        cur.lastrowid
+                    )
+            if table_map:
+                maps[table] = table_map
             conn.execute(f"DROP TABLE {table}_legacy")
             for index_sql in index_sqls:
                 conn.execute(index_sql)
+
+            failpoint = _OLYMPUS_REBUILD_FAILPOINT
+            if callable(failpoint):
+                failpoint(table)
+
+        if "task_runs" in maps:
+            for old_id, new_id in maps["task_runs"].items():
+                conn.execute(
+                    "UPDATE tasks SET current_run_id=? "
+                    "WHERE CAST(current_run_id AS TEXT)=?",
+                    (new_id, old_id),
+                )
+                if "task_events" not in maps:
+                    conn.execute(
+                        "UPDATE task_events SET run_id=? WHERE CAST(run_id AS TEXT)=?",
+                        (new_id, old_id),
+                    )
+                conn.execute(
+                    "UPDATE kanban_effect_journal SET run_id=? "
+                    "WHERE CAST(run_id AS TEXT)=?",
+                    (new_id, old_id),
+                )
+        if "task_events" in maps:
+            for old_id, new_id in maps["task_events"].items():
+                conn.execute(
+                    "UPDATE kanban_effect_journal SET event_id=? "
+                    "WHERE CAST(event_id AS TEXT)=?",
+                    (new_id, old_id),
+                )
+                if "kanban_notify_subs" not in drifted:
+                    conn.execute(
+                        "UPDATE kanban_notify_subs SET last_event_id=? "
+                        "WHERE CAST(last_event_id AS TEXT)=?",
+                        (new_id, old_id),
+                    )
         conn.execute("COMMIT")
     except Exception:
         try:
@@ -2775,6 +6544,11 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
         raise
+    finally:
+        conn._olympus_schema_migration_depth = max(
+            0, int(getattr(conn, "_olympus_schema_migration_depth", 1)) - 1,
+        )
+    _install_olympus_write_guard(conn)
 
 
 def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
@@ -2828,7 +6602,50 @@ def write_txn(conn: sqlite3.Connection):
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
+    managed_connection = isinstance(conn, _KanbanConnection)
+    depth = int(getattr(conn, "_olympus_managed_txn_depth", 0))
+    if conn.in_transaction:
+        if depth <= 0:
+            if not managed_connection:
+                # Migration utilities historically accept a plain stdlib
+                # connection. Such a connection cannot hold Olympus intents;
+                # preserve its caller-owned transaction without attaching
+                # attributes that the C extension type does not support.
+                yield conn
+                return
+            # Preserve ordinary external transaction compatibility, but mark
+            # it so governed permit issuance fails closed.  A caller-owned
+            # transaction may not retain an ALLOW after a helper returns.
+            previous = bool(getattr(conn, "_olympus_external_txn", False))
+            conn._olympus_external_txn = True
+            try:
+                yield conn
+            finally:
+                conn._olympus_external_txn = previous
+            return
+        conn._olympus_managed_txn_depth = depth + 1
+        try:
+            yield conn
+        finally:
+            conn._olympus_managed_txn_depth = depth
+        return
+    registry = getattr(conn, "_olympus_permit_registry", None)
+    audit_registry = getattr(conn, "_olympus_audit_registry", None)
+    if registry:
+        registry.clear()
+        raise OlympusContextError(
+            "olympus_permit_lifecycle_invalid",
+            "an authority permit survived its composing transaction",
+        )
+    if audit_registry:
+        audit_registry.clear()
+        raise OlympusContextError(
+            "olympus_audit_lifecycle_invalid",
+            "a protected audit permit survived its composing transaction",
+        )
     conn.execute("BEGIN IMMEDIATE")
+    if managed_connection:
+        conn._olympus_managed_txn_depth = 1
     try:
         yield conn
     except Exception:
@@ -2839,12 +6656,1178 @@ def write_txn(conn: sqlite3.Connection):
             # under EIO, lock contention, or corruption). Nothing to undo;
             # do not let this secondary failure shadow the real one.
             pass
+        if registry is not None:
+            registry.clear()
+        if audit_registry is not None:
+            audit_registry.clear()
         raise
     else:
+        # Intents are process-local and transaction-scoped.  They may cover a
+        # composed operation with several guarded statements, but they must
+        # never survive the outer transaction boundary where a later caller
+        # could reuse an old ALLOW.
+        if registry is not None:
+            registry.clear()
+        if audit_registry is not None:
+            audit_registry.clear()
         conn.execute("COMMIT")
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
+    finally:
+        if managed_connection:
+            conn._olympus_managed_txn_depth = 0
+
+
+@contextlib.contextmanager
+def olympus_mutation_scope(auth: Optional[OlympusMutationAuth]):
+    """Bind trusted authority context for one composed Kanban operation."""
+    token = _OLYMPUS_MUTATION_AUTH.set(auth)
+    try:
+        yield
+    finally:
+        _OLYMPUS_MUTATION_AUTH.reset(token)
+
+
+def _load_authorization_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    target_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Load and bind a Telegram-selected authorization root transactionally."""
+    root_id = str(root_id).strip()
+    if not root_id:
+        raise OlympusContextError(
+            "olympus_authorization_root_invalid",
+            "Telegram authorization root id is required",
+        )
+    row = conn.execute(
+        "SELECT id, assignee, status, record_revision, olympus_context "
+        "FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    if row is None or row["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_authorization_root_missing",
+            "Telegram authorization root is missing or ungoverned",
+        )
+    root_context = _require_current_olympus_context(
+        row["olympus_context"], assignee=row["assignee"],
+    )
+    if root_context is None:
+        raise OlympusContextError(
+            "olympus_authorization_root_missing",
+            "Telegram authorization root is ungoverned",
+        )
+    if any(
+        root_context[key] != target_context[key]
+        for key in ("goal_id", "program_id", "milestone_id", "mission_id")
+    ):
+        raise OlympusContextError(
+            "olympus_authorization_root_foreign",
+            "Telegram target is outside the selected authorization hierarchy",
+        )
+    return {
+        "id": str(row["id"]),
+        "record_revision": int(row["record_revision"]),
+        "status": str(row["status"]),
+        "assignee": str(row["assignee"] or ""),
+        "context": root_context,
+    }
+
+
+def _telegram_target_identity(
+    conn: sqlite3.Connection,
+    *,
+    authorization_task_id: str,
+    target_task_id: str,
+    action: str,
+    target_context: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the exact live Telegram authorization-root/target binding."""
+    root = _load_authorization_root(
+        conn,
+        root_id=authorization_task_id,
+        target_context=target_context,
+    )
+    target = conn.execute(
+        "SELECT id, assignee, status, record_revision, olympus_context "
+        "FROM tasks WHERE id = ?",
+        (str(target_task_id).strip(),),
+    ).fetchone()
+    if target is None or target["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_control_target_missing",
+            "Telegram target is missing or ungoverned",
+        )
+    raw_target_context: Any = target["olympus_context"]
+    if isinstance(raw_target_context, str):
+        try:
+            raw_target_context = json.loads(raw_target_context)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OlympusContextError(
+                "olympus_context_invalid",
+                "Telegram target context is not valid JSON",
+            ) from exc
+    target_normalized = normalize_olympus_context(raw_target_context)
+    if any(
+        target_normalized[key] != root["context"][key]
+        for key in (
+            "goal_id", "program_id", "milestone_id", "mission_id",
+            "workstream_id",
+        )
+    ):
+        raise OlympusContextError(
+            "olympus_authorization_root_foreign",
+            "Telegram target is outside the selected authorization hierarchy",
+        )
+    target_lease = target_normalized["lease"]
+    target_assignee = str(target["assignee"] or "")
+    if not (
+        target_normalized["agent_id"]
+        == target_lease["agent_id"]
+        == target_lease["holder"]
+        == target_assignee
+    ):
+        raise OlympusContextError(
+            "olympus_agent_mismatch",
+            "Telegram target lease, delegated agent, and assignee do not match",
+        )
+    authority = target_normalized["authority"]
+    identity = {
+        "authorization_subject_id": root["id"],
+        "authorization_subject_revision": root["record_revision"],
+        "authorization_subject_status": root["status"],
+        "control_action": action,
+        "task_id": str(target["id"]),
+        "task_record_revision": int(target["record_revision"]),
+        "goal_id": target_normalized["goal_id"],
+        "program_id": target_normalized["program_id"],
+        "milestone_id": target_normalized["milestone_id"],
+        "mission_id": target_normalized["mission_id"],
+        "workstream_id": target_normalized["workstream_id"],
+        "agent_id": target_normalized["agent_id"],
+        "assignee": target_assignee,
+        "status": str(target["status"]),
+        "authority_id": authority["authority_id"],
+        "authority_revision": authority["revision"],
+        "authority_status": authority["status"],
+        "authority_source": authority["source"],
+        "lease_id": target_lease["lease_id"],
+        "lease_revision": target_lease["revision"],
+        "lease_status": target_lease["status"],
+        "lease_source": target_lease["source"],
+        "lease_agent_id": target_lease["agent_id"],
+        "lease_holder": target_lease["holder"],
+    }
+    return identity, root
+
+
+def _authorization_root_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    principal: OlympusMutationAuth,
+    target_context: dict[str, Any],
+    target_task_id: str,
+    target_record_revision: int,
+    target_status: str,
+    target_assignee: str,
+    action: str,
+) -> Optional[dict[str, Any]]:
+    if principal.target_identity is None:
+        return None
+    try:
+        supplied = _require_exact_keys(
+            principal.target_identity,
+            frozenset(OLYMPUS_TARGET_IDENTITY_KEYS),
+            "target_identity",
+        )
+    except AuthorityContractError as exc:
+        raise OlympusContextError(
+            "olympus_target_identity_invalid", str(exc)
+        ) from exc
+    expected, root = _telegram_target_identity(
+        conn,
+        authorization_task_id=str(supplied["authorization_subject_id"]),
+        target_task_id=target_task_id,
+        action=action,
+        target_context=target_context,
+    )
+    if (
+        supplied != expected
+        or expected["task_record_revision"] != int(target_record_revision)
+        or expected["status"] != target_status
+        or expected["assignee"] != target_assignee
+    ):
+        raise OlympusContextError(
+            "olympus_target_identity_conflict",
+            "Telegram target identity is stale, foreign, or contradictory",
+        )
+    return root
+
+
+def olympus_telegram_auth(
+    conn: sqlite3.Connection,
+    *,
+    verifier: AuthorityVerifier,
+    source_identity: Mapping[str, Any],
+    authorization_task_id: str,
+    target_task_id: str,
+    action: str,
+    operation_id: str,
+) -> OlympusMutationAuth:
+    """Build one canonical Telegram principal from authenticated/live state."""
+    if action not in TELEGRAM_ACTION_CAPABILITIES:
+        raise OlympusContextError(
+            "olympus_telegram_action_invalid",
+            "Telegram action is not registered in the frozen authority profile",
+        )
+    if not callable(verifier):
+        raise OlympusContextError(
+            "olympus_authority_verification_unavailable",
+            "canonical authority verifier is unavailable",
+        )
+    try:
+        source = _require_exact_keys(
+            dict(source_identity), frozenset(OLYMPUS_SOURCE_IDENTITY_KEYS),
+            "source_identity",
+        )
+        normalized_source = {
+            "platform": _strict_text(source["platform"], "source_identity.platform"),
+            "bot_id": _strict_text(source["bot_id"], "source_identity.bot_id"),
+            "profile": _strict_text(source["profile"], "source_identity.profile"),
+            "chat_id": _strict_text(source["chat_id"], "source_identity.chat_id"),
+            "thread_id": _strict_string(
+                source["thread_id"], "source_identity.thread_id", allow_empty=True,
+            ),
+            "user_id": _strict_text(source["user_id"], "source_identity.user_id"),
+        }
+    except (AuthorityContractError, TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_source_identity_invalid", str(exc)
+        ) from exc
+    if normalized_source["platform"] != "telegram":
+        raise OlympusContextError(
+            "olympus_source_identity_invalid",
+            "governed Telegram operations require platform=telegram",
+        )
+    target = conn.execute(
+        "SELECT assignee, olympus_context FROM tasks WHERE id = ?",
+        (str(target_task_id).strip(),),
+    ).fetchone()
+    if target is None or target["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_control_target_missing",
+            "Telegram target is missing or ungoverned",
+        )
+    target_context = _require_current_olympus_context(
+        target["olympus_context"], assignee=target["assignee"]
+    )
+    if target_context is None:
+        raise OlympusContextError(
+            "olympus_control_target_missing",
+            "Telegram target is missing or ungoverned",
+        )
+    target_identity, root = _telegram_target_identity(
+        conn,
+        authorization_task_id=authorization_task_id,
+        target_task_id=target_task_id,
+        action=action,
+        target_context=target_context,
+    )
+    return OlympusMutationAuth(
+        verifier=verifier,
+        principal_type="telegram_user",
+        principal_id=(
+            f"telegram:{normalized_source['bot_id']}:"
+            f"{normalized_source['user_id']}"
+        ),
+        principal_source=(
+            f"telegram-bot:{normalized_source['bot_id']}:"
+            f"profile:{normalized_source['profile']}"
+        ),
+        actor=str(root["assignee"]),
+        operation_id=_strict_text(operation_id, "operation_id"),
+        source_identity=normalized_source,
+        target_identity=target_identity,
+    )
+
+
+def olympus_service_auth(
+    conn: sqlite3.Connection,
+    *,
+    verifier: AuthorityVerifier,
+    dispatcher_instance_id: str,
+    actor: str,
+    operation_id: str,
+) -> OlympusMutationAuth:
+    """Build the exact trusted service-dispatcher principal for this board."""
+    if not callable(verifier):
+        raise OlympusContextError(
+            "olympus_authority_verification_unavailable",
+            "canonical authority verifier is unavailable",
+        )
+    board_id = _connection_board_identity(conn)
+    dispatcher = _strict_text(
+        dispatcher_instance_id, "dispatcher_instance_id"
+    )
+    return OlympusMutationAuth(
+        verifier=verifier,
+        principal_type="service",
+        principal_id=f"kanban-service-dispatcher:{board_id}:{dispatcher}",
+        principal_source=f"kanban-dispatcher:{board_id}:{dispatcher}",
+        actor=_strict_text(actor, "actor"),
+        operation_id=_strict_text(operation_id, "operation_id"),
+    )
+
+
+def verify_olympus_telegram_task(
+    conn: sqlite3.Connection,
+    *,
+    authorization_task_id: str,
+    target_task_id: str,
+    action: str,
+    verifier: AuthorityVerifier,
+    source_identity: Mapping[str, Any],
+    operation_id: str,
+) -> dict[str, Any]:
+    """Freshly verify one exact Telegram action without mutating task state."""
+    auth = olympus_telegram_auth(
+        conn,
+        verifier=verifier,
+        source_identity=source_identity,
+        authorization_task_id=authorization_task_id,
+        target_task_id=target_task_id,
+        action=action,
+        operation_id=operation_id,
+    )
+    with olympus_mutation_scope(auth), write_txn(conn):
+        authorization, owns = _authorize_task_mutation(
+            conn,
+            target_task_id,
+            action=action,
+            capability=TELEGRAM_ACTION_CAPABILITIES[action],
+            auth=auth,
+            allow_inactive_target=action in TELEGRAM_EMERGENCY_ACTIONS,
+        )
+        try:
+            row = conn.execute(
+                "SELECT id, status, record_revision, assignee, olympus_context "
+                "FROM tasks WHERE id = ?",
+                (target_task_id,),
+            ).fetchone()
+            if row is None:
+                raise OlympusContextError(
+                    "olympus_task_missing", "verified Telegram target disappeared"
+                )
+            current_context = _require_current_olympus_context(
+                row["olympus_context"], assignee=row["assignee"]
+            )
+            if current_context is None:
+                raise OlympusContextError(
+                    "olympus_control_target_missing",
+                    "verified Telegram target became ungoverned",
+                )
+            return {
+                "task_id": str(row["id"]),
+                "status": str(row["status"]),
+                "record_revision": int(row["record_revision"]),
+                "assignee": str(row["assignee"] or ""),
+                "context": current_context,
+                "verification": authorization["verification"],
+                "request": authorization["request"],
+            }
+        finally:
+            _release_task_mutation_permit(conn, target_task_id, owns)
+
+
+def _insert_issued_permit(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    subject_revision: int,
+    operation_id: str,
+    action: str,
+    capability: str,
+    auth_root_id: str,
+    auth_root_revision: int,
+    verification_id: str,
+    write_binding: Optional[Mapping[str, Any]] = None,
+) -> None:
+    registry = getattr(conn, "_olympus_permit_registry", None)
+    if registry is None:
+        raise OlympusContextError(
+            "olympus_permit_registry_missing",
+            "process-local permit registry is unavailable",
+        )
+    if bool(getattr(conn, "_olympus_external_txn", False)) \
+            or int(getattr(conn, "_olympus_managed_txn_depth", 0)) <= 0:
+        raise OlympusContextError(
+            "olympus_external_transaction_forbidden",
+            "governed permits require one Hermes-owned composing transaction",
+        )
+    encoded_binding = None
+    if write_binding is not None:
+        try:
+            encoded_binding = json.dumps(
+                dict(write_binding),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise OlympusContextError(
+                "olympus_permit_binding_invalid",
+                "process-local permit binding is not canonical JSON",
+            ) from exc
+    issued = (
+        int(subject_revision), str(operation_id), str(action), str(capability),
+        str(auth_root_id), int(auth_root_revision), str(verification_id),
+        encoded_binding,
+    )
+    existing = registry.get(str(task_id))
+    if existing is not None and existing != issued:
+        raise OlympusContextError(
+            "olympus_permit_scope_conflict",
+            "an issued permit cannot be retained or rebound",
+        )
+    registry[str(task_id)] = issued
+
+
+def _bind_issued_permit_write(
+    conn: sqlite3.Connection,
+    task_id: str,
+    write_binding: Mapping[str, Any],
+) -> None:
+    """Attach one exact immutable SQL row intent to an active permit."""
+    registry = getattr(conn, "_olympus_permit_registry", None)
+    issued = None if registry is None else registry.get(str(task_id))
+    if issued is None:
+        raise OlympusContextError(
+            "olympus_permit_registry_missing",
+            "receipt binding requires an active exact permit",
+        )
+    try:
+        encoded = json.dumps(
+            dict(write_binding), sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_permit_binding_invalid",
+            "receipt binding is not canonical JSON",
+        ) from exc
+    if issued[7] is not None and issued[7] != encoded:
+        raise OlympusContextError(
+            "olympus_permit_scope_conflict",
+            "an issued permit cannot be rebound to another SQL row",
+        )
+    registry[str(task_id)] = (*issued[:7], encoded)
+
+
+def _issued_permit_row(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[dict[str, Any]]:
+    registry = getattr(conn, "_olympus_permit_registry", None)
+    issued = None if registry is None else registry.get(str(task_id))
+    if issued is None:
+        return None
+    return {
+        "subject_revision": int(issued[0]), "operation_id": str(issued[1]),
+        "action": str(issued[2]), "capability": str(issued[3]),
+        "auth_root_id": str(issued[4]), "auth_root_revision": int(issued[5]),
+        "verification_id": str(issued[6]),
+        "write_binding": (
+            None if issued[7] is None else json.loads(str(issued[7]))
+        ),
+    }
+
+
+def olympus_worker_runtime_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    worker_task_id: str,
+    run_id: int,
+    claim_lock: str,
+    now: Optional[int] = None,
+) -> dict[str, Any]:
+    """Return the exact live worker identity used by trusted tool hooks.
+
+    All inputs come from dispatcher-owned process state, never a model tool
+    payload.  The returned snapshot is revalidated inside every governed
+    mutation so a reclaimed or superseded worker cannot reuse an old binding.
+    """
+    if (
+        not isinstance(worker_task_id, str)
+        or not worker_task_id.strip()
+        or isinstance(run_id, bool)
+        or not isinstance(run_id, int)
+        or run_id <= 0
+        or not isinstance(claim_lock, str)
+        or not claim_lock.strip()
+    ):
+        raise OlympusContextError(
+            "olympus_runtime_identity_invalid",
+            "worker task, run, and claim identities are required",
+        )
+    row = conn.execute(
+        "SELECT t.id AS worker_task_id, t.record_revision AS worker_task_revision, "
+        "t.status AS worker_status, t.assignee AS worker_assignee, "
+        "t.claim_lock, t.claim_expires, t.current_run_id, t.olympus_context, "
+        "r.id AS run_id, r.subject_revision AS run_subject_revision, "
+        "r.status AS run_status, r.claim_lock AS run_claim_lock, "
+        "r.claim_expires AS run_claim_expires, r.ended_at, "
+        "r.olympus_context AS run_olympus_context, r.process_state, "
+        "r.worker_pid, r.worker_host_id, r.worker_boot_id, "
+        "r.worker_start_token, r.dispatcher_instance_id "
+        "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.id = ? AND r.id = ?",
+        (worker_task_id.strip(), int(run_id)),
+    ).fetchone()
+    current = int(time.time()) if now is None else int(now)
+    if (
+        row is None
+        or row["olympus_context"] is None
+        or row["worker_status"] != "running"
+        or row["run_status"] != "running"
+        or row["process_state"] != "registered"
+        or row["ended_at"] is not None
+        or row["claim_lock"] != claim_lock
+        or row["run_claim_lock"] != claim_lock
+        or row["claim_expires"] is None
+        or row["run_claim_expires"] is None
+        or int(row["claim_expires"]) <= current
+        or int(row["run_claim_expires"]) <= current
+        or row["run_subject_revision"] is None
+        or row["worker_pid"] is None
+        or not row["worker_host_id"]
+        or not row["worker_boot_id"]
+        or not row["worker_start_token"]
+        or not row["dispatcher_instance_id"]
+    ):
+        raise OlympusContextError(
+            "olympus_runtime_identity_stale",
+            "worker task, run, or claim identity is no longer current",
+        )
+    task_context = _require_current_olympus_context(
+        row["olympus_context"],
+        assignee=row["worker_assignee"],
+        now=current,
+    )
+    assert task_context is not None
+    run_context = _require_matching_olympus_run_context(
+        row["run_olympus_context"],
+        task_context=task_context,
+        assignee=row["worker_assignee"],
+        now=current,
+        run_subject_revision=row["run_subject_revision"],
+        task_record_revision=int(row["worker_task_revision"]),
+    )
+    if run_context is None:
+        raise OlympusContextError(
+            "olympus_run_context_mismatch",
+            "registered worker run lacks governed context",
+        )
+    stored_process = ProcessIdentity(
+        host_id=str(row["worker_host_id"]),
+        boot_id=str(row["worker_boot_id"]),
+        pid=int(row["worker_pid"]),
+        start_token=str(row["worker_start_token"]),
+    )
+    if read_process_identity(stored_process.pid) != stored_process:
+        raise OlympusContextError(
+            "olympus_runtime_process_mismatch",
+            "registered worker process identity is no longer live",
+        )
+    return {
+        "board_id": _connection_board_identity(conn),
+        "worker_task_id": str(row["worker_task_id"]),
+        "worker_task_revision": int(row["worker_task_revision"]),
+        "worker_status": str(row["worker_status"]),
+        "worker_assignee": str(row["worker_assignee"] or ""),
+        "run_id": int(row["run_id"]),
+        "run_subject_revision": int(row["run_subject_revision"]),
+        "run_status": str(row["run_status"]),
+        "claim_lock": str(row["claim_lock"]),
+        "claim_expires": min(
+            int(row["claim_expires"]), int(row["run_claim_expires"]),
+        ),
+        "process_state": str(row["process_state"]),
+        "host_id": stored_process.host_id,
+        "boot_id": stored_process.boot_id,
+        "pid": stored_process.pid,
+        "start_token": stored_process.start_token,
+        "dispatcher_instance_id": str(row["dispatcher_instance_id"]),
+    }
+
+
+def olympus_notifier_identity_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+    source_event_id: int,
+    effect_id: str,
+    effect_state: str,
+    gateway_process_identity: ProcessIdentity,
+) -> dict[str, Any]:
+    """Return one exact subscription/event/effect/gateway identity."""
+    if read_process_identity(gateway_process_identity.pid) != gateway_process_identity:
+        raise OlympusContextError(
+            "olympus_notifier_process_mismatch",
+            "notifier gateway process identity is not live",
+        )
+    row = conn.execute(
+        "SELECT s.*, t.record_revision AS task_record_revision, "
+        "t.olympus_context FROM kanban_notify_subs s "
+        "JOIN tasks t ON t.id = s.task_id "
+        "WHERE s.task_id = ? AND s.platform = ? AND s.chat_id = ? "
+        "AND s.thread_id = ?",
+        (task_id, platform, chat_id, thread_id or ""),
+    ).fetchone()
+    if row is None or row["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_notifier_identity_missing",
+            "governed notification subscription is missing",
+        )
+    event = conn.execute(
+        "SELECT 1 FROM task_events WHERE id = ? AND task_id = ?",
+        (int(source_event_id), task_id),
+    ).fetchone()
+    if event is None:
+        raise OlympusContextError(
+            "olympus_notifier_event_missing",
+            "notification source event does not belong to the task",
+        )
+    if effect_state == "unreserved":
+        effect = None
+    else:
+        effect = conn.execute(
+            "SELECT state, event_id FROM kanban_effect_journal "
+            "WHERE operation_id = ? AND task_id = ? "
+            "AND effect_kind IN ('notify_text','notify_artifact')",
+            (effect_id, task_id),
+        ).fetchone()
+        if (
+            effect is None
+            or str(effect["state"]) != effect_state
+            or int(effect["event_id"]) != int(source_event_id)
+        ):
+            raise OlympusContextError(
+                "olympus_notifier_effect_conflict",
+                "notification effect identity is not current",
+            )
+    return {
+        "board_id": _connection_board_identity(conn),
+        "task_id": str(row["task_id"]),
+        "task_record_revision": int(row["task_record_revision"]),
+        "platform": str(row["platform"]),
+        "chat_id": str(row["chat_id"]),
+        "thread_id": str(row["thread_id"] or ""),
+        "user_id": (str(row["user_id"]) if row["user_id"] is not None else None),
+        "notifier_profile": (
+            str(row["notifier_profile"])
+            if row["notifier_profile"] is not None else None
+        ),
+        "created_at": int(row["created_at"]),
+        "last_event_id": int(row["last_event_id"]),
+        "source_event_id": int(source_event_id),
+        "effect_id": str(effect_id),
+        "effect_state": str(effect_state),
+        "gateway_host_id": gateway_process_identity.host_id,
+        "gateway_boot_id": gateway_process_identity.boot_id,
+        "gateway_pid": gateway_process_identity.pid,
+        "gateway_start_token": gateway_process_identity.start_token,
+    }
+
+
+def olympus_notifier_auth(
+    conn: sqlite3.Connection,
+    *,
+    verifier: AuthorityVerifier,
+    task_id: str,
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    source_event_id: int,
+    effect_id: str,
+    effect_state: str,
+    gateway_process_identity: ProcessIdentity,
+    action: str,
+) -> OlympusMutationAuth:
+    """Build the canonical notifier principal from persisted/live identity."""
+    if action not in NOTIFICATION_PRINCIPAL_ACTIONS:
+        raise OlympusContextError(
+            "olympus_notifier_action_invalid",
+            "action is not bound to the canonical notifier principal",
+        )
+    identity = olympus_notifier_identity_snapshot(
+        conn,
+        task_id=task_id,
+        platform=platform,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        source_event_id=source_event_id,
+        effect_id=effect_id,
+        effect_state=effect_state,
+        gateway_process_identity=gateway_process_identity,
+    )
+    destination = ":".join((
+        identity["platform"], identity["chat_id"],
+        identity["thread_id"] or "", identity["user_id"] or "",
+    ))
+    return OlympusMutationAuth(
+        verifier=verifier,
+        principal_type="kanban_notifier",
+        principal_id=(
+            f"kanban-notifier:{identity['board_id']}:{task_id}:"
+            f"{destination}:{effect_id}"
+        ),
+        principal_source=(
+            f"kanban-gateway:{identity['gateway_host_id']}:"
+            f"{identity['gateway_boot_id']}:{identity['gateway_pid']}:"
+            f"{identity['gateway_start_token']}"
+        ),
+        operation_id=f"notifier:{effect_id}:{action}",
+        notifier_identity=identity,
+    )
+
+
+def _authorize_task_mutation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    capability: str,
+    auth: Optional[OlympusMutationAuth] = None,
+    context_override: Optional[dict[str, Any]] = None,
+    operation_binding: Optional[dict[str, Any]] = None,
+    mutation_binding: Optional[dict[str, Any]] = None,
+    allow_inactive: bool = False,
+    allow_inactive_target: bool = False,
+) -> tuple[Optional[dict[str, Any]], bool]:
+    """Issue a DB-enforced permit for one exact governed task revision.
+
+    Returns ``(authorization, owns_permit)``. Ordinary tasks return
+    ``(None, False)`` without consulting an issuer. A nested helper reuses the
+    permit belonging to the same composed operation, never across calls.
+    """
+    row = conn.execute(
+        "SELECT id, assignee, status, record_revision, olympus_context "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["olympus_context"] is None:
+        return None, False
+    bound = auth or _OLYMPUS_MUTATION_AUTH.get()
+    if bound is None:
+        raise OlympusContextError(
+            "olympus_authority_verification_unavailable",
+            "canonical authority verifier is unavailable",
+        )
+    revision = int(row["record_revision"])
+    write_binding: Optional[dict[str, Any]] = None
+    exact_mutation_binding: Optional[dict[str, Any]] = None
+    if action in SUBSCRIPTION_REGISTRATION_ACTIONS:
+        if operation_binding is None:
+            raise OlympusContextError(
+                "olympus_subscription_binding_missing",
+                "governed subscription registration requires exact add intent",
+            )
+        try:
+            write_binding = _normalize_notification_subscription_operation_binding(
+                operation_binding,
+                target={
+                    "subject_id": task_id,
+                    "subject_revision": revision,
+                },
+                board_id=_connection_board_identity(conn),
+            )
+        except (AuthorityContractError, TypeError, ValueError) as exc:
+            raise OlympusContextError(
+                "olympus_subscription_binding_invalid", str(exc)
+            ) from exc
+    elif operation_binding is not None:
+        raise OlympusContextError(
+            "olympus_subscription_binding_forbidden",
+            "an add-only subscription binding cannot authorize another action",
+        )
+    if mutation_binding is not None:
+        try:
+            exact_mutation_binding = _normalize_exact_mutation_binding(
+                mutation_binding,
+                action=action,
+                task_id=task_id,
+                task_record_revision=revision,
+            )
+        except (AuthorityContractError, TypeError, ValueError) as exc:
+            raise OlympusContextError(
+                "olympus_mutation_binding_invalid", str(exc)
+            ) from exc
+    elif action in _EXACT_MUTATION_BINDING_ACTIONS:
+        raise OlympusContextError(
+            "olympus_mutation_binding_missing",
+            "governed mutation requires an exact process-local write binding",
+        )
+    intent_key = (action, capability)
+    if intent_key not in _OLYMPUS_TASK_WRITE_COLUMNS:
+        raise OlympusContextError(
+            "olympus_write_intent_unknown",
+            "governed mutation has no registered task write intent",
+        )
+    if bound.runtime_identity is not None:
+        runtime = bound.runtime_identity
+        try:
+            live_runtime = olympus_worker_runtime_snapshot(
+                conn,
+                worker_task_id=str(runtime.get("worker_task_id", "")),
+                run_id=runtime.get("run_id"),
+                claim_lock=str(runtime.get("claim_lock", "")),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OlympusContextError(
+                "olympus_runtime_identity_invalid",
+                "worker runtime identity is invalid",
+            ) from exc
+        if runtime != live_runtime or live_runtime["worker_task_id"] != task_id:
+            raise OlympusContextError(
+                "olympus_runtime_identity_conflict",
+                "worker runtime binding changed or targeted a different task",
+            )
+    if bound.notifier_identity is not None:
+        notifier = bound.notifier_identity
+        try:
+            live_notifier = olympus_notifier_identity_snapshot(
+                conn,
+                task_id=str(notifier.get("task_id", "")),
+                platform=str(notifier.get("platform", "")),
+                chat_id=str(notifier.get("chat_id", "")),
+                thread_id=notifier.get("thread_id"),
+                source_event_id=notifier.get("source_event_id"),
+                effect_id=str(notifier.get("effect_id", "")),
+                effect_state=str(notifier.get("effect_state", "")),
+                gateway_process_identity=ProcessIdentity(
+                    host_id=str(notifier.get("gateway_host_id", "")),
+                    boot_id=str(notifier.get("gateway_boot_id", "")),
+                    pid=int(notifier.get("gateway_pid", 0)),
+                    start_token=str(notifier.get("gateway_start_token", "")),
+                ),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OlympusContextError(
+                "olympus_notifier_identity_invalid",
+                "notifier identity is invalid",
+            ) from exc
+        if notifier != live_notifier or live_notifier["task_id"] != task_id:
+            raise OlympusContextError(
+                "olympus_notifier_identity_conflict",
+                "notifier binding changed before the governed mutation",
+            )
+        if action == "reserve_notification_effect":
+            expected_source, _ = _canonical_effect_payload(
+                _canonical_notifier_effect_source_identity(live_notifier)
+            )
+            expected_destination = ":".join((
+                live_notifier["platform"], live_notifier["chat_id"],
+                live_notifier["thread_id"] or "",
+            ))
+            if (
+                exact_mutation_binding is None
+                or exact_mutation_binding["source_identity"] != expected_source
+                or exact_mutation_binding["event_id"]
+                    != live_notifier["source_event_id"]
+                or exact_mutation_binding["operation_id"]
+                    != live_notifier["effect_id"]
+                or exact_mutation_binding["destination_key"]
+                    != expected_destination
+            ):
+                raise OlympusContextError(
+                    "olympus_effect_binding_conflict",
+                    "effect write intent does not match the live notifier identity",
+                )
+        if exact_mutation_binding is not None:
+            write_binding = {
+                "schema_version": NOTIFIER_MUTATION_WRITE_SCHEMA,
+                "notifier": live_notifier,
+                "mutation": exact_mutation_binding,
+            }
+        else:
+            write_binding = live_notifier
+    elif action in NOTIFICATION_PRINCIPAL_ACTIONS:
+        raise OlympusContextError(
+            "olympus_notifier_identity_missing",
+            "notification delivery mutations require exact notifier identity",
+        )
+    elif exact_mutation_binding is not None:
+        write_binding = exact_mutation_binding
+    existing = _issued_permit_row(conn, task_id)
+    if existing is not None:
+        if (
+            existing["action"] != action
+            or existing["capability"] != capability
+            or existing["write_binding"] != write_binding
+        ):
+            raise OlympusContextError(
+                "olympus_permit_scope_conflict",
+                "an authority permit cannot authorize another action or bound tuple",
+            )
+        return {
+            "subject_revision": int(existing["subject_revision"]),
+            "operation_id": existing["operation_id"],
+            "action": existing["action"],
+        }, False
+    raw_context: Any = context_override
+    if raw_context is None:
+        raw_context = row["olympus_context"]
+    if isinstance(raw_context, str):
+        try:
+            raw_context = json.loads(raw_context)
+        except Exception as exc:
+            raise OlympusContextError(
+                "olympus_context_invalid",
+                "stored Olympus context is not valid JSON",
+            ) from exc
+    normalized_context = normalize_olympus_context(raw_context)
+    authorization_root = _authorization_root_snapshot(
+        conn,
+        principal=bound,
+        target_context=normalized_context,
+        target_task_id=task_id,
+        target_record_revision=revision,
+        target_status=str(row["status"]),
+        target_assignee=str(row["assignee"] or ""),
+        action=action,
+    )
+    target_assignee = str(row["assignee"] or "")
+    if authorization_root is not None:
+        if allow_inactive_target and action not in TELEGRAM_EMERGENCY_ACTIONS:
+            raise OlympusContextError(
+                "olympus_inactive_authority_forbidden",
+                "only interrupt/cancel may contain an inactive target",
+            )
+        if allow_inactive_target:
+            target_lease = normalized_context["lease"]
+            if target_lease["mission_id"] != normalized_context["mission_id"]:
+                raise OlympusContextError(
+                    "olympus_lease_foreign_mission",
+                    "target lease mission does not match target mission",
+                )
+            if not (
+                normalized_context["agent_id"]
+                == target_lease["agent_id"]
+                == target_lease["holder"]
+                == target_assignee
+            ):
+                raise OlympusContextError(
+                    "olympus_agent_mismatch",
+                    "target lease and assignee identities must match exactly",
+                )
+        else:
+            normalized_context = _require_current_olympus_context(
+                normalized_context,
+                assignee=target_assignee,
+            )
+            assert normalized_context is not None
+    root_id = authorization_root["id"] if authorization_root is not None else task_id
+    root_revision = (
+        int(authorization_root["record_revision"])
+        if authorization_root is not None else revision
+    )
+    actor = str(
+        bound.actor
+        or (
+            authorization_root["context"]["lease"]["holder"]
+            if authorization_root is not None
+            else target_assignee
+        )
+    )
+    if action in SUBSCRIPTION_REGISTRATION_ACTIONS:
+        operation_id = notification_subscription_operation_id(write_binding)
+    else:
+        operation_prefix = str(bound.operation_id or "kanban")
+        operation_id = (
+            f"{operation_prefix}:{action}:{root_id}:"
+            f"r{root_revision}:target:{task_id}:r{revision}"
+        )
+    authorization = require_olympus_authority_verification(
+        normalized_context,
+        subject_id=task_id,
+        subject_revision=revision,
+        assignee=target_assignee,
+        action=action,
+        capability=capability,
+        actor=actor,
+        operation_id=operation_id,
+        principal=bound,
+        expected_status=str(row["status"]),
+        authorization_root=authorization_root,
+        allow_inactive=allow_inactive_target,
+        board_id=_connection_board_identity(conn),
+        operation_binding=write_binding if action in SUBSCRIPTION_REGISTRATION_ACTIONS else None,
+    )
+    if action == "register_worker_process":
+        verified_dispatcher = authorization["request"]["principal"].get(
+            "dispatcher_instance_id"
+        )
+        if (
+            exact_mutation_binding is None
+            or verified_dispatcher
+            != exact_mutation_binding["dispatcher_instance_id"]
+        ):
+            raise OlympusContextError(
+                "olympus_dispatcher_identity_conflict",
+                "persisted dispatcher identity does not match verified principal",
+            )
+    _insert_issued_permit(
+        conn,
+        task_id=task_id,
+        subject_revision=revision,
+        operation_id=operation_id,
+        action=action,
+        capability=capability,
+        auth_root_id=root_id,
+        auth_root_revision=root_revision,
+        verification_id=str(
+            authorization["verification"]["verification_id"]
+        ),
+        write_binding=write_binding,
+    )
+    return authorization, True
+
+
+def _release_task_mutation_permit(
+    conn: sqlite3.Connection, task_id: str, owns_permit: bool,
+) -> None:
+    if owns_permit:
+        registry = getattr(conn, "_olympus_permit_registry", None)
+        if registry is not None:
+            registry.pop(str(task_id), None)
+
+
+@contextlib.contextmanager
+def _task_mutation_permit(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    capability: str,
+    auth: Optional[OlympusMutationAuth] = None,
+    context_override: Optional[dict[str, Any]] = None,
+    operation_binding: Optional[dict[str, Any]] = None,
+    mutation_binding: Optional[dict[str, Any]] = None,
+    allow_inactive: bool = False,
+    allow_inactive_target: bool = False,
+):
+    authorization, owns = _authorize_task_mutation(
+        conn,
+        task_id,
+        action=action,
+        capability=capability,
+        auth=auth,
+        context_override=context_override,
+        operation_binding=operation_binding,
+        mutation_binding=mutation_binding,
+        allow_inactive=allow_inactive,
+        allow_inactive_target=allow_inactive_target,
+    )
+    try:
+        yield authorization
+    finally:
+        _release_task_mutation_permit(conn, task_id, owns)
+
+
+def _guarded_task_mutation(
+    *,
+    action: str,
+    capability: str,
+    task_params: tuple[str, ...] = ("task_id",),
+    touch_aggregate: bool = False,
+    success: Optional[Callable[[Any], bool]] = None,
+):
+    """Decorate a public mutator with the central governed write boundary."""
+    def decorate(fn):
+        signature = inspect.signature(fn)
+
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            explicit_auth = kwargs.pop("olympus_auth", None)
+            bound_args = signature.bind(*args, **kwargs)
+            bound_args.apply_defaults()
+            conn = bound_args.arguments.get("conn")
+            if not isinstance(conn, sqlite3.Connection):
+                raise TypeError("guarded Kanban mutation requires a SQLite connection")
+            task_ids = [
+                str(bound_args.arguments[name])
+                for name in task_params
+                if bound_args.arguments.get(name) is not None
+            ]
+            with olympus_mutation_scope(
+                explicit_auth or _OLYMPUS_MUTATION_AUTH.get()
+            ):
+                with write_txn(conn):
+                    permits: list[tuple[str, bool, Optional[dict[str, Any]]]] = []
+                    try:
+                        for tid in dict.fromkeys(task_ids):
+                            operation_binding = None
+                            if action in SUBSCRIPTION_REGISTRATION_ACTIONS:
+                                task_row = conn.execute(
+                                    "SELECT record_revision, olympus_context "
+                                    "FROM tasks WHERE id = ?",
+                                    (tid,),
+                                ).fetchone()
+                                if (
+                                    task_row is not None
+                                    and task_row["olympus_context"] is not None
+                                ):
+                                    operation_binding = {
+                                        "schema_version": (
+                                            NOTIFICATION_SUBSCRIPTION_OPERATION_SCHEMA
+                                        ),
+                                        "action": action,
+                                        "board_id": _connection_board_identity(conn),
+                                        "task_id": tid,
+                                        "task_record_revision": int(
+                                            task_row["record_revision"]
+                                        ),
+                                        "platform": bound_args.arguments["platform"],
+                                        "chat_id": bound_args.arguments["chat_id"],
+                                        "thread_id": (
+                                            bound_args.arguments.get("thread_id") or ""
+                                        ),
+                                        "user_id": bound_args.arguments.get("user_id"),
+                                        "notifier_profile": bound_args.arguments.get(
+                                            "notifier_profile"
+                                        ),
+                                    }
+                            authorization, owns = _authorize_task_mutation(
+                                conn,
+                                tid,
+                                action=action,
+                                capability=capability,
+                                auth=explicit_auth,
+                                operation_binding=operation_binding,
+                            )
+                            permits.append((tid, owns, authorization))
+                        result = fn(*args, **kwargs)
+                        changed = success(result) if success is not None else result is not False
+                        if touch_aggregate and changed:
+                            for tid, _, authorization in permits:
+                                if authorization is not None:
+                                    conn.execute(
+                                        "UPDATE tasks SET record_revision = record_revision "
+                                        "WHERE id = ?",
+                                        (tid,),
+                                    )
+                        return result
+                    finally:
+                        for tid, owns, _ in reversed(permits):
+                            _release_task_mutation_permit(conn, tid, owns)
+
+        return wrapped
+    return decorate
 
 
 # ---------------------------------------------------------------------------
@@ -2887,6 +7870,74 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+def _initial_task_status(
+    conn: sqlite3.Connection,
+    *,
+    parents: Iterable[str],
+    triage: bool,
+    initial_status: str,
+) -> str:
+    """Resolve and validate the exact status a new task will persist."""
+    parent_ids = tuple(parents)
+    if initial_status == "blocked":
+        task_status = "blocked"
+    elif triage:
+        task_status = "triage"
+    else:
+        task_status = "ready"
+    if parent_ids:
+        missing = _find_missing_parents(conn, parent_ids)
+        if missing:
+            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+        if task_status == "ready":
+            rows = conn.execute(
+                "SELECT status FROM tasks WHERE id IN ("
+                + ",".join("?" * len(parent_ids)) + ")",
+                parent_ids,
+            ).fetchall()
+            if any(row["status"] != "done" for row in rows):
+                task_status = "todo"
+    return task_status
+
+
+def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
+    """Return the exact effective per-task skill list used by persistence."""
+    if skills is None:
+        return None
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    toolset_typos: list[str] = []
+    for skill in skills:
+        if not skill:
+            continue
+        name = str(skill).strip()
+        if not name:
+            continue
+        if "," in name:
+            raise ValueError(
+                f"skill name cannot contain comma: {name!r} "
+                "(pass a list of separate names instead of a comma-joined string)"
+            )
+        if name.casefold() in KNOWN_TOOLSET_NAMES:
+            toolset_typos.append(name)
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        cleaned.append(name)
+    if toolset_typos:
+        quoted = ", ".join(repr(name) for name in toolset_typos)
+        noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
+        raise ValueError(
+            f"{quoted} {noun}, not skill name(s). "
+            "Put toolsets in the assignee profile's `toolsets:` config "
+            "instead of per-task skills. Skills are named skill bundles "
+            "(e.g. `kanban-worker`, `blogwatcher`); toolsets are runtime "
+            "capabilities (e.g. `web`, `browser`, `terminal`)."
+        )
+    return cleaned
+
+
 def _create_task_internal(
     conn: sqlite3.Connection,
     *,
@@ -2911,8 +7962,7 @@ def _create_task_internal(
     session_id: Optional[str] = None,
     board: Optional[str] = None,
     olympus_context: Optional[dict[str, Any]] = None,
-    olympus_delivery_key: Optional[str] = None,
-    olympus_delivery_context: Optional[dict[str, Any]] = None,
+    _task_id: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -2994,82 +8044,23 @@ def _create_task_internal(
         _serialize_olympus_context(normalized_olympus)
         if normalized_olympus is not None else None
     )
-    delivery_context_json: Optional[str] = None
-    if olympus_delivery_key is not None or olympus_delivery_context is not None:
-        if normalized_olympus is None:
-            raise OlympusContextError(
-                "olympus_context_missing",
-                "a governed Telegram delivery requires Olympus context",
-            )
-        if not isinstance(olympus_delivery_key, str) or not \
-                olympus_delivery_key.startswith("olympus-telegram:v2:"):
-            raise OlympusContextError(
-                "olympus_delivery_identity_invalid",
-                "governed Telegram delivery identity is invalid",
-            )
-        if not isinstance(olympus_delivery_context, dict) or not olympus_delivery_context:
-            raise OlympusContextError(
-                "olympus_delivery_context_invalid",
-                "governed Telegram delivery context is required",
-            )
-        delivery_context_json = json.dumps(
-            olympus_delivery_context,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
 
     # Normalise + validate skills: strip whitespace, drop empties, dedupe
     # (preserving order). Refuse commas inside a single name so we don't
     # invisibly splatter a comma-joined string into one argv slot — the
     # `hermes --skills X,Y` comma syntax is handled in the dispatcher,
     # not here.
-    skills_list: Optional[list[str]] = None
-    if skills is not None:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        # Collect all toolset-name confusions up front so the user sees the
-        # whole list at once. Raising on the first hit is friendly when the
-        # input has one mistake, but agents that confuse skills with toolsets
-        # usually pass several at once (`skills=["web", "browser", "terminal"]`)
-        # and serial-correcting one per failure round-trips wastes tokens.
-        toolset_typos: list[str] = []
-        for s in skills:
-            if not s:
-                continue
-            name = str(s).strip()
-            if not name:
-                continue
-            if "," in name:
-                raise ValueError(
-                    f"skill name cannot contain comma: {name!r} "
-                    f"(pass a list of separate names instead of a comma-joined string)"
-                )
-            if name.casefold() in KNOWN_TOOLSET_NAMES:
-                toolset_typos.append(name)
-                continue
-            if name in seen:
-                continue
-            seen.add(name)
-            cleaned.append(name)
-        if toolset_typos:
-            quoted = ", ".join(repr(n) for n in toolset_typos)
-            noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
-            raise ValueError(
-                f"{quoted} {noun}, not skill name(s). "
-                "Put toolsets in the assignee profile's `toolsets:` config "
-                "instead of per-task skills. Skills are named skill bundles "
-                "(e.g. `kanban-worker`, `blogwatcher`); toolsets are runtime "
-                "capabilities (e.g. `web`, `browser`, `terminal`)."
-            )
-        skills_list = cleaned
+    # Collect all toolset-name confusions up front so the user sees the whole
+    # list at once, and reuse the same canonical list in governed create
+    # receipts so replay comparison cannot drift from persistence.
+    skills_list = _normalize_task_skills(skills)
 
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
     # and to avoid holding a write lock during the lookup. Race is
     # acceptable: two concurrent creators with the same key might both
     # insert, at which point both rows exist but the next lookup stabilises.
-    if idempotency_key and olympus_delivery_key is None:
+    if idempotency_key:
         row = conn.execute(
             "SELECT id, olympus_context FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' "
@@ -3103,68 +8094,19 @@ def _create_task_internal(
             workspace_path = str(board_default)
 
     # Retry once on the extremely unlikely id collision.
-    for attempt in range(2):
-        task_id = _new_task_id()
+    for attempt in range(1 if _task_id is not None else 2):
+        task_id = _task_id or _new_task_id()
         try:
             with write_txn(conn):
-                if olympus_delivery_key is not None:
-                    existing = conn.execute(
-                        "SELECT d.task_id, d.immutable_context, "
-                        "t.title, t.body, t.assignee, t.created_by, t.session_id, "
-                        "t.idempotency_key, t.olympus_context "
-                        "FROM olympus_telegram_deliveries d "
-                        "LEFT JOIN tasks t ON t.id = d.task_id "
-                        "WHERE d.delivery_key = ?",
-                        (olympus_delivery_key,),
-                    ).fetchone()
-                    if existing is not None:
-                        exact = (
-                            existing["immutable_context"] == delivery_context_json
-                            and existing["title"] == title.strip()
-                            and existing["body"] == body
-                            and existing["assignee"] == assignee
-                            and existing["created_by"] == created_by
-                            and existing["session_id"] == session_id
-                            and existing["idempotency_key"] == olympus_delivery_key
-                            and existing["olympus_context"] == olympus_json
-                        )
-                        if not exact:
-                            raise OlympusContextError(
-                                "olympus_idempotency_context_conflict",
-                                "Telegram delivery identity belongs to a different immutable submission",
-                            )
-                        return str(existing["task_id"])
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.
-                if initial_status == "blocked":
-                    task_status = "blocked"
-                    if parents:
-                        missing = _find_missing_parents(conn, parents)
-                        if missing:
-                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                elif triage:
-                    task_status = "triage"
-                else:
-                    task_status = "ready"
-                    if parents:
-                        missing = _find_missing_parents(conn, parents)
-                        if missing:
-                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
-                        # If any parent is not yet done, we're todo.
-                        rows = conn.execute(
-                            "SELECT status FROM tasks WHERE id IN "
-                            "(" + ",".join("?" * len(parents)) + ")",
-                            parents,
-                        ).fetchall()
-                        if any(r["status"] != "done" for r in rows):
-                            task_status = "todo"
-                # Even in triage mode we still need to validate parent ids
-                # so the eventual link rows don't dangle.
-                if triage and parents:
-                    missing = _find_missing_parents(conn, parents)
-                    if missing:
-                        raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
+                task_status = _initial_task_status(
+                    conn,
+                    parents=parents,
+                    triage=triage,
+                    initial_status=initial_status,
+                )
 
                 conn.execute(
                     """
@@ -3173,8 +8115,8 @@ def _create_task_internal(
                         created_by, created_at, workspace_kind, workspace_path,
                         branch_name, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, goal_mode, goal_max_turns, session_id,
-                        olympus_context
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        olympus_context, record_revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3197,24 +8139,13 @@ def _create_task_internal(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                         olympus_json,
+                        1 if normalized_olympus is not None else 0,
                     ),
                 )
                 for pid in parents:
                     conn.execute(
                         "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                         (pid, task_id),
-                    )
-                if olympus_delivery_key is not None:
-                    conn.execute(
-                        "INSERT INTO olympus_telegram_deliveries "
-                        "(delivery_key, task_id, immutable_context, created_at) "
-                        "VALUES (?, ?, ?, ?)",
-                        (
-                            olympus_delivery_key,
-                            task_id,
-                            delivery_context_json,
-                            now,
-                        ),
                     )
                 _append_event(
                     conn,
@@ -3236,7 +8167,7 @@ def _create_task_internal(
                 )
             return task_id
         except sqlite3.IntegrityError:
-            if attempt == 1:
+            if _task_id is not None or attempt == 1:
                 raise
             # Retry with a fresh id.
             continue
@@ -3291,19 +8222,112 @@ def create_task(
         session_id=session_id,
         board=board,
         olympus_context=None,
-        olympus_delivery_key=None,
-        olympus_delivery_context=None,
     )
+
+
+def _canonical_json_record(value: Mapping[str, Any]) -> tuple[str, str]:
+    try:
+        encoded = json.dumps(
+            dict(value), sort_keys=True, separators=(",", ":"), allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_idempotency_payload_invalid",
+            "governed idempotency payload is not canonical JSON",
+        ) from exc
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _olympus_create_request_payload(
+    *, task_id: str, board_id: str, idempotency_key: str,
+    olympus_context: dict[str, Any], title: str, body: Optional[str],
+    assignee: str, created_by: Optional[str], workspace_kind: str,
+    workspace_path: Optional[str], branch_name: Optional[str],
+    tenant: Optional[str], priority: int, parents: tuple[str, ...],
+    triage: bool, max_runtime_seconds: Optional[int],
+    skills: Optional[list[str]], max_retries: Optional[int], goal_mode: bool,
+    goal_max_turns: Optional[int], initial_status: str,
+    session_id: Optional[str], board: Optional[str],
+) -> dict[str, Any]:
+    """Return the complete immutable governed-create replay identity."""
+    return {
+        "schema_version": "olympus-task-create-request/1",
+        "task_id": str(task_id),
+        "board_id": str(board_id),
+        "board": board,
+        "subject_revision": 0,
+        "idempotency_key": str(idempotency_key),
+        "title": title.strip(),
+        "body": body,
+        "assignee": assignee,
+        "created_by": created_by,
+        "workspace_kind": workspace_kind,
+        "workspace_path": workspace_path,
+        "branch_name": (
+            str(branch_name).strip() or None if branch_name is not None else None
+        ),
+        "tenant": tenant,
+        "priority": priority,
+        "parents": list(parents),
+        "triage": bool(triage),
+        "max_runtime_seconds": (
+            int(max_runtime_seconds) if max_runtime_seconds is not None else None
+        ),
+        "skills": skills,
+        "max_retries": int(max_retries) if max_retries is not None else None,
+        "goal_mode": bool(goal_mode),
+        "goal_max_turns": (
+            int(goal_max_turns) if goal_max_turns is not None else None
+        ),
+        "initial_status": initial_status,
+        "session_id": session_id,
+        "olympus_context": olympus_context,
+    }
+
+
+def _load_olympus_create_receipt(
+    conn: sqlite3.Connection, idempotency_key: str,
+) -> Optional[dict[str, Any]]:
+    row = conn.execute(
+        "SELECT * FROM kanban_olympus_create_receipts WHERE idempotency_key = ?",
+        (idempotency_key,),
+    ).fetchone()
+    if row is None:
+        return None
+    payload = str(row["payload"])
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    if digest != row["payload_sha256"]:
+        raise OlympusContextError(
+            "olympus_idempotency_receipt_invalid",
+            "governed create receipt checksum does not match",
+        )
+    try:
+        decoded = json.loads(payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OlympusContextError(
+            "olympus_idempotency_receipt_invalid",
+            "governed create receipt is not valid JSON",
+        ) from exc
+    encoded, _ = _canonical_json_record(decoded)
+    if (
+        encoded != payload
+        or decoded.get("schema_version") != "olympus-task-create-request/1"
+        or decoded.get("idempotency_key") != idempotency_key
+        or decoded.get("task_id") != row["task_id"]
+    ):
+        raise OlympusContextError(
+            "olympus_idempotency_receipt_invalid",
+            "governed create receipt is not exact canonical evidence",
+        )
+    return decoded
 
 
 def create_olympus_task(
     conn: sqlite3.Connection,
     *,
     olympus_context: dict[str, Any],
-    authority_verifier: Optional[AuthorityVerifier],
-    actor: str,
-    operation_id: str,
-    expected_revision: int,
+    olympus_auth: OlympusMutationAuth,
+    subject_revision: int = 0,
     title: str,
     body: Optional[str] = None,
     assignee: Optional[str] = None,
@@ -3326,560 +8350,944 @@ def create_olympus_task(
     board: Optional[str] = None,
 ) -> str:
     """Persist a governed task only after exact canonical verification."""
+    if olympus_auth.source_identity is not None or olympus_auth.target_identity is not None:
+        raise OlympusContextError(
+            "olympus_telegram_create_api_required",
+            "Telegram creation requires the dedicated journaled intake API",
+        )
     canonical_assignee = _canonical_assignee(assignee)
     if canonical_assignee is None:
         raise OlympusContextError(
             "olympus_agent_missing", "a governed task requires an assignee"
         )
     normalized = normalize_olympus_context(olympus_context)
-    require_olympus_authority_verification(
-        normalized,
-        task_id=f"pending:{operation_id}",
-        assignee=canonical_assignee,
-        action="create",
-        capability=OLYMPUS_CAPABILITY_CREATE,
-        actor=actor,
-        expected_revision=expected_revision,
-        operation_id=operation_id,
-        verifier=authority_verifier,
-    )
-    return _create_task_internal(
-        conn,
-        title=title,
-        body=body,
-        assignee=canonical_assignee,
-        created_by=created_by,
-        workspace_kind=workspace_kind,
-        workspace_path=workspace_path,
-        branch_name=branch_name,
-        tenant=tenant,
-        priority=priority,
-        parents=parents,
-        triage=triage,
-        idempotency_key=idempotency_key,
-        max_runtime_seconds=max_runtime_seconds,
-        skills=skills,
-        max_retries=max_retries,
-        goal_mode=goal_mode,
-        goal_max_turns=goal_max_turns,
-        initial_status=initial_status,
-        session_id=session_id,
-        board=board,
-        olympus_context=normalized,
-        olympus_delivery_key=None,
-        olympus_delivery_context=None,
-    )
+    parent_ids = tuple(str(parent) for parent in parents if parent)
+    skills_list = _normalize_task_skills(skills)
+    if initial_status not in VALID_INITIAL_STATUSES:
+        raise ValueError(
+            f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
+        )
+    if subject_revision != 0:
+        raise OlympusContextError(
+            "olympus_subject_revision_mismatch",
+            "a new governed task must begin at subject revision zero",
+        )
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
+        if idempotency_key:
+            receipt = _load_olympus_create_receipt(conn, idempotency_key)
+            existing = conn.execute(
+                "SELECT id, record_revision, olympus_context FROM tasks "
+                "WHERE idempotency_key = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is None and receipt is not None:
+                raise OlympusContextError(
+                    "olympus_idempotency_receipt_orphaned",
+                    "idempotency key belongs to a deleted governed task",
+                )
+            if existing is not None:
+                if receipt is None or receipt["task_id"] != existing["id"]:
+                    raise OlympusContextError(
+                        "olympus_idempotency_receipt_missing",
+                        "idempotency key has no exact governed create receipt",
+                    )
+                desired = _olympus_create_request_payload(
+                    task_id=str(existing["id"]),
+                    board_id=_connection_board_identity(conn),
+                    idempotency_key=idempotency_key,
+                    olympus_context=normalized,
+                    title=title,
+                    body=body,
+                    assignee=canonical_assignee,
+                    created_by=created_by,
+                    workspace_kind=workspace_kind,
+                    workspace_path=workspace_path,
+                    branch_name=branch_name,
+                    tenant=tenant,
+                    priority=priority,
+                    parents=parent_ids,
+                    triage=triage,
+                    max_runtime_seconds=max_runtime_seconds,
+                    skills=skills_list,
+                    max_retries=max_retries,
+                    goal_mode=goal_mode,
+                    goal_max_turns=goal_max_turns,
+                    initial_status=initial_status,
+                    session_id=session_id,
+                    board=board,
+                )
+                if receipt != desired:
+                    raise OlympusContextError(
+                        "olympus_idempotency_payload_conflict",
+                        "idempotency key belongs to a different governed create payload",
+                    )
+                _, owns = _authorize_task_mutation(
+                    conn,
+                    existing["id"],
+                    action="create_idempotent",
+                    capability=OLYMPUS_CAPABILITY_CREATE,
+                    auth=olympus_auth,
+                )
+                _release_task_mutation_permit(conn, existing["id"], owns)
+                return str(existing["id"])
+        task_id = _new_task_id()
+        for parent_id in parent_ids:
+            _authorize_task_mutation(
+                conn,
+                parent_id,
+                action="link_governed_child",
+                capability=OLYMPUS_CAPABILITY_LINK,
+                auth=olympus_auth,
+            )
+        intended_status = _initial_task_status(
+            conn,
+            parents=parent_ids,
+            triage=triage,
+            initial_status=initial_status,
+        )
+        operation_prefix = str(olympus_auth.operation_id or "kanban")
+        operation_id = f"{operation_prefix}:create:{task_id}:r0"
+        authorization = require_olympus_authority_verification(
+            normalized,
+            subject_id=task_id,
+            subject_revision=0,
+            assignee=canonical_assignee,
+            action="create",
+            capability=OLYMPUS_CAPABILITY_CREATE,
+            actor=str(olympus_auth.actor or canonical_assignee),
+            operation_id=operation_id,
+            principal=olympus_auth,
+            expected_status=intended_status,
+            board_id=_connection_board_identity(conn),
+        )
+        _insert_issued_permit(
+            conn,
+            task_id=task_id,
+            subject_revision=0,
+            operation_id=operation_id,
+            action="create",
+            capability=OLYMPUS_CAPABILITY_CREATE,
+            auth_root_id=task_id,
+            auth_root_revision=0,
+            verification_id=str(
+                authorization["verification"]["verification_id"]
+            ),
+        )
+        try:
+            created_task_id = _create_task_internal(
+                conn,
+                title=title,
+                body=body,
+                assignee=canonical_assignee,
+                created_by=created_by,
+                workspace_kind=workspace_kind,
+                workspace_path=workspace_path,
+                branch_name=branch_name,
+                tenant=tenant,
+                priority=priority,
+                parents=parent_ids,
+                triage=triage,
+                idempotency_key=idempotency_key,
+                max_runtime_seconds=max_runtime_seconds,
+                skills=skills_list,
+                max_retries=max_retries,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
+                initial_status=initial_status,
+                session_id=session_id,
+                board=board,
+                olympus_context=normalized,
+                _task_id=task_id,
+            )
+            if idempotency_key:
+                payload = _olympus_create_request_payload(
+                    task_id=created_task_id,
+                    board_id=_connection_board_identity(conn),
+                    idempotency_key=idempotency_key,
+                    olympus_context=normalized,
+                    title=title,
+                    body=body,
+                    assignee=canonical_assignee,
+                    created_by=created_by,
+                    workspace_kind=workspace_kind,
+                    workspace_path=workspace_path,
+                    branch_name=branch_name,
+                    tenant=tenant,
+                    priority=priority,
+                    parents=parent_ids,
+                    triage=triage,
+                    max_runtime_seconds=max_runtime_seconds,
+                    skills=skills_list,
+                    max_retries=max_retries,
+                    goal_mode=goal_mode,
+                    goal_max_turns=goal_max_turns,
+                    initial_status=initial_status,
+                    session_id=session_id,
+                    board=board,
+                )
+                encoded_payload, payload_sha256 = _canonical_json_record(payload)
+                receipt_created_at = int(time.time())
+                _bind_issued_permit_write(
+                    conn,
+                    task_id,
+                    {
+                        "schema_version": CREATE_RECEIPT_WRITE_SCHEMA,
+                        "idempotency_key": idempotency_key,
+                        "task_id": created_task_id,
+                        "payload": encoded_payload,
+                        "payload_sha256": payload_sha256,
+                        "created_at": receipt_created_at,
+                    },
+                )
+                conn.execute(
+                    "INSERT INTO kanban_olympus_create_receipts "
+                    "(idempotency_key,task_id,payload,payload_sha256,created_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        idempotency_key, created_task_id, encoded_payload,
+                        payload_sha256, receipt_created_at,
+                    ),
+                )
+            return created_task_id
+        finally:
+            _release_task_mutation_permit(conn, task_id, True)
+
+
+def _canonical_olympus_telegram_delivery_identity(
+    delivery_identity: Mapping[str, Any],
+    *,
+    source_identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], str, str]:
+    """Bind one Telegram delivery key to the authenticated bot/source tuple."""
+    try:
+        raw = dict(delivery_identity)
+        base_keys = {"platform", "bot_id", "profile"}
+        if set(raw) == base_keys | {"update_id"}:
+            normalized = {
+                "platform": _strict_text(
+                    raw["platform"], "delivery_identity.platform"
+                ),
+                "bot_id": _strict_text(
+                    raw["bot_id"], "delivery_identity.bot_id"
+                ),
+                "profile": _strict_text(
+                    raw["profile"], "delivery_identity.profile"
+                ),
+                "update_id": _strict_int(
+                    raw["update_id"], "delivery_identity.update_id", minimum=0
+                ),
+            }
+        elif set(raw) == base_keys | {"chat_id", "message_id"}:
+            normalized = {
+                "platform": _strict_text(
+                    raw["platform"], "delivery_identity.platform"
+                ),
+                "bot_id": _strict_text(
+                    raw["bot_id"], "delivery_identity.bot_id"
+                ),
+                "profile": _strict_text(
+                    raw["profile"], "delivery_identity.profile"
+                ),
+                "chat_id": _strict_text(
+                    raw["chat_id"], "delivery_identity.chat_id"
+                ),
+                "message_id": _strict_text(
+                    raw["message_id"], "delivery_identity.message_id"
+                ),
+            }
+        else:
+            raise AuthorityContractError(
+                "delivery_identity must contain exactly bot/profile/platform "
+                "plus update_id or chat_id/message_id"
+            )
+    except (AuthorityContractError, TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_delivery_identity_invalid", str(exc)
+        ) from exc
+    expected = {
+        "platform": source_identity["platform"],
+        "bot_id": source_identity["bot_id"],
+        "profile": source_identity["profile"],
+    }
+    if any(normalized[key] != value for key, value in expected.items()):
+        raise OlympusContextError(
+            "olympus_delivery_identity_conflict",
+            "delivery bot, profile, and platform must match the authenticated source",
+        )
+    if "chat_id" in normalized \
+            and normalized["chat_id"] != source_identity["chat_id"]:
+        raise OlympusContextError(
+            "olympus_delivery_identity_conflict",
+            "fallback delivery chat must match the authenticated source",
+        )
+    encoded, digest = _canonical_json_record(normalized)
+    return normalized, encoded, digest
 
 
 def create_olympus_telegram_task(
     conn: sqlite3.Connection,
     *,
-    olympus_context: dict[str, Any],
-    authority_verifier: Optional[AuthorityVerifier],
-    source_identity: dict[str, Any],
-    operation_id: str,
-    expected_revision: int,
+    telegram_auth: OlympusMutationAuth,
+    service_auth: OlympusMutationAuth,
     delivery_key: str,
-    delivery_context: dict[str, Any],
+    delivery_identity: Mapping[str, Any],
     title: str,
-    body: str,
+    body: Optional[str],
     assignee: str,
-    created_by: str,
-    parents: Iterable[str],
-    session_id: str,
+    created_by: Optional[str],
+    session_id: Optional[str],
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str],
+    user_id: Optional[str],
+    notifier_profile: Optional[str],
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    max_runtime_seconds: Optional[int] = None,
+    skills: Optional[Iterable[str]] = None,
+    max_retries: Optional[int] = None,
+    goal_mode: bool = False,
+    goal_max_turns: Optional[int] = None,
     board: Optional[str] = None,
 ) -> str:
-    """Create one governed Telegram task for one immutable delivery.
-
-    The canonical verifier sees the exact Telegram bot/profile/caller source.
-    The delivery journal and task row are then committed in one write
-    transaction, so concurrent retries admit exactly one task.
-    """
+    """Atomically verify, create, journal, and subscribe one Telegram task."""
+    if telegram_auth.source_identity is None or telegram_auth.target_identity is None:
+        raise OlympusContextError(
+            "olympus_telegram_principal_invalid",
+            "Telegram intake requires an authenticated source and exact target",
+        )
+    target_identity = telegram_auth.target_identity
+    if target_identity.get("control_action") != "telegram-intake":
+        raise OlympusContextError(
+            "olympus_telegram_action_invalid",
+            "Telegram intake authorization is not bound to intake",
+        )
+    authorization_task_id = str(
+        target_identity.get("authorization_subject_id", "")
+    )
+    if target_identity.get("task_id") != authorization_task_id:
+        raise OlympusContextError(
+            "olympus_target_identity_conflict",
+            "Telegram intake must target the selected authorization root",
+        )
+    if (
+        service_auth.source_identity is not None
+        or service_auth.target_identity is not None
+        or service_auth.runtime_identity is not None
+        or service_auth.notifier_identity is not None
+    ):
+        raise OlympusContextError(
+            "olympus_service_principal_invalid",
+            "Telegram persistence requires the trusted service dispatcher",
+        )
     canonical_assignee = _canonical_assignee(assignee)
     if canonical_assignee is None:
         raise OlympusContextError(
-            "olympus_agent_missing", "a governed Telegram task requires an assignee"
+            "olympus_agent_missing", "Telegram intake requires a delegated agent"
         )
-    normalized = normalize_olympus_context(olympus_context)
-    require_olympus_authority_verification(
-        normalized,
-        task_id=f"pending:{operation_id}",
-        assignee=canonical_assignee,
-        action="telegram-intake",
-        capability=OLYMPUS_CAPABILITY_TELEGRAM_INTAKE,
-        actor=canonical_assignee,
-        expected_revision=expected_revision,
-        operation_id=operation_id,
-        verifier=authority_verifier,
-        source_identity=source_identity,
+    source = telegram_auth.source_identity
+    source_json, _ = _canonical_json_record(source)
+    normalized_delivery, delivery_identity_json, delivery_digest = (
+        _canonical_olympus_telegram_delivery_identity(
+            delivery_identity, source_identity=source
+        )
     )
-    return _create_task_internal(
-        conn,
-        title=title,
-        body=body,
-        assignee=canonical_assignee,
-        created_by=created_by,
-        parents=parents,
-        idempotency_key=delivery_key,
-        session_id=session_id,
-        board=board,
-        olympus_context=normalized,
-        olympus_delivery_key=delivery_key,
-        olympus_delivery_context=delivery_context,
-    )
-
-
-_OLYMPUS_TELEGRAM_CONTROL_CAPABILITIES = {
-    "pause": OLYMPUS_CAPABILITY_TELEGRAM_PAUSE,
-    "resume": OLYMPUS_CAPABILITY_TELEGRAM_RESUME,
-    "interrupt": OLYMPUS_CAPABILITY_TELEGRAM_INTERRUPT,
-    "cancel": OLYMPUS_CAPABILITY_TELEGRAM_CANCEL,
-}
-
-
-def _olympus_control_target_identity(
-    task: Task, context: dict[str, Any]
-) -> dict[str, Any]:
-    authority = context["authority"]
-    lease = context["lease"]
-    return {
-        "task_id": task.id,
-        "mission_id": context["mission_id"],
-        "agent_id": context["agent_id"],
-        "assignee": task.assignee,
-        "status": task.status,
-        "authority_id": authority["authority_id"],
-        "authority_revision": authority["revision"],
-        "authority_status": authority["status"],
-        "authority_source": authority["source"],
-        "lease_id": lease["lease_id"],
-        "lease_revision": lease["revision"],
-        "lease_status": lease["status"],
-        "lease_source": lease["source"],
-        "lease_agent_id": lease["agent_id"],
-        "lease_holder": lease["holder"],
+    expected_delivery_key = f"olympus-telegram:v3:{delivery_digest}"
+    if delivery_key != expected_delivery_key:
+        raise OlympusContextError(
+            "olympus_delivery_identity_conflict",
+            "delivery_key must be the SHA-256 of canonical delivery_identity",
+        )
+    notification_identity = {
+        "platform": platform,
+        "chat_id": chat_id,
+        "thread_id": thread_id or "",
+        "user_id": user_id,
+        "notifier_profile": notifier_profile,
     }
-
-
-def _olympus_process_create_time(pid: int) -> Optional[float]:
-    """Read the process birth identity used to fence recycled PIDs."""
-    try:
-        from hermes_cli.active_sessions import _process_start_time
-
-        value = _process_start_time(int(pid))
-        return float(value) if value is not None else None
-    except Exception:
-        return None
-
-
-def _record_olympus_termination_result(
-    conn: sqlite3.Connection,
-    *,
-    operation_id: str,
-    target_task_id: str,
-    state: str,
-    result: dict[str, Any],
-) -> None:
-    now = int(time.time())
-    changed = conn.execute(
-        "UPDATE olympus_telegram_controls "
-        "SET termination_state = ?, termination_result = ?, updated_at = ? "
-        "WHERE operation_id = ? AND termination_state = 'pending'",
-        (
-            state,
-            json.dumps(result, ensure_ascii=False, sort_keys=True),
-            now,
-            operation_id,
-        ),
-    )
-    if changed.rowcount == 1:
-        _append_event(
-            conn,
-            target_task_id,
-            "olympus_telegram_termination",
-            {
-                "operation_id": operation_id,
-                "state": state,
-                "identity_verified": state == "applied",
-            },
+    expected_notification = {
+        "platform": source["platform"],
+        "chat_id": source["chat_id"],
+        "thread_id": source["thread_id"],
+        "user_id": source["user_id"],
+        "notifier_profile": source["profile"],
+    }
+    if notification_identity != expected_notification:
+        raise OlympusContextError(
+            "olympus_notification_destination_conflict",
+            "notification destination must exactly match the authenticated "
+            "Telegram chat, thread, user, and profile",
         )
-
-
-def _finish_olympus_control_termination(
-    conn: sqlite3.Connection,
-    operation_id: str,
-    *,
-    termination_fn=None,
-    process_identity_reader=None,
-) -> dict[str, Any]:
-    # Keep the write transaction open across identity recheck and signaling.
-    # A concurrent duplicate therefore cannot observe ``pending`` and signal
-    # the same PID twice. If this process crashes, SQLite rolls the journal
-    # back to ``pending`` so restart reconciliation can retry safely.
     with write_txn(conn):
-        row = conn.execute(
-            "SELECT termination_state, target_task_id, previous_worker_pid, "
-            "previous_process_create_time, previous_claim_lock "
-            "FROM olympus_telegram_controls WHERE operation_id = ?",
-            (operation_id,),
-        ).fetchone()
-        if row is None:
-            raise OlympusContextError(
-                "olympus_control_missing", "governed control journal entry is missing"
+        # A read-only preflight is deliberately a separate action. The intake
+        # permit below is exact-write-bound and cannot be issued until the
+        # generated task id and complete immutable payload are known.
+        preflight = olympus_telegram_auth(
+            conn,
+            verifier=telegram_auth.verifier,
+            source_identity=telegram_auth.source_identity,
+            authorization_task_id=authorization_task_id,
+            target_task_id=authorization_task_id,
+            action="telegram-status",
+            operation_id=f"{telegram_auth.operation_id}:preflight",
+        )
+        with olympus_mutation_scope(preflight):
+            _, preflight_owns = _authorize_task_mutation(
+                conn,
+                authorization_task_id,
+                action="telegram-status",
+                capability=TELEGRAM_ACTION_CAPABILITIES["telegram-status"],
+                auth=preflight,
             )
-        if row["termination_state"] != "pending":
-            return {"state": row["termination_state"]}
-        reader = process_identity_reader or _olympus_process_create_time
-        expected_create_time = row["previous_process_create_time"]
-        if expected_create_time is None:
-            result = {"reason": "process create_time was not captured"}
-            state = "identity_unverified"
+            _release_task_mutation_permit(
+                conn, authorization_task_id, preflight_owns
+            )
+        root = conn.execute(
+            "SELECT assignee, record_revision, olympus_context FROM tasks WHERE id = ?",
+            (authorization_task_id,),
+        ).fetchone()
+        if root is None or root["olympus_context"] is None:
+            raise OlympusContextError(
+                "olympus_authorization_root_missing",
+                "Telegram authorization root disappeared before intake",
+            )
+        root_context = _require_current_olympus_context(
+            root["olympus_context"], assignee=root["assignee"],
+        )
+        assert root_context is not None
+        child_context = derive_olympus_child_context(
+            root_context, agent_id=canonical_assignee,
+        )
+        if canonical_assignee != str(service_auth.actor or ""):
+            raise OlympusContextError(
+                "olympus_actor_mismatch",
+                "service dispatcher actor must match the delegated agent",
+            )
+        existing = conn.execute(
+            "SELECT * FROM olympus_telegram_deliveries WHERE delivery_key = ?",
+            (delivery_key,),
+        ).fetchone()
+        if existing is not None:
+            task_id = str(existing["task_id"])
         else:
-            try:
-                observed_create_time = reader(int(row["previous_worker_pid"]))
-            except Exception:
-                observed_create_time = None
-            if observed_create_time is None:
-                result = {"reason": "process create_time is unavailable"}
-                state = "identity_unverified"
-            elif abs(
-                float(observed_create_time) - float(expected_create_time)
-            ) > 0.000001:
-                result = {
-                    "reason": "process create_time changed; PID may have been recycled",
-                    "expected_create_time": float(expected_create_time),
-                    "observed_create_time": float(observed_create_time),
-                }
-                state = "identity_mismatch"
-            else:
-                terminate = termination_fn or _terminate_reclaimed_worker
-                result = terminate(
-                    row["previous_worker_pid"], row["previous_claim_lock"]
+            task_id = create_olympus_task(
+                conn,
+                olympus_context=child_context,
+                olympus_auth=service_auth,
+                title=title,
+                body=body,
+                assignee=canonical_assignee,
+                created_by=created_by,
+                workspace_kind=workspace_kind,
+                workspace_path=workspace_path,
+                branch_name=branch_name,
+                tenant=tenant,
+                priority=priority,
+                parents=(),
+                idempotency_key=delivery_key,
+                max_runtime_seconds=max_runtime_seconds,
+                skills=skills,
+                max_retries=max_retries,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
+                initial_status="running",
+                session_id=session_id,
+                board=board,
+            )
+        payload = {
+            "schema_version": "olympus-telegram-delivery/3",
+            "delivery_key": delivery_key,
+            "delivery_identity": normalized_delivery,
+            "source_identity": json.loads(source_json),
+            "authorization_task_id": authorization_task_id,
+            "authorization_task_revision": int(root["record_revision"]),
+            "mission_id": root_context["mission_id"],
+            "delegated_agent": canonical_assignee,
+            "task_id": task_id,
+            "title": title.strip(),
+            "body": body,
+            "created_by": created_by,
+            "session_id": session_id,
+            "workspace_kind": workspace_kind,
+            "workspace_path": workspace_path,
+            "branch_name": branch_name,
+            "tenant": tenant,
+            "priority": priority,
+            "max_runtime_seconds": max_runtime_seconds,
+            "skills": _normalize_task_skills(skills),
+            "max_retries": max_retries,
+            "goal_mode": bool(goal_mode),
+            "goal_max_turns": goal_max_turns,
+            "notification": notification_identity,
+        }
+        payload_json, payload_sha256 = _canonical_json_record(payload)
+        if existing is not None:
+            if (
+                str(existing["payload"]) != payload_json
+                or str(existing["payload_sha256"]) != payload_sha256
+                or str(existing["authorization_task_id"])
+                    != authorization_task_id
+                or int(existing["authorization_task_revision"])
+                    != int(root["record_revision"])
+            ):
+                raise OlympusContextError(
+                    "olympus_delivery_identity_conflict",
+                    "Telegram delivery identity belongs to another immutable submission",
                 )
-                if not isinstance(result, dict):
-                    result = {"termination_result": str(result)}
-                state = "applied"
-        _record_olympus_termination_result(
+        else:
+            created_at = int(time.time())
+            binding = {
+                "schema_version": TELEGRAM_DELIVERY_WRITE_SCHEMA,
+                "action": "telegram-intake",
+                "task_id": authorization_task_id,
+                "task_record_revision": int(root["record_revision"]),
+                "delivery_key": delivery_key,
+                "authorization_task_id": authorization_task_id,
+                "authorization_task_revision": int(root["record_revision"]),
+                "created_task_id": task_id,
+                "payload": payload_json,
+                "payload_sha256": payload_sha256,
+                "created_at": created_at,
+            }
+            with olympus_mutation_scope(telegram_auth):
+                authorization, owns = _authorize_task_mutation(
+                    conn,
+                    authorization_task_id,
+                    action="telegram-intake",
+                    capability=TELEGRAM_ACTION_CAPABILITIES["telegram-intake"],
+                    auth=telegram_auth,
+                    mutation_binding=binding,
+                )
+                try:
+                    conn.execute(
+                        "INSERT INTO olympus_telegram_deliveries "
+                        "(delivery_key,authorization_task_id,"
+                        "authorization_task_revision,task_id,payload,"
+                        "payload_sha256,created_at) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            delivery_key, authorization_task_id,
+                            int(root["record_revision"]), task_id, payload_json,
+                            payload_sha256, created_at,
+                        ),
+                    )
+                    _append_event(
+                        conn,
+                        authorization_task_id,
+                        "olympus_telegram_intake",
+                        {
+                            "task_id": task_id,
+                            "delivery_key": delivery_key,
+                            "verification_id": authorization["verification"][
+                                "verification_id"
+                            ],
+                        },
+                    )
+                finally:
+                    _release_task_mutation_permit(
+                        conn, authorization_task_id, owns
+                    )
+        # The same outer transaction contains delivery, task, create receipt,
+        # and destination subscription. A crash exposes all four or none.
+        add_notify_sub(
             conn,
-            operation_id=operation_id,
-            target_task_id=str(row["target_task_id"]),
-            state=state,
-            result=result,
+            task_id=task_id,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            notifier_profile=notifier_profile,
+            olympus_auth=service_auth,
         )
-        return {"state": state, "result": result}
-
-
-def reconcile_olympus_telegram_controls(
-    conn: sqlite3.Connection,
-    *,
-    termination_fn=None,
-    process_identity_reader=None,
-) -> int:
-    """Finish crash-interrupted host-local termination side effects."""
-    rows = conn.execute(
-        "SELECT operation_id FROM olympus_telegram_controls "
-        "WHERE termination_state = 'pending' ORDER BY created_at, operation_id"
-    ).fetchall()
-    for row in rows:
-        _finish_olympus_control_termination(
-            conn,
-            str(row["operation_id"]),
-            termination_fn=termination_fn,
-            process_identity_reader=process_identity_reader,
-        )
-    return len(rows)
+        return task_id
 
 
 def apply_olympus_telegram_control(
     conn: sqlite3.Connection,
     *,
-    authorization_task_id: str,
+    telegram_auth: OlympusMutationAuth,
+    service_auth: OlympusMutationAuth,
     target_task_id: str,
     action: str,
-    authority_verifier: Optional[AuthorityVerifier],
-    source_identity: dict[str, Any],
-    operation_id: str,
-    expected_revision: int,
     operator_tag: str,
-    termination_fn=None,
-    process_identity_reader=None,
 ) -> dict[str, Any]:
-    """Apply one exactly-authorized Telegram control transactionally.
-
-    Pause/resume require current target authority and lease state. Emergency
-    interrupt/cancel may target stale or revoked state, but only while a
-    separate current mission root grants the exact emergency capability.
-    """
-    capability = _OLYMPUS_TELEGRAM_CONTROL_CAPABILITIES.get(action)
-    if capability is None:
+    """Authorize and apply one exact Telegram control without PID ownership."""
+    wire_action = f"telegram-control:{action}"
+    if wire_action not in TELEGRAM_ACTION_CAPABILITIES:
         raise OlympusContextError(
-            "olympus_control_invalid", "governed Telegram control is invalid"
+            "olympus_control_invalid", "Telegram control action is invalid"
         )
-    if not str(operation_id).startswith("olympus-telegram-control:v2:"):
+    operation_id = str(telegram_auth.operation_id or "")
+    if not operation_id.startswith("olympus-telegram-control:v3:"):
         raise OlympusContextError(
             "olympus_control_identity_invalid",
-            "governed Telegram control operation identity is invalid",
+            "Telegram control operation identity is not canonical v3",
         )
-    pending_termination = False
-    with write_txn(conn):
-        authorization_row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (authorization_task_id,)
+    if (
+        telegram_auth.source_identity is None
+        or telegram_auth.target_identity is None
+        or telegram_auth.target_identity.get("control_action") != wire_action
+        or telegram_auth.target_identity.get("task_id") != target_task_id
+    ):
+        raise OlympusContextError(
+            "olympus_target_identity_conflict",
+            "Telegram control is not bound to the exact requested target",
+        )
+    authorization_task_id = str(
+        telegram_auth.target_identity["authorization_subject_id"]
+    )
+    source_json, _ = _canonical_json_record(telegram_auth.source_identity)
+    operator_identity = _strict_text(operator_tag, "operator_tag")
+
+    def _replay(existing: sqlite3.Row) -> dict[str, Any]:
+        """Validate and replay one immutable control receipt."""
+        try:
+            prior = json.loads(str(existing["request_payload"]))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OlympusContextError(
+                "olympus_control_receipt_invalid",
+                "Telegram control receipt is not valid JSON",
+            ) from exc
+        prior_target = prior.get("target_identity")
+        current_target = telegram_auth.target_identity
+        stable_target_keys = frozenset(OLYMPUS_TARGET_IDENTITY_KEYS) - {
+            "task_record_revision", "status",
+        }
+        stable_target_exact = (
+            isinstance(prior_target, dict)
+            and isinstance(current_target, dict)
+            and all(
+                prior_target.get(key) == current_target.get(key)
+                for key in stable_target_keys
+            )
+        )
+        exact = (
+            existing["action"] == wire_action
+            and existing["authorization_task_id"] == authorization_task_id
+            and existing["target_task_id"] == target_task_id
+            and existing["source_identity"] == source_json
+            and prior.get("schema_version") == "olympus-telegram-control/3"
+            and prior.get("operation_id") == operation_id
+            and prior.get("action") == wire_action
+            and prior.get("authorization_task_id") == authorization_task_id
+            and prior.get("authorization_task_revision")
+                == int(existing["authorization_task_revision"])
+            and prior.get("target_task_id") == target_task_id
+            and prior.get("target_task_revision")
+                == int(existing["target_task_revision"])
+            and prior.get("source_identity") == telegram_auth.source_identity
+            and stable_target_exact
+            and prior.get("operator_tag") == operator_identity
+            and prior.get("planned_status") == existing["result_status"]
+            and prior.get("effect_operation_id")
+                == existing["effect_operation_id"]
+            and hashlib.sha256(
+                str(existing["request_payload"]).encode("utf-8")
+            ).hexdigest() == existing["payload_sha256"]
+        )
+        if not exact:
+            raise OlympusContextError(
+                "olympus_control_identity_conflict",
+                "control operation identity belongs to another immutable request",
+            )
+        verified = verify_olympus_telegram_task(
+            conn,
+            authorization_task_id=authorization_task_id,
+            target_task_id=target_task_id,
+            action="telegram-status",
+            verifier=telegram_auth.verifier,
+            source_identity=telegram_auth.source_identity,
+            operation_id=f"{operation_id}:replay-status",
+        )
+        return {
+            "operation_id": operation_id,
+            "status": verified["status"],
+            "replayed": True,
+            "effect_operation_id": existing["effect_operation_id"],
+        }
+
+    existing = conn.execute(
+        "SELECT * FROM olympus_telegram_controls WHERE operation_id = ?",
+        (operation_id,),
+    ).fetchone()
+    if existing is not None:
+        return _replay(existing)
+    row = conn.execute(
+        "SELECT t.*, r.id AS run_id, r.launch_token, r.process_state, "
+        "r.worker_host_id, r.worker_boot_id, r.worker_pid AS run_worker_pid, "
+        "r.worker_start_token FROM tasks t LEFT JOIN task_runs r "
+        "ON r.id = t.current_run_id WHERE t.id = ?",
+        (target_task_id,),
+    ).fetchone()
+    if row is None or row["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_control_target_missing",
+            "Telegram control target is missing or ungoverned",
+        )
+    current_status = str(row["status"])
+    valid_states = {
+        "pause": {"ready", "running"},
+        "resume": {"blocked"},
+        "interrupt": {"running"},
+        "cancel": {"triage", "todo", "ready", "scheduled", "running", "blocked"},
+    }
+    if current_status not in valid_states[action]:
+        raise OlympusContextError(
+            "olympus_control_state_invalid",
+            f"Telegram {action} is invalid from {current_status}",
+        )
+    # Even emergency authority cannot invent a process effect from stale or
+    # revoked task state. The frozen v3 issuer may authorize containment, but
+    # Hermes still requires a current exact target before service execution.
+    _require_current_olympus_context(
+        row["olympus_context"], assignee=row["assignee"],
+    )
+    effect_operation_id = None
+    if current_status == "running":
+        if (
+            row["run_id"] is None
+            or row["process_state"] != "registered"
+            or not row["launch_token"]
+            or not row["worker_host_id"]
+            or not row["worker_boot_id"]
+            or not row["worker_start_token"]
+            or int(row["run_worker_pid"] or 0) <= 0
+        ):
+            raise OlympusContextError(
+                "olympus_runtime_identity_stale",
+                "running control target lacks an exact registered process",
+            )
+        result_status = "blocked"
+        effect_operation_id = f"{operation_id}:terminate-worker"
+    elif action == "resume":
+        undone = conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (target_task_id,),
         ).fetchone()
-        target_row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (target_task_id,)
-        ).fetchone()
-        if authorization_row is None or target_row is None:
-            raise OlympusContextError(
-                "olympus_control_target_missing",
-                "authorization root and target task must both exist",
-            )
-        authorization_task = Task.from_row(authorization_row)
-        target_task = Task.from_row(target_row)
-        if authorization_task.status == "archived":
-            raise OlympusContextError(
-                "olympus_authorization_root_archived",
-                "authorization root is archived",
-            )
-        authorization_context = _require_current_olympus_context(
-            authorization_task.olympus_context,
-            assignee=authorization_task.assignee,
-        )
-        if authorization_context is None:
-            raise OlympusContextError(
-                "olympus_context_missing", "authorization root is not governed"
-            )
-        if action in {"pause", "resume"}:
-            target_context = _require_current_olympus_context(
-                target_task.olympus_context,
-                assignee=target_task.assignee,
-            )
-        else:
-            target_context = normalize_olympus_context(
-                target_task.olympus_context
-            )
-            target_lease = target_context["lease"]
-            if not (
-                target_context["agent_id"]
-                == target_lease["agent_id"]
-                == target_lease["holder"]
-                == target_task.assignee
-            ):
-                raise OlympusContextError(
-                    "olympus_agent_mismatch",
-                    "target lease holder, lease agent, context agent, and assignee must match exactly",
-                )
-        if target_context is None:
-            raise OlympusContextError(
-                "olympus_context_missing", "target task is not governed"
-            )
-        if authorization_context["mission_id"] != target_context["mission_id"]:
-            raise OlympusContextError(
-                "olympus_control_foreign_mission",
-                "target task belongs to a different Olympus mission",
-            )
-        current_target_identity = _olympus_control_target_identity(
-            target_task, target_context
-        )
-        existing = conn.execute(
+        result_status = "todo" if undone else "ready"
+    elif action == "cancel":
+        result_status = "archived"
+    else:
+        result_status = "blocked"
+    request_payload = {
+        "schema_version": "olympus-telegram-control/3",
+        "operation_id": operation_id,
+        "action": wire_action,
+        "authorization_task_id": authorization_task_id,
+        "authorization_task_revision": int(
+            telegram_auth.target_identity["authorization_subject_revision"]
+        ),
+        "target_task_id": target_task_id,
+        "target_task_revision": int(row["record_revision"]),
+        "source_identity": telegram_auth.source_identity,
+        "target_identity": telegram_auth.target_identity,
+        "operator_tag": operator_identity,
+        "planned_status": result_status,
+        "effect_operation_id": effect_operation_id,
+    }
+    request_json, request_sha256 = _canonical_json_record(request_payload)
+    created_at = int(time.time())
+    binding = {
+        "schema_version": TELEGRAM_CONTROL_WRITE_SCHEMA,
+        "action": wire_action,
+        "task_id": target_task_id,
+        "task_record_revision": int(row["record_revision"]),
+        "operation_id": operation_id,
+        "authorization_task_id": authorization_task_id,
+        "authorization_task_revision": int(
+            telegram_auth.target_identity["authorization_subject_revision"]
+        ),
+        "source_identity": source_json,
+        "request_payload": request_json,
+        "payload_sha256": request_sha256,
+        "result_status": result_status,
+        "effect_operation_id": effect_operation_id,
+        "created_at": created_at,
+    }
+    with write_txn(conn), olympus_mutation_scope(telegram_auth):
+        # The optimistic read above avoids taking a write lock for ordinary
+        # replays.  Recheck after BEGIN IMMEDIATE so simultaneous first
+        # deliveries serialize to one receipt and every loser replays it.
+        concurrent = conn.execute(
             "SELECT * FROM olympus_telegram_controls WHERE operation_id = ?",
             (operation_id,),
         ).fetchone()
-        verification_target_identity = current_target_identity
-        if existing is not None:
-            if not (
-                existing["action"] == action
-                and existing["authorization_task_id"] == authorization_task_id
-                and existing["target_task_id"] == target_task_id
-            ):
+        if concurrent is not None:
+            return _replay(concurrent)
+        if action in {"resume", "cancel"} and current_status != "running":
+            nonterminal_effect = conn.execute(
+                "SELECT 1 FROM kanban_effect_journal "
+                "WHERE effect_kind='terminate_worker' AND task_id=? "
+                "AND state NOT IN "
+                "('gone','failed','identity_mismatch','identity_unverified') "
+                "LIMIT 1",
+                (target_task_id,),
+            ).fetchone()
+            if nonterminal_effect is not None:
                 raise OlympusContextError(
-                    "olympus_control_identity_conflict",
-                    "control operation identity belongs to another request",
+                    "olympus_control_termination_in_progress",
+                    "resume or non-running cancel cannot cross an active "
+                    "worker-termination generation",
                 )
-            try:
-                stored_target_identity = json.loads(existing["target_identity"])
-            except Exception as exc:
-                raise OlympusContextError(
-                    "olympus_control_journal_invalid",
-                    "control journal target identity is invalid",
-                ) from exc
-            if not isinstance(stored_target_identity, dict) or not stored_target_identity:
-                raise OlympusContextError(
-                    "olympus_control_journal_invalid",
-                    "control journal target identity is missing",
-                )
-            verification_target_identity = stored_target_identity
-        verification = require_olympus_authority_verification(
-            authorization_context,
-            task_id=authorization_task.id,
-            assignee=str(authorization_task.assignee),
-            action=f"telegram-control:{action}",
-            capability=capability,
-            actor=str(authorization_task.assignee),
-            expected_revision=expected_revision,
-            operation_id=operation_id,
-            verifier=authority_verifier,
-            source_identity=source_identity,
-            target_identity=verification_target_identity,
+        authorization, owns = _authorize_task_mutation(
+            conn,
+            target_task_id,
+            action=wire_action,
+            capability=TELEGRAM_ACTION_CAPABILITIES[wire_action],
+            auth=telegram_auth,
+            mutation_binding=binding,
+            allow_inactive_target=wire_action in TELEGRAM_EMERGENCY_ACTIONS,
         )
-        normalized_source = verification["request"]["source_identity"]
-        source_json = json.dumps(
-            normalized_source, sort_keys=True, separators=(",", ":")
-        )
-        if existing is not None:
-            if existing["source_identity"] != source_json:
-                raise OlympusContextError(
-                    "olympus_control_identity_conflict",
-                    "control operation identity belongs to another request",
-                )
-            pending_termination = existing["termination_state"] == "pending"
-            result = {
-                "status": str(existing["result_status"]),
-                "operation_id": operation_id,
-                "replayed": True,
-            }
-        else:
-            allowed_statuses = {
-                "pause": {"running", "ready"},
-                "resume": {"blocked"},
-                "interrupt": {"running"},
-                "cancel": {"triage", "todo", "ready", "scheduled", "running", "blocked", "done"},
-            }[action]
-            if target_task.status not in allowed_statuses:
-                raise OlympusContextError(
-                    "olympus_control_state_invalid",
-                    f"task {target_task.id} is not in a state that can {action}",
-                )
-            previous_worker_pid = target_task.worker_pid
-            previous_claim_lock = target_task.claim_lock
-            previous_process_create_time: Optional[float] = None
-            if (
-                action in {"pause", "interrupt", "cancel"}
-                and previous_worker_pid
-                and previous_claim_lock
-            ):
-                reader = process_identity_reader or _olympus_process_create_time
-                try:
-                    observed = reader(int(previous_worker_pid))
-                    previous_process_create_time = (
-                        float(observed) if observed is not None else None
-                    )
-                except Exception:
-                    previous_process_create_time = None
-            if action == "resume":
-                undone_parent = conn.execute(
-                    "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
-                    "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
-                    (target_task.id,),
-                ).fetchone()
-                new_status = "todo" if undone_parent else "ready"
-                conn.execute(
-                    "UPDATE tasks SET status = ?, current_run_id = NULL, "
-                    "consecutive_failures = 0, last_failure_error = NULL "
-                    "WHERE id = ? AND status = 'blocked'",
-                    (new_status, target_task.id),
-                )
-                run_id = None
-            else:
-                new_status = "archived" if action == "cancel" else "blocked"
-                conn.execute(
-                    "UPDATE tasks SET status = ?, claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
-                    (new_status, target_task.id),
-                )
-                run_id = _end_run(
-                    conn,
-                    target_task.id,
-                    outcome="reclaimed" if action in {"interrupt", "cancel"} else "blocked",
-                    status="reclaimed" if action in {"interrupt", "cancel"} else "blocked",
-                    summary=f"governed Telegram {action} by {operator_tag}",
-                )
-            now = int(time.time())
-            termination_required = bool(
-                action in {"pause", "interrupt", "cancel"}
-                and previous_worker_pid
-                and previous_claim_lock
-            )
-            pending_termination = bool(
-                termination_required and previous_process_create_time is not None
-            )
-            termination_state = (
-                "pending"
-                if pending_termination
-                else "identity_unverified"
-                if termination_required
-                else "not_required"
-            )
-            verification_id = str(
-                verification["verification"]["verification_id"]
-            )
+        try:
             conn.execute(
-                "INSERT INTO task_comments (task_id, author, body, created_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO olympus_telegram_controls "
+                "(operation_id,action,authorization_task_id,"
+                "authorization_task_revision,target_task_id,target_task_revision,"
+                "source_identity,request_payload,payload_sha256,verification_id,"
+                "result_status,effect_operation_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    target_task.id,
-                    operator_tag,
-                    f"Governed Olympus Telegram action: {action}",
-                    now,
+                    operation_id, wire_action, authorization_task_id,
+                    int(telegram_auth.target_identity[
+                        "authorization_subject_revision"
+                    ]),
+                    target_task_id, int(row["record_revision"]), source_json,
+                    request_json, request_sha256,
+                    authorization["verification"]["verification_id"],
+                    result_status, effect_operation_id, created_at,
                 ),
             )
             _append_event(
                 conn,
-                target_task.id,
+                target_task_id,
                 "olympus_telegram_control",
                 {
                     "action": action,
                     "operation_id": operation_id,
-                    "authorization_task_id": authorization_task.id,
-                    "verification_id": verification_id,
-                    "source_identity_sha256": hashlib.sha256(
-                        source_json.encode("utf-8")
-                    ).hexdigest(),
-                    "status": new_status,
-                    "termination_state": termination_state,
+                    "planned_status": result_status,
+                    "effect_operation_id": effect_operation_id,
+                    "operator": operator_tag,
                 },
-                run_id=run_id,
             )
-            conn.execute(
-                "INSERT INTO olympus_telegram_controls "
-                "(operation_id, action, authorization_task_id, target_task_id, "
-                "source_identity, target_identity, verification_id, result_status, termination_state, "
-                "previous_worker_pid, previous_process_create_time, previous_claim_lock, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    operation_id,
-                    action,
-                    authorization_task.id,
-                    target_task.id,
-                    source_json,
-                    json.dumps(
-                        current_target_identity,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    verification_id,
-                    new_status,
-                    termination_state,
-                    previous_worker_pid,
-                    previous_process_create_time,
-                    previous_claim_lock,
-                    now,
-                    now,
-                ),
-            )
-            result = {
-                "status": new_status,
-                "operation_id": operation_id,
-                "replayed": False,
-            }
-    if pending_termination:
-        result["termination"] = _finish_olympus_control_termination(
-            conn,
-            operation_id,
-            termination_fn=termination_fn,
-            process_identity_reader=process_identity_reader,
+        finally:
+            _release_task_mutation_permit(conn, target_task_id, owns)
+        service_operation = replace(
+            service_auth,
+            actor=str(row["assignee"] or ""),
+            operation_id=f"{operation_id}:service",
         )
-    return result
+        if current_status == "running":
+            stage_worker_termination(
+                conn,
+                task_id=target_task_id,
+                run_id=int(row["run_id"]),
+                launch_token=str(row["launch_token"]),
+                process_identity=ProcessIdentity(
+                    host_id=str(row["worker_host_id"]),
+                    boot_id=str(row["worker_boot_id"]),
+                    pid=int(row["run_worker_pid"]),
+                    start_token=str(row["worker_start_token"]),
+                ),
+                operation_id=str(effect_operation_id),
+                reason=f"governed Telegram {action} by {operator_tag}",
+                source_identity={
+                    "schema_version": "olympus-telegram-control-source/3",
+                    "operation_id": operation_id,
+                    "verification_id": authorization["verification"][
+                        "verification_id"
+                    ],
+                },
+                outcome="reclaimed",
+                event_kind="termination_staged",
+                olympus_auth=service_operation,
+            )
+        elif action == "pause":
+            # ``block`` is a worker-only action in the certified #16
+            # principal contract.  Telegram never impersonates that worker;
+            # the trusted service dispatcher performs the explicit direct
+            # status transition under its own separately verified permit.
+            if not set_task_status(
+                conn, target_task_id, "blocked", olympus_auth=service_operation
+            ):
+                raise OlympusContextError(
+                    "olympus_control_cas_failed", "pause lost its exact state CAS"
+                )
+        elif action == "resume":
+            if not unblock_task(
+                conn, target_task_id, olympus_auth=service_operation
+            ):
+                raise OlympusContextError(
+                    "olympus_control_cas_failed", "resume lost its exact state CAS"
+                )
+        elif action == "cancel":
+            if not archive_task(
+                conn, target_task_id, olympus_auth=service_operation
+            ):
+                raise OlympusContextError(
+                    "olympus_control_cas_failed", "cancel lost its exact state CAS"
+                )
+        observed = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (target_task_id,)
+        ).fetchone()
+        if observed is None or observed["status"] != result_status:
+            raise OlympusContextError(
+                "olympus_control_result_conflict",
+                "control result does not match its immutable receipt",
+            )
+    return {
+        "operation_id": operation_id,
+        "status": result_status,
+        "replayed": False,
+        "effect_operation_id": effect_operation_id,
+    }
+
+
+def reconcile_olympus_telegram_controls(
+    conn: sqlite3.Connection,
+    *,
+    service_auth: OlympusMutationAuth,
+) -> int:
+    """Finalize staged cancel only after #16's effect journal is terminal."""
+    rows = conn.execute(
+        "SELECT c.operation_id,c.target_task_id,c.effect_operation_id,"
+        "e.state,e.target_post_revision,t.status,t.record_revision,t.assignee "
+        "FROM olympus_telegram_controls c "
+        "JOIN tasks t ON t.id=c.target_task_id "
+        "JOIN kanban_effect_journal e ON e.effect_kind='terminate_worker' "
+        "AND e.operation_id=c.effect_operation_id "
+        "WHERE c.action='telegram-control:cancel' "
+        "AND c.effect_operation_id IS NOT NULL",
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        if row["status"] == "archived":
+            continue
+        # A successful SIGTERM call (``applied``) is not proof that the exact
+        # process exited.  Only the dispatcher-owned birth-identity check may
+        # advance the effect to ``gone`` and permit a running cancel to archive.
+        if row["state"] != "gone" or row["status"] != "blocked":
+            continue
+        containment_revision = int(row["target_post_revision"] or 0)
+        if containment_revision < 1 \
+                or int(row["record_revision"]) != containment_revision:
+            continue
+        auth = replace(
+            service_auth,
+            actor=str(row["assignee"] or ""),
+            operation_id=f"{row['operation_id']}:finalize-cancel",
+        )
+        if archive_task(
+            conn,
+            str(row["target_task_id"]),
+            expected_record_revision=containment_revision,
+            olympus_auth=auth,
+        ):
+            changed += 1
+    return changed
 
 
 def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> list[str]:
@@ -3905,10 +9313,8 @@ def update_task_olympus_context(
     task_id: str,
     context: dict[str, Any],
     *,
-    authority_verifier: Optional[AuthorityVerifier],
-    actor: str,
-    operation_id: str,
-    expected_revision: int,
+    olympus_auth: OlympusMutationAuth,
+    subject_revision: int,
 ) -> bool:
     """Renew or revoke a governed task through canonical verification.
 
@@ -3918,10 +9324,10 @@ def update_task_olympus_context(
     """
     normalized = normalize_olympus_context(context)
     encoded = _serialize_olympus_context(normalized)
-    with write_txn(conn):
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
         row = conn.execute(
             "SELECT status, assignee, claim_lock, claim_expires, current_run_id, "
-            "olympus_context FROM tasks WHERE id = ?",
+            "record_revision, olympus_context FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if row is None:
@@ -3930,6 +9336,11 @@ def update_task_olympus_context(
             raise OlympusContextError(
                 "olympus_legacy_opt_in_forbidden",
                 "legacy tasks cannot be opted into Olympus through an update",
+            )
+        if subject_revision != int(row["record_revision"]):
+            raise OlympusContextError(
+                "olympus_subject_revision_mismatch",
+                "exact governed task revision is required",
             )
         if row["status"] in {"done", "archived"}:
             raise OlympusContextError(
@@ -3943,67 +9354,446 @@ def update_task_olympus_context(
                 "olympus_context_scope_change_forbidden",
                 "authority updates cannot move a task to another mission hierarchy",
             )
-        require_olympus_authority_verification(
-            normalized,
-            task_id=task_id,
-            assignee=row["assignee"],
-            action="update_authority_context",
-            capability=OLYMPUS_CAPABILITY_UPDATE,
-            actor=actor,
-            expected_revision=expected_revision,
-            operation_id=operation_id,
-            verifier=authority_verifier,
-            allow_inactive=True,
-        )
-        if not (
-            normalized["agent_id"]
-            == normalized["lease"]["agent_id"]
-            == normalized["lease"]["holder"]
-            == row["assignee"]
-        ):
-            raise OlympusContextError(
-                "olympus_agent_mismatch",
-                "updated lease holder, lease agent, context agent, and assignee must match",
-            )
-        if row["olympus_context"] == encoded:
-            return True
-        if row["status"] == "running":
-            now = int(time.time())
-            authority = normalized["authority"]
-            lease = normalized["lease"]
-            current_limit = min(
-                int(authority["expires_at"]), int(lease["expires_at"])
-            )
-            if authority["status"] != "ACTIVE" or lease["status"] != "ACTIVE":
-                current_limit = now - 1
-            prior_expires = row["claim_expires"]
-            bounded_expires = (
-                min(int(prior_expires), current_limit)
-                if prior_expires is not None else current_limit
-            )
-            conn.execute(
-                "UPDATE tasks SET olympus_context = ?, claim_expires = ? "
-                "WHERE id = ?",
-                (encoded, bounded_expires, task_id),
-            )
-            if row["current_run_id"] is not None:
-                conn.execute(
-                    "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
-                    (bounded_expires, int(row["current_run_id"])),
-                )
-        else:
-            conn.execute(
-                "UPDATE tasks SET olympus_context = ? WHERE id = ?",
-                (encoded, task_id),
-            )
-        _append_event(
+        _, owns_permit = _authorize_task_mutation(
             conn,
             task_id,
-            "olympus_context_updated",
-            {"olympus": _olympus_trace(normalized)},
-            run_id=_current_run_id(conn, task_id),
+            action="update_authority_context",
+            capability=OLYMPUS_CAPABILITY_UPDATE,
+            auth=olympus_auth,
+            context_override=normalized,
+            allow_inactive=True,
         )
+        try:
+            if not (
+                normalized["agent_id"]
+                == normalized["lease"]["agent_id"]
+                == normalized["lease"]["holder"]
+                == row["assignee"]
+            ):
+                raise OlympusContextError(
+                    "olympus_agent_mismatch",
+                    "updated lease holder, lease agent, context agent, and assignee must match",
+                )
+            if row["olympus_context"] == encoded:
+                return True
+            if row["status"] == "running":
+                now = int(time.time())
+                authority = normalized["authority"]
+                lease = normalized["lease"]
+                current_limit = min(
+                    int(authority["expires_at"]), int(lease["expires_at"])
+                )
+                if authority["status"] != "ACTIVE" or lease["status"] != "ACTIVE":
+                    current_limit = now - 1
+                prior_expires = row["claim_expires"]
+                bounded_expires = (
+                    min(int(prior_expires), current_limit)
+                    if prior_expires is not None else current_limit
+                )
+                conn.execute(
+                    "UPDATE tasks SET olympus_context = ?, claim_expires = ? "
+                    "WHERE id = ? AND record_revision = ?",
+                    (encoded, bounded_expires, task_id, subject_revision),
+                )
+                if row["current_run_id"] is not None:
+                    conn.execute(
+                        "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
+                        (bounded_expires, int(row["current_run_id"])),
+                    )
+            else:
+                conn.execute(
+                    "UPDATE tasks SET olympus_context = ? "
+                    "WHERE id = ? AND record_revision = ?",
+                    (encoded, task_id, subject_revision),
+                )
+            _append_event(
+                conn,
+                task_id,
+                "olympus_context_updated",
+                {"olympus": _olympus_trace(normalized)},
+                run_id=_current_run_id(conn, task_id),
+            )
+        finally:
+            _release_task_mutation_permit(conn, task_id, owns_permit)
     return True
+
+
+def verified_olympus_task_status(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    subject_revision: int,
+    olympus_auth: OlympusMutationAuth,
+) -> dict[str, Any]:
+    """Return one exact governed task status after canonical verification."""
+    if isinstance(subject_revision, bool) or not isinstance(subject_revision, int):
+        raise OlympusContextError(
+            "olympus_subject_revision_mismatch",
+            "verified status requires an exact integer task revision",
+        )
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
+        row = conn.execute(
+            "SELECT id, assignee, status, record_revision, olympus_context "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["olympus_context"] is None:
+            raise OlympusContextError(
+                "olympus_task_missing",
+                "verified Olympus status requires a governed task",
+            )
+        if int(row["record_revision"]) != subject_revision:
+            raise OlympusContextError(
+                "olympus_subject_revision_mismatch",
+                "task revision changed before verified status inspection",
+            )
+        if olympus_auth.source_identity is not None or olympus_auth.target_identity is not None:
+            raise OlympusContextError(
+                "olympus_review_principal_invalid",
+                "review status inspection requires a direct canonical principal",
+            )
+        context = _require_current_olympus_context(
+            row["olympus_context"],
+            assignee=row["assignee"],
+        )
+        assert context is not None
+        actor = str(olympus_auth.actor or context["agent_id"])
+        operation_id = (
+            f"{olympus_auth.operation_id or 'kanban'}:inspect_governed_status:"
+            f"{task_id}:r{subject_revision}"
+        )
+        authorization = require_olympus_authority_verification(
+            context,
+            subject_id=task_id,
+            subject_revision=subject_revision,
+            assignee=str(row["assignee"] or ""),
+            action="inspect_governed_status",
+            capability=OLYMPUS_CAPABILITY_INSPECT,
+            actor=actor,
+            operation_id=operation_id,
+            principal=olympus_auth,
+            expected_status=str(row["status"]),
+            board_id=_connection_board_identity(conn),
+        )
+        return {
+            "task_id": str(row["id"]),
+            "record_revision": int(row["record_revision"]),
+            "status": str(row["status"]),
+            "mission_id": context["mission_id"],
+            "verification_id": authorization["verification"]["verification_id"],
+        }
+
+
+def olympus_release_operation_id(
+    task_id: str, subject_revision: int, operation_prefix: str,
+) -> str:
+    """Return the stable canonical mutation identity for one blocked release."""
+    if (
+        not isinstance(task_id, str)
+        or not task_id.strip()
+        or isinstance(subject_revision, bool)
+        or not isinstance(subject_revision, int)
+        or subject_revision < 1
+        or not isinstance(operation_prefix, str)
+        or not operation_prefix.strip()
+    ):
+        raise OlympusContextError(
+            "olympus_release_identity_invalid",
+            "release identity requires task, revision, and operation prefix",
+        )
+    task_id = task_id.strip()
+    operation_prefix = operation_prefix.strip()
+    return (
+        f"{operation_prefix}:release_blocked_task:{task_id}:"
+        f"r{subject_revision}:target:{task_id}:r{subject_revision}"
+    )
+
+
+def _decode_olympus_release_receipt(row: sqlite3.Row) -> dict[str, Any]:
+    encoded = str(row["receipt"])
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if digest != row["receipt_sha256"]:
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            "release receipt checksum does not match",
+        )
+    try:
+        receipt = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            "release receipt is not valid JSON",
+        ) from exc
+    canonical, _ = _canonical_json_record(receipt)
+    if (
+        canonical != encoded
+        or set(receipt) != _OLYMPUS_RELEASE_RECEIPT_KEYS
+        or receipt.get("schema_version") != "olympus-task-release-receipt/1"
+        or receipt.get("operation_id") != row["operation_id"]
+        or receipt.get("task_id") != row["task_id"]
+        or receipt.get("previous_revision") != int(row["subject_revision"])
+        or receipt.get("record_revision") != int(row["record_revision"])
+        or receipt.get("verification_id") != row["verification_id"]
+        or receipt.get("request_id") != row["request_id"]
+        or receipt.get("created_at") != int(row["created_at"])
+    ):
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            "release receipt is not exact canonical evidence",
+        )
+    return receipt
+
+
+def get_olympus_release_receipt(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    subject_revision: int,
+    operation_id: str,
+) -> Optional[dict[str, Any]]:
+    """Look up and checksum-verify one exact immutable release receipt."""
+    row = conn.execute(
+        "SELECT * FROM kanban_olympus_release_receipts "
+        "WHERE operation_id = ? OR (task_id = ? AND subject_revision = ?)",
+        (operation_id, task_id, subject_revision),
+    ).fetchone()
+    if row is None:
+        return None
+    if (
+        row["operation_id"] != operation_id
+        or row["task_id"] != task_id
+        or int(row["subject_revision"]) != subject_revision
+    ):
+        raise OlympusContextError(
+            "olympus_release_receipt_conflict",
+            "release operation identity was reused for another task or revision",
+        )
+    return _decode_olympus_release_receipt(row)
+
+
+def _verify_olympus_release_replay(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    receipt: dict[str, Any],
+    olympus_auth: OlympusMutationAuth,
+) -> None:
+    """Freshly verify the exact live post-release state before API replay."""
+    row = conn.execute(
+        "SELECT status, record_revision, assignee, olympus_context "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_release_replay_orphaned",
+            "release receipt no longer has a live governed task",
+        )
+    if (
+        int(row["record_revision"]) != int(receipt["record_revision"])
+        or row["status"] != receipt["status"]
+        or receipt["status"] != "ready"
+    ):
+        raise OlympusContextError(
+            "olympus_release_replay_state_changed",
+            "live task no longer matches the exact release receipt state",
+        )
+    raw_context: Any = row["olympus_context"]
+    if isinstance(raw_context, str):
+        try:
+            raw_context = json.loads(raw_context)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OlympusContextError(
+                "olympus_context_invalid",
+                "stored Olympus context is not valid JSON",
+            ) from exc
+    actor = str(olympus_auth.actor or row["assignee"] or "")
+    authorization = require_olympus_authority_verification(
+        raw_context,
+        subject_id=task_id,
+        subject_revision=int(row["record_revision"]),
+        assignee=str(row["assignee"] or ""),
+        action="inspect_governed_status",
+        capability=OLYMPUS_CAPABILITY_INSPECT,
+        actor=actor,
+        operation_id=(
+            f"{receipt['operation_id']}:verify_receipt_replay:"
+            f"r{int(row['record_revision'])}"
+        ),
+        principal=olympus_auth,
+        expected_status=str(row["status"]),
+        board_id=_connection_board_identity(conn),
+    )
+    context = authorization["context"]
+    exact_identity = (
+        authorization["request"]["principal"] == receipt["principal"]
+        and authorization["request"]["actor"] == receipt["actor"]
+        and context["authority"]["authority_id"] == receipt["authority_id"]
+        and context["authority"]["revision"] == receipt["authority_revision"]
+        and context["authority"]["source"] == receipt["authority_source"]
+        and context["lease"]["lease_id"] == receipt["lease_id"]
+        and context["lease"]["revision"] == receipt["lease_revision"]
+        and context["lease"]["source"] == receipt["lease_source"]
+    )
+    if not exact_identity:
+        raise OlympusContextError(
+            "olympus_release_replay_principal_conflict",
+            "fresh replay verification does not match the durable release identity",
+        )
+
+
+def release_olympus_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    subject_revision: int,
+    olympus_auth: OlympusMutationAuth,
+) -> dict[str, Any]:
+    """Release once, or replay the exact durable receipt after a crash."""
+    if isinstance(subject_revision, bool) or not isinstance(subject_revision, int):
+        raise OlympusContextError(
+            "olympus_subject_revision_mismatch",
+            "governed release requires an exact integer task revision",
+        )
+    operation_id = olympus_release_operation_id(
+        task_id,
+        subject_revision,
+        str(olympus_auth.operation_id or "kanban"),
+    )
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
+        replay = get_olympus_release_receipt(
+            conn,
+            task_id=task_id,
+            subject_revision=subject_revision,
+            operation_id=operation_id,
+        )
+        if replay is not None:
+            _verify_olympus_release_replay(
+                conn,
+                task_id=task_id,
+                receipt=replay,
+                olympus_auth=olympus_auth,
+            )
+            return replay
+        row = conn.execute(
+            "SELECT status, record_revision, olympus_context FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or row["olympus_context"] is None:
+            raise OlympusContextError(
+                "olympus_task_missing",
+                "governed release requires an existing governed task",
+            )
+        if int(row["record_revision"]) != subject_revision:
+            raise OlympusContextError(
+                "olympus_subject_revision_mismatch",
+                "task revision changed before governed release",
+            )
+        if row["status"] != "blocked":
+            raise OlympusContextError(
+                "olympus_release_status_invalid",
+                "governed release requires exact blocked status",
+            )
+        if conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None:
+            raise OlympusContextError(
+                "olympus_release_dependencies_incomplete",
+                "governed task cannot release before all dependencies complete",
+            )
+        authorization, owns = _authorize_task_mutation(
+            conn,
+            task_id,
+            action="release_blocked_task",
+            capability=OLYMPUS_CAPABILITY_RELEASE,
+            auth=olympus_auth,
+        )
+        try:
+            if authorization["request"]["operation_id"] != operation_id:
+                raise OlympusContextError(
+                    "olympus_release_identity_conflict",
+                    "release request operation identity is not stable",
+                )
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status = 'blocked' AND record_revision = ?",
+                (task_id, subject_revision),
+            )
+            if cur.rowcount != 1:
+                raise OlympusContextError(
+                    "olympus_release_cas_failed",
+                    "governed release lost its exact revision CAS",
+                )
+            new_revision = int(conn.execute(
+                "SELECT record_revision FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()["record_revision"])
+            _append_event(
+                conn,
+                task_id,
+                "unblocked",
+                {
+                    "governed_release": True,
+                    "from_revision": subject_revision,
+                    "operation_id": operation_id,
+                    "request_id": authorization["request"]["request_id"],
+                },
+            )
+            created_at = int(time.time())
+            context = authorization["context"]
+            receipt = {
+                "schema_version": "olympus-task-release-receipt/1",
+                "operation_id": operation_id,
+                "task_id": task_id,
+                "previous_status": "blocked",
+                "status": "ready",
+                "previous_revision": int(subject_revision),
+                "record_revision": new_revision,
+                "verification_id": authorization["verification"]["verification_id"],
+                "request_id": authorization["request"]["request_id"],
+                "actor": authorization["request"]["actor"],
+                "principal": authorization["request"]["principal"],
+                "authority_id": context["authority"]["authority_id"],
+                "authority_revision": context["authority"]["revision"],
+                "authority_source": context["authority"]["source"],
+                "lease_id": context["lease"]["lease_id"],
+                "lease_revision": context["lease"]["revision"],
+                "lease_source": context["lease"]["source"],
+                "created_at": created_at,
+            }
+            encoded_receipt, receipt_sha256 = _canonical_json_record(receipt)
+            _bind_issued_permit_write(
+                conn,
+                task_id,
+                {
+                    "schema_version": RELEASE_RECEIPT_WRITE_SCHEMA,
+                    "operation_id": operation_id,
+                    "task_id": task_id,
+                    "subject_revision": subject_revision,
+                    "record_revision": new_revision,
+                    "verification_id": receipt["verification_id"],
+                    "request_id": receipt["request_id"],
+                    "receipt": encoded_receipt,
+                    "receipt_sha256": receipt_sha256,
+                    "created_at": created_at,
+                },
+            )
+            conn.execute(
+                "INSERT INTO kanban_olympus_release_receipts "
+                "(operation_id,task_id,subject_revision,record_revision,"
+                "verification_id,request_id,receipt,receipt_sha256,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    operation_id, task_id, subject_revision, new_revision,
+                    receipt["verification_id"], receipt["request_id"],
+                    encoded_receipt, receipt_sha256, created_at,
+                ),
+            )
+            return receipt
+        finally:
+            _release_task_mutation_permit(conn, task_id, owns)
 
 
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
@@ -4072,6 +9862,7 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
+@_guarded_task_mutation(action="assign", capability=OLYMPUS_CAPABILITY_ASSIGN)
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
     """Assign or reassign a task.  Returns True on success.
 
@@ -4081,7 +9872,8 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
-            "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status, claim_lock, assignee, olympus_context "
+            "FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not row:
             return False
@@ -4090,6 +9882,21 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
                 f"cannot reassign {task_id}: currently running (claimed). "
                 "Wait for completion or reclaim the stale lock first."
             )
+        if row["olympus_context"] is not None:
+            context = normalize_olympus_context(row["olympus_context"])
+            lease = context["lease"]
+            if not (
+                profile
+                == context["agent_id"]
+                == lease["agent_id"]
+                == lease["holder"]
+                == row["assignee"]
+            ):
+                raise OlympusContextError(
+                    "olympus_reassignment_requires_rebind",
+                    "governed reassignment requires a new canonically verified context and lease",
+                )
+            return True
         if row["assignee"] != profile:
             # The retry guard is scoped to the task/profile combination. A
             # human reassigning the task is an explicit recovery action, so the
@@ -4109,6 +9916,11 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
 # Links
 # ---------------------------------------------------------------------------
 
+@_guarded_task_mutation(
+    action="link",
+    capability=OLYMPUS_CAPABILITY_LINK,
+    task_params=("parent_id", "child_id"),
+)
 def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
@@ -4120,10 +9932,12 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             raise ValueError(
                 f"linking {parent_id} -> {child_id} would create a cycle"
             )
-        conn.execute(
+        inserted = conn.execute(
             "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
             (parent_id, child_id),
         )
+        if inserted.rowcount != 1:
+            return
         # If child was ready but parent is not yet done, demote child to todo.
         parent_status = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (parent_id,)
@@ -4137,6 +9951,15 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             conn, child_id, "linked",
             {"parent": parent_id, "child": child_id},
         )
+        for linked_task_id in dict.fromkeys((parent_id, child_id)):
+            if conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ? AND olympus_context IS NOT NULL",
+                (linked_task_id,),
+            ).fetchone() is not None:
+                conn.execute(
+                    "UPDATE tasks SET record_revision = record_revision WHERE id = ?",
+                    (linked_task_id,),
+                )
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -4162,24 +9985,53 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
     return False
 
 
-def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
-    with write_txn(conn):
-        cur = conn.execute(
-            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-            (parent_id, child_id),
-        )
-        if cur.rowcount:
-            _append_event(
-                conn, child_id, "unlinked",
-                {"parent": parent_id, "child": child_id},
+def unlink_tasks(
+    conn: sqlite3.Connection,
+    parent_id: str,
+    child_id: str,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    bound_auth = olympus_auth or _OLYMPUS_MUTATION_AUTH.get()
+    with olympus_mutation_scope(bound_auth), write_txn(conn):
+        permits: list[tuple[str, bool, Optional[dict[str, Any]]]] = []
+        authorization: Optional[dict[str, Any]] = None
+        try:
+            for task_id in dict.fromkeys((parent_id, child_id)):
+                authorization, owns = _authorize_task_mutation(
+                    conn,
+                    task_id,
+                    action="unlink",
+                    capability=OLYMPUS_CAPABILITY_LINK,
+                    auth=bound_auth,
+                )
+                permits.append((task_id, owns, authorization))
+            cur = conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (parent_id, child_id),
             )
-        removed = cur.rowcount > 0
+            if cur.rowcount:
+                _append_event(
+                    conn, child_id, "unlinked",
+                    {"parent": parent_id, "child": child_id},
+                )
+                for task_id, _, authorization in permits:
+                    if authorization is not None:
+                        conn.execute(
+                            "UPDATE tasks SET record_revision = record_revision "
+                            "WHERE id = ?",
+                            (task_id,),
+                        )
+            removed = cur.rowcount > 0
+        finally:
+            for task_id, owns, _ in reversed(permits):
+                _release_task_mutation_permit(conn, task_id, owns)
     if removed:
         # Dependency edge removed — re-evaluate promotion eligibility for the
         # child immediately.  Matches the contract of complete_task and
         # unblock_task; without this the child stays stuck in todo until the
         # next dispatcher tick or a manual `hermes kanban recompute` (issue #22459).
-        recompute_ready(conn)
+        recompute_ready(conn, olympus_auth=bound_auth)
     return removed
 
 
@@ -4218,6 +10070,11 @@ def parent_results(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, Op
 # Comments & events
 # ---------------------------------------------------------------------------
 
+@_guarded_task_mutation(
+    action="comment",
+    capability=OLYMPUS_CAPABILITY_COMMENT,
+    touch_aggregate=True,
+)
 def add_comment(
     conn: sqlite3.Connection, task_id: str, author: str, body: str
 ) -> int:
@@ -4261,6 +10118,11 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
 # Attachments
 # ---------------------------------------------------------------------------
 
+@_guarded_task_mutation(
+    action="add_attachment",
+    capability=OLYMPUS_CAPABILITY_ATTACHMENT,
+    touch_aggregate=True,
+)
 def add_attachment(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4270,6 +10132,7 @@ def add_attachment(
     content_type: Optional[str] = None,
     size: int = 0,
     uploaded_by: Optional[str] = None,
+    board: Optional[str] = None,
 ) -> int:
     """Record a file attachment for a task. Returns the new attachment id.
 
@@ -4281,6 +10144,20 @@ def add_attachment(
         raise ValueError("attachment filename is required")
     if not stored_path or not stored_path.strip():
         raise ValueError("attachment stored_path is required")
+    cleaned_filename = filename.strip()
+    if Path(cleaned_filename).name != cleaned_filename:
+        raise ValueError("attachment filename must be a single path component")
+    canonical_path = validated_attachment_path(
+        task_id, stored_path, board=board, require_file=False,
+    )
+    if canonical_path.name != cleaned_filename:
+        raise ValueError("attachment filename must match stored_path")
+    with open_attachment_for_read(
+        task_id, canonical_path, board=board,
+    ) as attachment_file:
+        actual_size = int(os.fstat(attachment_file.fileno()).st_size)
+    if int(size) != actual_size:
+        raise ValueError("attachment size does not match the stored regular file")
     now = int(time.time())
     with write_txn(conn):
         if not conn.execute(
@@ -4293,10 +10170,10 @@ def add_attachment(
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id,
-                filename.strip(),
-                stored_path,
+                cleaned_filename,
+                str(canonical_path),
                 content_type,
-                int(size),
+                actual_size,
                 uploaded_by,
                 now,
             ),
@@ -4305,7 +10182,7 @@ def add_attachment(
             conn,
             task_id,
             "attached",
-            {"filename": filename.strip(), "size": int(size), "by": uploaded_by},
+            {"filename": cleaned_filename, "size": actual_size, "by": uploaded_by},
         )
         return int(cur.lastrowid or 0)
 
@@ -4348,26 +10225,44 @@ def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Att
     )
 
 
-def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
+def delete_attachment(
+    conn: sqlite3.Connection,
+    attachment_id: int,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+    board: Optional[str] = None,
+) -> Optional[Attachment]:
     """Delete an attachment row and its on-disk blob. Returns the removed row.
 
     Returns ``None`` when no row matched. The blob is removed best-effort
     (a missing file is not an error); the metadata row is the source of
     truth for whether an attachment "exists".
     """
-    with write_txn(conn):
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
         att = get_attachment(conn, attachment_id)
         if att is None:
             return None
+        canonical_path = validated_attachment_path(
+            att.task_id, att.stored_path, board=board, require_file=False,
+        )
+        _authorize_task_mutation(
+            conn,
+            att.task_id,
+            action="delete_attachment",
+            capability=OLYMPUS_CAPABILITY_ATTACHMENT,
+            auth=olympus_auth,
+        )
         conn.execute("DELETE FROM task_attachments WHERE id = ?", (attachment_id,))
+        conn.execute(
+            "UPDATE tasks SET record_revision = record_revision WHERE id = ?",
+            (att.task_id,),
+        )
         _append_event(
             conn, att.task_id, "attachment_removed", {"filename": att.filename}
         )
     try:
-        p = Path(att.stored_path)
-        if p.is_file():
-            p.unlink()
-    except OSError:
+        unlink_attachment_blob(att.task_id, canonical_path, board=board)
+    except (OSError, ValueError):
         pass
     return att
 
@@ -4413,11 +10308,35 @@ def _append_event(
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
-        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (task_id, run_id, kind, pl, now),
-    )
+    audit_registry = getattr(conn, "_olympus_audit_registry", None)
+    protected_audit = False
+    if kind in _OLYMPUS_PROTECTED_AUDIT_KINDS:
+        governed = conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ? AND olympus_context IS NOT NULL",
+            (task_id,),
+        ).fetchone() is not None
+        has_permit = _issued_permit_row(conn, task_id) is not None
+        if governed and not has_permit:
+            if audit_registry is None:
+                raise OlympusContextError(
+                    "olympus_audit_registry_missing",
+                    "protected audit registry is unavailable",
+                )
+            token = (
+                str(task_id), int(run_id) if run_id is not None else None,
+                str(kind), str(pl) if pl is not None else None, int(now),
+            )
+            audit_registry.add(token)
+            protected_audit = True
+    try:
+        conn.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (task_id, run_id, kind, pl, now),
+        )
+    finally:
+        if protected_audit:
+            audit_registry.discard(token)
 
 
 def _end_run(
@@ -4510,28 +10429,48 @@ def _synthesize_ended_run(
     """
     now = int(time.time())
     trow = conn.execute(
-        "SELECT assignee, current_step_key, olympus_context "
+        "SELECT assignee, current_step_key, olympus_context, record_revision "
         "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     profile = trow["assignee"] if trow else None
     step_key = trow["current_step_key"] if trow else None
     olympus_context = trow["olympus_context"] if trow else None
+    subject_revision = (
+        int(trow["record_revision"])
+        if trow and olympus_context is not None else None
+    )
+    auth_root_id = None
+    auth_root_revision = None
+    verification_id = None
+    if olympus_context is not None:
+        permit = _issued_permit_row(conn, task_id)
+        if permit is None:
+            raise OlympusContextError(
+                "olympus_authority_verification_unavailable",
+                "governed terminal run requires an active exact permit",
+            )
+        subject_revision = int(permit["subject_revision"])
+        auth_root_id = str(permit["auth_root_id"])
+        auth_root_revision = int(permit["auth_root_revision"])
+        verification_id = str(permit["verification_id"])
     cur = conn.execute(
         """
         INSERT INTO task_runs (
             task_id, profile, step_key,
             status, outcome,
             summary, error, metadata,
-            started_at, ended_at, olympus_context
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, ended_at, olympus_context, subject_revision,
+            process_state, auth_root_id, auth_root_revision, verification_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task_id, profile, step_key,
             outcome, outcome,
             summary, error,
             json.dumps(metadata, ensure_ascii=False) if metadata else None,
-            now, now, olympus_context,
+            now, now, olympus_context, subject_revision,
+            "terminal", auth_root_id, auth_root_revision, verification_id,
         ),
     )
     return int(cur.lastrowid or 0)
@@ -4580,7 +10519,10 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def recompute_ready(
-    conn: sqlite3.Connection, failure_limit: int = None,
+    conn: sqlite3.Connection,
+    failure_limit: int = None,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> int:
     """Promote ``todo`` tasks to ``ready`` when all parents are ``done`` or ``archived``.
 
@@ -4615,7 +10557,7 @@ def recompute_ready(
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, olympus_context "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
@@ -4634,6 +10576,22 @@ def recompute_ready(
                 (task_id,),
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
+                try:
+                    _authorize_task_mutation(
+                        conn,
+                        task_id,
+                        action="promote",
+                        capability=OLYMPUS_CAPABILITY_STATUS,
+                        auth=olympus_auth,
+                    )
+                except OlympusContextError as exc:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "promotion_rejected",
+                        {"reason": exc.reason, "governance": "olympus"},
+                    )
+                    continue
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
                     # circuit-breaker failure limit.  Without this
@@ -4676,10 +10634,7 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
-    authority_verifier: Optional[AuthorityVerifier] = None,
-    actor: Optional[str] = None,
-    operation_id: Optional[str] = None,
-    expected_revision: Optional[int] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -4690,6 +10645,7 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        authorization: Optional[dict[str, Any]] = None
         gate_row = conn.execute(
             "SELECT status, assignee, olympus_context FROM tasks WHERE id = ?",
             (task_id,),
@@ -4703,17 +10659,12 @@ def claim_task(
                 now=now,
             )
             if olympus is not None:
-                require_olympus_authority_verification(
-                    olympus,
-                    task_id=task_id,
-                    assignee=gate_row["assignee"],
+                authorization, _ = _authorize_task_mutation(
+                    conn,
+                    task_id,
                     action="claim",
                     capability=OLYMPUS_CAPABILITY_CLAIM,
-                    actor=actor or "",
-                    expected_revision=expected_revision,  # type: ignore[arg-type]
-                    operation_id=operation_id or "",
-                    verifier=authority_verifier,
-                    now=now,
+                    auth=olympus_auth,
                 )
         except OlympusContextError as exc:
             _append_event(
@@ -4728,6 +10679,28 @@ def claim_task(
         )
         if olympus is not None:
             expires = min(expires, int(olympus["lease"]["expires_at"]))
+        launch_token = secrets.token_urlsafe(32)
+        run_origin_revision: Optional[int] = None
+        auth_root_id: Optional[str] = None
+        auth_root_revision: Optional[int] = None
+        verification_id: Optional[str] = None
+        if authorization is not None:
+            permit = _issued_permit_row(conn, task_id)
+            if permit is None:
+                raise OlympusContextError(
+                    "olympus_authority_verification_unavailable",
+                    "governed claim requires an active exact permit",
+                )
+            run_origin_revision = int(permit["subject_revision"])
+            authorization_subject = (
+                authorization["request"]["authorization_root"]
+                or authorization["request"]["target"]
+            )
+            auth_root_id = str(authorization_subject["subject_id"])
+            auth_root_revision = int(authorization_subject["subject_revision"])
+            verification_id = str(
+                authorization["verification"]["verification_id"]
+            )
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -4792,7 +10765,7 @@ def claim_task(
         # its assignee / step / runtime cap.
         trow = conn.execute(
             "SELECT assignee, max_runtime_seconds, current_step_key, "
-            "olympus_context "
+            "olympus_context, record_revision "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -4801,8 +10774,10 @@ def claim_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at, olympus_context
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                started_at, olympus_context, subject_revision,
+                process_state, launch_token, auth_root_id,
+                auth_root_revision, verification_id
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -4813,6 +10788,12 @@ def claim_task(
                 trow["max_runtime_seconds"] if trow else None,
                 now,
                 olympus_json,
+                run_origin_revision,
+                "workspace_pending",
+                launch_token,
+                auth_root_id,
+                auth_root_revision,
+                verification_id,
             ),
         )
         run_id = run_cur.lastrowid
@@ -4839,10 +10820,7 @@ def claim_review_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
-    authority_verifier: Optional[AuthorityVerifier] = None,
-    actor: Optional[str] = None,
-    operation_id: Optional[str] = None,
-    expected_revision: Optional[int] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> Optional[Task]:
     """Atomically transition ``review -> running``.
 
@@ -4860,6 +10838,7 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        authorization: Optional[dict[str, Any]] = None
         gate_row = conn.execute(
             "SELECT status, assignee, olympus_context FROM tasks WHERE id = ?",
             (task_id,),
@@ -4873,17 +10852,12 @@ def claim_review_task(
                 now=now,
             )
             if olympus is not None:
-                require_olympus_authority_verification(
-                    olympus,
-                    task_id=task_id,
-                    assignee=gate_row["assignee"],
+                authorization, _ = _authorize_task_mutation(
+                    conn,
+                    task_id,
                     action="claim_review",
                     capability=OLYMPUS_CAPABILITY_CLAIM,
-                    actor=actor or "",
-                    expected_revision=expected_revision,  # type: ignore[arg-type]
-                    operation_id=operation_id or "",
-                    verifier=authority_verifier,
-                    now=now,
+                    auth=olympus_auth,
                 )
         except OlympusContextError as exc:
             _append_event(
@@ -4902,6 +10876,28 @@ def claim_review_task(
         )
         if olympus is not None:
             expires = min(expires, int(olympus["lease"]["expires_at"]))
+        launch_token = secrets.token_urlsafe(32)
+        run_origin_revision: Optional[int] = None
+        auth_root_id: Optional[str] = None
+        auth_root_revision: Optional[int] = None
+        verification_id: Optional[str] = None
+        if authorization is not None:
+            permit = _issued_permit_row(conn, task_id)
+            if permit is None:
+                raise OlympusContextError(
+                    "olympus_authority_verification_unavailable",
+                    "governed review claim requires an active exact permit",
+                )
+            run_origin_revision = int(permit["subject_revision"])
+            authorization_subject = (
+                authorization["request"]["authorization_root"]
+                or authorization["request"]["target"]
+            )
+            auth_root_id = str(authorization_subject["subject_id"])
+            auth_root_revision = int(authorization_subject["subject_revision"])
+            verification_id = str(
+                authorization["verification"]["verification_id"]
+            )
         cur = conn.execute(
             """
             UPDATE tasks
@@ -4919,7 +10915,7 @@ def claim_review_task(
             return None
         trow = conn.execute(
             "SELECT assignee, max_runtime_seconds, current_step_key, "
-            "olympus_context "
+            "olympus_context, record_revision "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -4928,8 +10924,10 @@ def claim_review_task(
             INSERT INTO task_runs (
                 task_id, profile, step_key, status,
                 claim_lock, claim_expires, max_runtime_seconds,
-                started_at, olympus_context
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)
+                started_at, olympus_context, subject_revision,
+                process_state, launch_token, auth_root_id,
+                auth_root_revision, verification_id
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -4940,6 +10938,12 @@ def claim_review_task(
                 trow["max_runtime_seconds"] if trow else None,
                 now,
                 olympus_json,
+                run_origin_revision,
+                "workspace_pending",
+                launch_token,
+                auth_root_id,
+                auth_root_revision,
+                verification_id,
             ),
         )
         run_id = run_cur.lastrowid
@@ -4961,16 +10965,714 @@ def claim_review_task(
         return get_task(conn, task_id)
 
 
+def reserve_worker_run(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    review: bool = False,
+    ttl_seconds: Optional[int] = None,
+    claimer: Optional[str] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> Optional[Run]:
+    """Claim a task and durably reserve its unique worker launch token."""
+    claim = claim_review_task if review else claim_task
+    task = claim(
+        conn,
+        task_id,
+        ttl_seconds=ttl_seconds,
+        claimer=claimer,
+        olympus_auth=olympus_auth,
+    )
+    if task is None or task.current_run_id is None:
+        return None
+    return get_run(conn, int(task.current_run_id))
+
+
+def _worker_run_gate(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT r.*, t.status AS task_status, t.current_run_id, "
+        "t.claim_lock AS task_claim_lock, t.olympus_context AS task_context "
+        "FROM task_runs r JOIN tasks t ON t.id = r.task_id "
+        "WHERE r.id = ? AND r.task_id = ?",
+        (int(run_id), task_id),
+    ).fetchone()
+    if (
+        row is None
+        or not launch_token
+        or row["launch_token"] != launch_token
+        or row["current_run_id"] != int(run_id)
+        or row["task_status"] != "running"
+        or row["status"] != "running"
+        or row["ended_at"] is not None
+        or row["task_claim_lock"] != row["claim_lock"]
+    ):
+        raise OlympusContextError(
+            "worker_run_identity_mismatch",
+            "worker run is not the current exact launch reservation",
+        )
+    return row
+
+
+def mark_worker_workspace_ready(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+    workspace_snapshot: Mapping[str, Any],
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    """CAS a reserved run to workspace-ready with an immutable snapshot."""
+    if not isinstance(workspace_snapshot, Mapping) or not workspace_snapshot:
+        raise ValueError("workspace_snapshot must be a non-empty mapping")
+    snapshot = json.dumps(
+        dict(workspace_snapshot), sort_keys=True, separators=(",", ":"),
+    )
+    with write_txn(conn):
+        _worker_run_gate(
+            conn, task_id=task_id, run_id=run_id, launch_token=launch_token,
+        )
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="mark_worker_workspace_ready",
+            capability=OLYMPUS_CAPABILITY_WORKSPACE,
+            auth=olympus_auth,
+        ):
+            cur = conn.execute(
+                "UPDATE task_runs SET process_state = 'launch_reserved', "
+                "workspace_snapshot = ? WHERE id = ? AND task_id = ? "
+                "AND launch_token = ? AND process_state = 'workspace_pending'",
+                (snapshot, int(run_id), task_id, launch_token),
+            )
+    return cur.rowcount == 1
+
+
+def mark_worker_starting(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    """Commit the launch-reserved to starting CAS before spawning."""
+    with write_txn(conn):
+        _worker_run_gate(
+            conn, task_id=task_id, run_id=run_id, launch_token=launch_token,
+        )
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="mark_worker_starting",
+            capability=OLYMPUS_CAPABILITY_CLAIM,
+            auth=olympus_auth,
+        ):
+            cur = conn.execute(
+                "UPDATE task_runs SET process_state = 'starting' "
+                "WHERE id = ? AND task_id = ? AND launch_token = ? "
+                "AND process_state = 'launch_reserved' "
+                "AND workspace_snapshot IS NOT NULL",
+                (int(run_id), task_id, launch_token),
+            )
+    return cur.rowcount == 1
+
+
+def register_worker_process(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+    process_identity: ProcessIdentity,
+    dispatcher_instance_id: str,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    """Register the bootstrap's exact live process identity before work."""
+    if (
+        read_process_identity(process_identity.pid) != process_identity
+        or not dispatcher_instance_id.strip()
+    ):
+        raise OlympusContextError(
+            "worker_process_identity_unverified",
+            "worker bootstrap process identity could not be verified",
+        )
+    now = int(time.time())
+    with write_txn(conn):
+        _worker_run_gate(
+            conn, task_id=task_id, run_id=run_id, launch_token=launch_token,
+        )
+        task_revision = int(conn.execute(
+            "SELECT record_revision FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()["record_revision"])
+        mutation_binding = {
+            "schema_version": WORKER_REGISTRATION_WRITE_SCHEMA,
+            "action": "register_worker_process",
+            "task_id": task_id,
+            "task_record_revision": task_revision,
+            "dispatcher_instance_id": dispatcher_instance_id.strip(),
+        }
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="register_worker_process",
+            capability=OLYMPUS_CAPABILITY_CLAIM,
+            auth=olympus_auth,
+            mutation_binding=mutation_binding,
+        ):
+            cur = conn.execute(
+                "UPDATE task_runs SET process_state = 'registered', worker_pid = ?, "
+                "worker_host_id = ?, worker_boot_id = ?, worker_start_token = ?, "
+                "worker_registered_at = ?, dispatcher_instance_id = ? "
+                "WHERE id = ? AND task_id = ? AND launch_token = ? "
+                "AND process_state = 'starting'",
+                (
+                    process_identity.pid, process_identity.host_id,
+                    process_identity.boot_id, process_identity.start_token,
+                    now, dispatcher_instance_id.strip(), int(run_id), task_id,
+                    launch_token,
+                ),
+            )
+            if cur.rowcount == 1:
+                conn.execute(
+                    "UPDATE tasks SET worker_pid = ? WHERE id = ? "
+                    "AND current_run_id = ?",
+                    (process_identity.pid, task_id, int(run_id)),
+                )
+    return cur.rowcount == 1
+
+
+def fail_worker_launch(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+    error: str,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    """Fail closed when bootstrap registration cannot complete."""
+    now = int(time.time())
+    with write_txn(conn):
+        _worker_run_gate(
+            conn, task_id=task_id, run_id=run_id, launch_token=launch_token,
+        )
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="fail_worker_launch",
+            capability=OLYMPUS_CAPABILITY_RECOVER,
+            auth=olympus_auth,
+        ):
+            cur = conn.execute(
+                "UPDATE task_runs SET process_state = 'spawn_failed', "
+                "status = 'failed', outcome = 'spawn_failed', error = ?, "
+                "ended_at = ?, claim_lock = NULL, claim_expires = NULL "
+                "WHERE id = ? AND task_id = ? AND launch_token = ? "
+                "AND process_state IN ('workspace_pending','launch_reserved','starting')",
+                (str(error)[:2000], now, int(run_id), task_id, launch_token),
+            )
+            if cur.rowcount == 1:
+                conn.execute(
+                    "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+                    "last_failure_error = ? WHERE id = ? AND current_run_id = ?",
+                    (str(error)[:2000], task_id, int(run_id)),
+                )
+    return cur.rowcount == 1
+
+
+def _canonical_effect_payload(payload: Mapping[str, Any]) -> tuple[str, str]:
+    encoded = json.dumps(
+        dict(payload), sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False, allow_nan=False,
+    )
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _canonical_notifier_effect_source_identity(
+    notifier: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive persisted effect-source evidence from a live notifier snapshot."""
+    return {
+        "schema_version": "kanban-notifier-effect-source/1",
+        "board_id": notifier["board_id"],
+        "task_id": notifier["task_id"],
+        "platform": notifier["platform"],
+        "chat_id": notifier["chat_id"],
+        "thread_id": notifier["thread_id"],
+        "user_id": notifier["user_id"],
+        "notifier_profile": notifier["notifier_profile"],
+        "gateway_host_id": notifier["gateway_host_id"],
+        "gateway_boot_id": notifier["gateway_boot_id"],
+        "gateway_pid": notifier["gateway_pid"],
+        "gateway_start_token": notifier["gateway_start_token"],
+    }
+
+
+def _canonical_notifier_effect_source(
+    auth: OlympusMutationAuth,
+) -> dict[str, Any]:
+    notifier = auth.notifier_identity
+    if not isinstance(notifier, dict):
+        raise OlympusContextError(
+            "olympus_notifier_identity_missing",
+            "governed notification effect requires canonical notifier identity",
+        )
+    return _canonical_notifier_effect_source_identity(notifier)
+
+
+def stage_worker_termination(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    launch_token: str,
+    process_identity: ProcessIdentity,
+    operation_id: str,
+    reason: str,
+    source_identity: Mapping[str, Any],
+    outcome: str = "reclaimed",
+    event_kind: str = "termination_staged",
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> int:
+    """Contain a run and journal one exact termination effect atomically."""
+    if outcome not in {"reclaimed", "stale", "timed_out", "crashed"}:
+        raise ValueError("invalid governed recovery outcome")
+    if event_kind not in {
+        "reclaimed", "stale", "timed_out", "crashed", "termination_staged",
+    }:
+        raise ValueError("invalid governed recovery event kind")
+    now = int(time.time())
+    effect_payload = {
+        "reason": str(reason)[:2000],
+        "outcome": outcome,
+        "event_kind": event_kind,
+    }
+    payload, digest = _canonical_effect_payload(effect_payload)
+    source = json.dumps(
+        dict(source_identity), sort_keys=True, separators=(",", ":"),
+    )
+    with write_txn(conn):
+        row = _worker_run_gate(
+            conn, task_id=task_id, run_id=run_id, launch_token=launch_token,
+        )
+        stored = ProcessIdentity(
+            host_id=str(row["worker_host_id"] or ""),
+            boot_id=str(row["worker_boot_id"] or ""),
+            pid=int(row["worker_pid"] or 0),
+            start_token=str(row["worker_start_token"] or ""),
+        )
+        if row["process_state"] != "registered" or stored != process_identity:
+            raise OlympusContextError(
+                "worker_process_identity_mismatch",
+                "termination target does not match the registered process",
+            )
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="stage_worker_termination",
+            capability=OLYMPUS_CAPABILITY_RECOVER,
+            auth=olympus_auth,
+        ):
+            permit = _issued_permit_row(conn, task_id)
+            if permit is None:
+                raise OlympusContextError(
+                    "olympus_authority_verification_unavailable",
+                    "worker termination requires an active exact permit",
+                )
+            cur = conn.execute(
+                "UPDATE task_runs SET process_state = 'termination_pending', "
+                "status = ?, outcome = ?, error = ?, ended_at = ?, "
+                "claim_lock = NULL, claim_expires = NULL WHERE id = ? "
+                "AND process_state = 'registered'",
+                (outcome, outcome, str(reason)[:2000], now, int(run_id)),
+            )
+            if cur.rowcount != 1:
+                raise OlympusContextError(
+                    "worker_termination_race", "worker run changed before containment",
+                )
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                "WHERE id = ? AND current_run_id = ?",
+                (task_id, int(run_id)),
+            )
+            post = conn.execute(
+                "SELECT record_revision FROM tasks WHERE id = ?", (task_id,),
+            ).fetchone()
+            effect = conn.execute(
+                "INSERT INTO kanban_effect_journal ("
+                "effect_kind, operation_id, task_id, run_id, auth_root_id, "
+                "auth_root_revision, target_pre_revision, target_post_revision, "
+                "worker_host_id, worker_boot_id, worker_pid, worker_start_token, "
+                "source_identity, payload, payload_sha256, state, created_at, updated_at"
+                ") VALUES ('terminate_worker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "'pending', ?, ?)",
+                (
+                    operation_id, task_id, int(run_id), permit["auth_root_id"],
+                    permit["auth_root_revision"], permit["subject_revision"],
+                    int(post["record_revision"]), stored.host_id, stored.boot_id,
+                    stored.pid, stored.start_token, source, payload, digest, now, now,
+                ),
+            )
+            _append_event(
+                conn,
+                task_id,
+                event_kind,
+                {
+                    **effect_payload,
+                    "effect_id": int(effect.lastrowid),
+                    "worker_pid": stored.pid,
+                    "process_identity": "exact",
+                },
+                run_id=int(run_id),
+            )
+    effect_id = int(effect.lastrowid)
+    failpoint = _OLYMPUS_EFFECT_EXECUTION_FAILPOINT
+    if callable(failpoint):
+        failpoint("after_stage")
+    return effect_id
+
+
+def execute_worker_termination_effect(
+    conn: sqlite3.Connection,
+    effect_id: int,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+    signal_fn=None,
+) -> str:
+    """Apply one termination effect exactly once; never signal by PID alone."""
+    import signal
+
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM kanban_effect_journal WHERE id = ? "
+            "AND effect_kind = 'terminate_worker'",
+            (int(effect_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(effect_id)
+        if row["state"] != "pending":
+            return str(row["state"])
+        task_id = str(row["task_id"])
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="execute_worker_termination_effect",
+            capability=OLYMPUS_CAPABILITY_RECOVER,
+            auth=olympus_auth,
+        ):
+            cur = conn.execute(
+                "UPDATE kanban_effect_journal SET state = 'applying', updated_at = ? "
+                "WHERE id = ? AND state = 'pending'",
+                (int(time.time()), int(effect_id)),
+            )
+            if cur.rowcount != 1:
+                return "unknown"
+    failpoint = _OLYMPUS_EFFECT_EXECUTION_FAILPOINT
+    if callable(failpoint):
+        failpoint("after_claim")
+    target = ProcessIdentity(
+        host_id=str(row["worker_host_id"]),
+        boot_id=str(row["worker_boot_id"]),
+        pid=int(row["worker_pid"]),
+        start_token=str(row["worker_start_token"]),
+    )
+    live = read_process_identity(target.pid)
+    state = "identity_mismatch"
+    error = None
+    if live is None:
+        state = "identity_unverified" if _pid_alive(target.pid) else "gone"
+    elif live == target:
+        try:
+            (signal_fn or os.kill)(target.pid, signal.SIGTERM)
+            state = "applied"
+        except ProcessLookupError:
+            state = "gone"
+        except Exception as exc:
+            state = "failed"
+            error = type(exc).__name__
+    failpoint = _OLYMPUS_EFFECT_EXECUTION_FAILPOINT
+    if callable(failpoint):
+        failpoint("after_execute")
+    with write_txn(conn):
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="execute_worker_termination_effect",
+            capability=OLYMPUS_CAPABILITY_RECOVER,
+            auth=olympus_auth,
+        ):
+            conn.execute(
+                "UPDATE kanban_effect_journal SET state = ?, error = ?, "
+                "updated_at = ?, applied_at = ? WHERE id = ? AND state = 'applying'",
+                (state, error, int(time.time()), int(time.time()), int(effect_id)),
+            )
+            conn.execute(
+                "UPDATE task_runs SET process_state = ? WHERE id = ? "
+                "AND process_state = 'termination_pending'",
+                (
+                    "terminal" if state == "gone"
+                    else "termination_sent" if state == "applied"
+                    else "identity_unverified",
+                    row["run_id"],
+                ),
+            )
+    failpoint = _OLYMPUS_EFFECT_EXECUTION_FAILPOINT
+    if callable(failpoint):
+        failpoint("after_settle")
+    return state
+
+
+def confirm_applied_worker_termination_effects(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> int:
+    """Confirm exact process exit after a previously applied SIGTERM.
+
+    ``applied`` proves only that the signal call succeeded.  It is not exit
+    evidence and therefore cannot authorize running-cancel archival.  A later
+    dispatcher tick compares the current process birth identity with the
+    journaled exact target and advances only to ``gone`` (verified absent) or
+    ``identity_mismatch`` (PID now belongs to another process).
+    """
+    rows = conn.execute(
+        "SELECT * FROM kanban_effect_journal "
+        "WHERE effect_kind='terminate_worker' AND state='applied' "
+        "ORDER BY id"
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        target = ProcessIdentity(
+            host_id=str(row["worker_host_id"] or ""),
+            boot_id=str(row["worker_boot_id"] or ""),
+            pid=int(row["worker_pid"] or 0),
+            start_token=str(row["worker_start_token"] or ""),
+        )
+        live = read_process_identity(target.pid)
+        new_state = None
+        if live is None and not _pid_alive(target.pid):
+            new_state = "gone"
+        elif live is not None and live != target:
+            new_state = "identity_mismatch"
+        if new_state is None:
+            continue
+        try:
+            with write_txn(conn):
+                with _task_mutation_permit(
+                    conn,
+                    str(row["task_id"]),
+                    action="settle_worker_termination",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                ):
+                    cur = conn.execute(
+                        "UPDATE kanban_effect_journal SET state=?, updated_at=? "
+                        "WHERE id=? AND state='applied'",
+                        (new_state, int(time.time()), int(row["id"])),
+                    )
+                    if cur.rowcount:
+                        conn.execute(
+                            "UPDATE task_runs SET process_state=? WHERE id=? "
+                            "AND process_state IN "
+                            "('termination_pending','termination_sent','terminal')",
+                            (
+                                "terminal" if new_state == "gone"
+                                else "identity_unverified",
+                                int(row["run_id"]),
+                            ),
+                        )
+                        changed += 1
+        except OlympusContextError:
+            continue
+    return changed
+
+
+def process_pending_worker_termination_effects(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+    signal_fn=None,
+) -> dict[str, int]:
+    """Dispatcher-owned executor for pending exact worker effects.
+
+    Telegram never calls this function and never owns a PID.  The production
+    dispatcher invokes it on every board tick/restart using its canonical
+    service principal.  Each pending row is independently claimed by the #16
+    effect CAS, rechecks the registered process birth identity, and signals at
+    most once.  Applied signals are then checked for verified exit.
+    """
+    pending = conn.execute(
+        "SELECT id FROM kanban_effect_journal "
+        "WHERE effect_kind='terminate_worker' AND state='pending' ORDER BY id"
+    ).fetchall()
+    executed = 0
+    for row in pending:
+        try:
+            state = execute_worker_termination_effect(
+                conn,
+                int(row["id"]),
+                olympus_auth=olympus_auth,
+                signal_fn=signal_fn,
+            )
+        except (KeyError, OlympusContextError):
+            continue
+        if state != "pending":
+            executed += 1
+    confirmed = confirm_applied_worker_termination_effects(
+        conn, olympus_auth=olympus_auth
+    )
+    return {"executed": executed, "confirmed": confirmed}
+
+
+def _stage_execute_governed_recovery(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    reason: str,
+    outcome: str,
+    event_kind: str,
+    olympus_auth: Optional[OlympusMutationAuth],
+    signal_fn=None,
+) -> Optional[str]:
+    """Stage, externally reverify/apply, and settle one governed recovery.
+
+    No signal is emitted from the transaction that contains the task/run
+    transition. The durable effect carries the exact registered host, boot,
+    PID and native process-birth token; execution re-reads that live identity
+    after the staging transaction commits, and settlement performs a second
+    canonical authority verification in a new transaction.
+    """
+    row = conn.execute(
+        "SELECT t.status, t.current_run_id, t.olympus_context, "
+        "r.launch_token, r.process_state, r.worker_host_id, r.worker_boot_id, "
+        "r.worker_pid, r.worker_start_token "
+        "FROM tasks t JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.id = ? AND r.id = ?",
+        (task_id, int(run_id)),
+    ).fetchone()
+    if (
+        row is None
+        or row["olympus_context"] is None
+        or row["status"] != "running"
+        or int(row["current_run_id"] or 0) != int(run_id)
+        or row["process_state"] != "registered"
+        or not row["launch_token"]
+    ):
+        return None
+    identity = ProcessIdentity(
+        host_id=str(row["worker_host_id"] or ""),
+        boot_id=str(row["worker_boot_id"] or ""),
+        pid=int(row["worker_pid"] or 0),
+        start_token=str(row["worker_start_token"] or ""),
+    )
+    if not all((identity.host_id, identity.boot_id, identity.start_token)) \
+            or identity.pid <= 0:
+        return None
+    token_digest = hashlib.sha256(
+        str(row["launch_token"]).encode("utf-8")
+    ).hexdigest()
+    operation_id = (
+        f"worker-recovery:{event_kind}:{task_id}:{int(run_id)}:{token_digest}"
+    )
+    source_identity = {
+        "principal_type": (
+            olympus_auth.principal_type if olympus_auth is not None else ""
+        ),
+        "principal_id": (
+            olympus_auth.principal_id if olympus_auth is not None else ""
+        ),
+        "principal_source": (
+            olympus_auth.principal_source if olympus_auth is not None else ""
+        ),
+    }
+    effect_id = stage_worker_termination(
+        conn,
+        task_id=task_id,
+        run_id=int(run_id),
+        launch_token=str(row["launch_token"]),
+        process_identity=identity,
+        operation_id=operation_id,
+        reason=reason,
+        source_identity=source_identity,
+        outcome=outcome,
+        event_kind=event_kind,
+        olympus_auth=olympus_auth,
+    )
+    return execute_worker_termination_effect(
+        conn,
+        effect_id,
+        olympus_auth=olympus_auth,
+        signal_fn=signal_fn,
+    )
+
+
+def reconcile_worker_runs(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> int:
+    """Fail closed on unfinished launches or stale registered identities."""
+    rows = conn.execute(
+        "SELECT r.id, r.task_id, r.process_state, r.worker_pid, r.worker_host_id, "
+        "r.worker_boot_id, r.worker_start_token FROM task_runs r "
+        "JOIN tasks t ON t.id = r.task_id WHERE r.ended_at IS NULL "
+        "AND r.process_state IN ('starting','registered')",
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        live = read_process_identity(int(row["worker_pid"] or 0))
+        stored = ProcessIdentity(
+            host_id=str(row["worker_host_id"] or ""),
+            boot_id=str(row["worker_boot_id"] or ""),
+            pid=int(row["worker_pid"] or 0),
+            start_token=str(row["worker_start_token"] or ""),
+        )
+        if row["process_state"] == "registered" and live == stored:
+            continue
+        try:
+            with write_txn(conn):
+                with _task_mutation_permit(
+                    conn,
+                    str(row["task_id"]),
+                    action="reconcile_worker_run",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                ):
+                    cur = conn.execute(
+                        "UPDATE task_runs SET process_state = 'identity_unverified' "
+                        "WHERE id = ? AND process_state = ?",
+                        (int(row["id"]), row["process_state"]),
+                    )
+                    if cur.rowcount:
+                        conn.execute(
+                            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                            "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                            "WHERE id = ? AND current_run_id = ?",
+                            (row["task_id"], row["id"]),
+                        )
+                        changed += 1
+        except OlympusContextError:
+            continue
+    return changed
+
+
 def heartbeat_claim(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
-    authority_verifier: Optional[AuthorityVerifier] = None,
-    actor: Optional[str] = None,
-    operation_id: Optional[str] = None,
-    expected_revision: Optional[int] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> bool:
     """Extend a running claim.  Returns True if we still own it.
 
@@ -4982,7 +11684,8 @@ def heartbeat_claim(
     lock = claimer or _claimer_id()
     with write_txn(conn):
         gate_row = conn.execute(
-            "SELECT assignee, claim_expires, current_run_id, olympus_context "
+            "SELECT assignee, claim_expires, current_run_id, olympus_context, "
+            "record_revision "
             "FROM tasks "
             "WHERE id = ? AND status = 'running' AND claim_lock = ?",
             (task_id, lock),
@@ -4996,17 +11699,12 @@ def heartbeat_claim(
                 now=now,
             )
             if olympus is not None:
-                require_olympus_authority_verification(
-                    olympus,
-                    task_id=task_id,
-                    assignee=gate_row["assignee"],
+                _authorize_task_mutation(
+                    conn,
+                    task_id,
                     action="heartbeat",
                     capability=OLYMPUS_CAPABILITY_HEARTBEAT,
-                    actor=actor or "",
-                    expected_revision=expected_revision,  # type: ignore[arg-type]
-                    operation_id=operation_id or "",
-                    verifier=authority_verifier,
-                    now=now,
+                    auth=olympus_auth,
                 )
             if (
                 olympus is not None
@@ -5027,7 +11725,7 @@ def heartbeat_claim(
                 )
             if gate_row["current_run_id"] is not None:
                 run_row = conn.execute(
-                    "SELECT olympus_context FROM task_runs WHERE id = ?",
+                    "SELECT olympus_context, subject_revision FROM task_runs WHERE id = ?",
                     (int(gate_row["current_run_id"]),),
                 ).fetchone()
                 if run_row is None:
@@ -5040,6 +11738,8 @@ def heartbeat_claim(
                     task_context=olympus,
                     assignee=gate_row["assignee"],
                     now=now,
+                    run_subject_revision=run_row["subject_revision"],
+                    task_record_revision=int(gate_row["record_revision"]),
                 )
         except OlympusContextError as exc:
             _append_event(
@@ -5074,9 +11774,7 @@ def release_stale_claims(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
-    authority_verifier: Optional[AuthorityVerifier] = None,
-    actor: Optional[str] = None,
-    operation_id: Optional[str] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> int:
     """Reset any ``running`` task whose claim has expired.
 
@@ -5107,11 +11805,13 @@ def release_stale_claims(
     reclaimed = 0
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     stale = conn.execute(
-        "SELECT id, assignee, claim_lock, worker_pid, claim_expires, "
-        "last_heartbeat_at, current_run_id, olympus_context "
-        "FROM tasks "
-        "WHERE status = 'running' AND claim_expires IS NOT NULL "
-        "  AND claim_expires < ?",
+        "SELECT t.id, t.assignee, t.claim_lock, t.worker_pid, t.claim_expires, "
+        "t.last_heartbeat_at, t.current_run_id, t.olympus_context, "
+        "t.record_revision, r.launch_token, r.process_state, "
+        "r.worker_host_id, r.worker_boot_id, r.worker_start_token "
+        "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.status = 'running' AND t.claim_expires IS NOT NULL "
+        "  AND t.claim_expires < ?",
         (now,),
     ).fetchall()
     for row in stale:
@@ -5133,19 +11833,6 @@ def release_stale_claims(
             olympus = _require_current_olympus_context(
                 row["olympus_context"], assignee=row["assignee"], now=now
             )
-            if olympus is not None:
-                require_olympus_authority_verification(
-                    olympus,
-                    task_id=row["id"],
-                    assignee=row["assignee"],
-                    action="recover_stale_claim",
-                    capability=OLYMPUS_CAPABILITY_HEARTBEAT,
-                    actor=actor or "",
-                    expected_revision=olympus["authority"]["revision"],
-                    operation_id=(f"{operation_id}:{row['id']}" if operation_id else ""),
-                    verifier=authority_verifier,
-                    now=now,
-                )
             if olympus is not None and row["current_run_id"] is None:
                 raise OlympusContextError(
                     "olympus_run_context_mismatch",
@@ -5153,7 +11840,7 @@ def release_stale_claims(
                 )
             if row["current_run_id"] is not None:
                 run_row = conn.execute(
-                    "SELECT olympus_context FROM task_runs WHERE id = ?",
+                    "SELECT olympus_context, subject_revision FROM task_runs WHERE id = ?",
                     (int(row["current_run_id"]),),
                 ).fetchone()
                 if run_row is None:
@@ -5166,13 +11853,34 @@ def release_stale_claims(
                     task_context=olympus,
                     assignee=row["assignee"],
                     now=now,
+                    run_subject_revision=run_row["subject_revision"],
+                    task_record_revision=int(row["record_revision"]),
                 )
         except OlympusContextError:
             olympus_current = False
+        governed = row["olympus_context"] is not None
+        registered_identity = None
+        if governed and row["process_state"] == "registered":
+            candidate = ProcessIdentity(
+                host_id=str(row["worker_host_id"] or ""),
+                boot_id=str(row["worker_boot_id"] or ""),
+                pid=int(row["worker_pid"] or 0),
+                start_token=str(row["worker_start_token"] or ""),
+            )
+            if all((candidate.host_id, candidate.boot_id, candidate.start_token)) \
+                    and candidate.pid > 0:
+                registered_identity = candidate
+        live_identity = (
+            read_process_identity(registered_identity.pid)
+            if registered_identity is not None else None
+        )
         if (
             host_local
             and row["worker_pid"]
-            and _pid_alive(row["worker_pid"])
+            and (
+                live_identity == registered_identity
+                if governed else _pid_alive(row["worker_pid"])
+            )
             and not heartbeat_stale
             and olympus_current
         ):
@@ -5185,82 +11893,160 @@ def release_stale_claims(
                 new_expires = min(
                     new_expires, int(run_olympus["lease"]["expires_at"])
                 )
+            try:
+                with write_txn(conn):
+                    _authorize_task_mutation(
+                        conn,
+                        row["id"],
+                        action="extend_stale_claim",
+                        capability=OLYMPUS_CAPABILITY_RECOVER,
+                        auth=olympus_auth,
+                    )
+                    cur = conn.execute(
+                        "UPDATE tasks SET claim_expires = ? "
+                        "WHERE id = ? AND status = 'running' "
+                        "  AND claim_lock IS ? "
+                        "  AND claim_expires IS NOT NULL "
+                        "  AND claim_expires < ?",
+                        (new_expires, row["id"], row["claim_lock"], now),
+                    )
+                    if cur.rowcount != 1:
+                        continue
+                    run_id = _current_run_id(conn, row["id"])
+                    if run_id is not None:
+                        conn.execute(
+                            "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
+                            (new_expires, run_id),
+                        )
+                    _append_event(
+                        conn, row["id"], "claim_extended",
+                        {
+                            "reason": "pid_alive",
+                            "worker_pid": int(row["worker_pid"]),
+                            "claim_lock": row["claim_lock"],
+                            "claim_expires_was": int(row["claim_expires"]),
+                            "claim_expires_now": new_expires,
+                            "last_heartbeat_at": (
+                                int(row["last_heartbeat_at"])
+                                if row["last_heartbeat_at"] is not None
+                                else None
+                            ),
+                        },
+                        run_id=run_id,
+                    )
+            except OlympusContextError as exc:
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        row["id"],
+                        "authority_contained",
+                        {"reason": exc.reason, "action": "extend_stale_claim"},
+                        run_id=(int(row["current_run_id"]) if row["current_run_id"] else None),
+                    )
+                continue
+            continue
+
+        if governed:
+            if not olympus_current or row["current_run_id"] is None:
+                continue
+            try:
+                state = _stage_execute_governed_recovery(
+                    conn,
+                    task_id=str(row["id"]),
+                    run_id=int(row["current_run_id"]),
+                    reason=f"stale claim expired at {int(row['claim_expires'])}",
+                    outcome="reclaimed",
+                    event_kind="reclaimed",
+                    olympus_auth=olympus_auth,
+                    signal_fn=signal_fn,
+                )
+            except OlympusContextError:
+                state = None
+            if state is not None:
+                reclaimed += 1
+            continue
+
+        try:
             with write_txn(conn):
+                _authorize_task_mutation(
+                    conn,
+                    row["id"],
+                    action="recover_stale_claim",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                )
+                current = conn.execute(
+                    "SELECT status, claim_lock, worker_pid, current_run_id, "
+                    "claim_expires, record_revision FROM tasks WHERE id = ?",
+                    (row["id"],),
+                ).fetchone()
+                if current is None or any((
+                    current["status"] != "running",
+                    current["claim_lock"] != row["claim_lock"],
+                    current["worker_pid"] != row["worker_pid"],
+                    current["current_run_id"] != row["current_run_id"],
+                    current["claim_expires"] != row["claim_expires"],
+                    current["claim_expires"] is None,
+                    current["claim_expires"] is not None
+                    and int(current["claim_expires"]) >= now,
+                )):
+                    continue
+                termination = _terminate_reclaimed_worker(
+                    current["worker_pid"],
+                    current["claim_lock"],
+                    signal_fn=signal_fn,
+                )
                 cur = conn.execute(
-                    "UPDATE tasks SET claim_expires = ? "
-                    "WHERE id = ? AND status = 'running' "
-                    "  AND claim_lock IS ? "
-                    "  AND claim_expires IS NOT NULL "
-                    "  AND claim_expires < ?",
-                    (new_expires, row["id"], row["claim_lock"], now),
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                    "AND worker_pid IS ? AND current_run_id IS ? "
+                    "AND record_revision = ? "
+                    "AND claim_expires IS NOT NULL AND claim_expires < ?",
+                    (
+                        row["id"], row["claim_lock"], row["worker_pid"],
+                        row["current_run_id"], int(current["record_revision"]), now,
+                    ),
                 )
                 if cur.rowcount != 1:
                     continue
-                run_id = _current_run_id(conn, row["id"])
-                if run_id is not None:
-                    conn.execute(
-                        "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
-                        (new_expires, run_id),
-                    )
-                _append_event(
-                    conn, row["id"], "claim_extended",
-                    {
-                        "reason": "pid_alive",
-                        "worker_pid": int(row["worker_pid"]),
-                        "claim_lock": row["claim_lock"],
-                        "claim_expires_was": int(row["claim_expires"]),
-                        "claim_expires_now": new_expires,
-                        "last_heartbeat_at": (
-                            int(row["last_heartbeat_at"])
-                            if row["last_heartbeat_at"] is not None
-                            else None
-                        ),
-                    },
-                    run_id=run_id,
-                )
-            continue
-
-        termination = _terminate_reclaimed_worker(
-            row["worker_pid"], row["claim_lock"], signal_fn=signal_fn,
-        )
-        with write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
-                "AND claim_expires IS NOT NULL AND claim_expires < ?",
-                (row["id"], row["claim_lock"], now),
-            )
-            if cur.rowcount != 1:
-                continue
-            run_id = _end_run(
+                run_id = _end_run(
                 conn, row["id"],
                 outcome="reclaimed", status="reclaimed",
                 error=f"stale_lock={row['claim_lock']}",
                 metadata=termination,
             )
-            payload = {
-                "stale_lock": row["claim_lock"],
-                "worker_pid": (
-                    int(row["worker_pid"])
-                    if row["worker_pid"] is not None else None
-                ),
-                "claim_expires": int(row["claim_expires"]),
-                "last_heartbeat_at": (
-                    int(row["last_heartbeat_at"])
-                    if row["last_heartbeat_at"] is not None else None
-                ),
-                "now": now,
-                "host_local": host_local,
-                "heartbeat_stale": bool(heartbeat_stale),
-            }
-            payload.update(termination)
-            _append_event(
+                payload = {
+                    "stale_lock": row["claim_lock"],
+                    "worker_pid": (
+                        int(row["worker_pid"])
+                        if row["worker_pid"] is not None else None
+                    ),
+                    "claim_expires": int(row["claim_expires"]),
+                    "last_heartbeat_at": (
+                        int(row["last_heartbeat_at"])
+                        if row["last_heartbeat_at"] is not None else None
+                    ),
+                    "now": now,
+                    "host_local": host_local,
+                    "heartbeat_stale": bool(heartbeat_stale),
+                }
+                payload.update(termination)
+                _append_event(
                 conn, row["id"], "reclaimed",
                 payload,
                 run_id=run_id,
             )
-            reclaimed += 1
+                reclaimed += 1
+        except OlympusContextError as exc:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    row["id"],
+                    "authority_contained",
+                    {"reason": exc.reason, "action": "recover_stale_claim"},
+                    run_id=(int(row["current_run_id"]) if row["current_run_id"] else None),
+                )
     return reclaimed
 
 
@@ -5270,6 +12056,7 @@ def reclaim_task(
     *,
     reason: Optional[str] = None,
     signal_fn=None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> bool:
     """Operator-driven reclaim: release the claim and reset to ``ready``.
 
@@ -5282,26 +12069,59 @@ def reclaim_task(
     Returns True if a reclaim happened, False if the task isn't in a
     reclaimable state (not running, or doesn't exist).
     """
-    row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+    governed = conn.execute(
+        "SELECT status, current_run_id, olympus_context FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
-    if not row:
-        return False
-    if row["status"] != "running" and row["claim_lock"] is None:
-        # Nothing to reclaim — already ready / blocked / done.
-        return False
-    prev_lock = row["claim_lock"]
-    termination = _terminate_reclaimed_worker(
-        row["worker_pid"], prev_lock, signal_fn=signal_fn,
-    )
-    with write_txn(conn):
+    if governed is not None and governed["olympus_context"] is not None:
+        if governed["status"] != "running" or governed["current_run_id"] is None:
+            return False
+        try:
+            state = _stage_execute_governed_recovery(
+                conn,
+                task_id=task_id,
+                run_id=int(governed["current_run_id"]),
+                reason=(
+                    f"manual_reclaim: {reason}" if reason else "manual reclaim"
+                ),
+                outcome="reclaimed",
+                event_kind="reclaimed",
+                olympus_auth=olympus_auth,
+                signal_fn=signal_fn,
+            )
+        except OlympusContextError:
+            return False
+        return state is not None
+    with olympus_mutation_scope(olympus_auth), write_txn(conn):
+        _authorize_task_mutation(
+            conn,
+            task_id,
+            action="reclaim",
+            capability=OLYMPUS_CAPABILITY_RECOVER,
+            auth=olympus_auth,
+        )
+        row = conn.execute(
+            "SELECT status, claim_lock, worker_pid, current_run_id, record_revision "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] != "running" and row["claim_lock"] is None:
+            return False
+        prev_lock = row["claim_lock"]
+        prev_pid = row["worker_pid"]
         cur = conn.execute(
             "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
+            "claim_expires = NULL, worker_pid = NULL, "
+            "consecutive_failures = 0, last_failure_error = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?",
-            (task_id, prev_lock),
+            "AND claim_lock IS ? AND worker_pid IS ? AND current_run_id IS ? "
+            "AND record_revision = ?",
+            (
+                task_id, prev_lock, prev_pid, row["current_run_id"],
+                row["record_revision"],
+            ),
         )
         if cur.rowcount != 1:
             return False
@@ -5312,24 +12132,25 @@ def reclaim_task(
                 f"manual_reclaim: {reason}" if reason
                 else f"manual_reclaim lock={prev_lock}"
             ),
-            metadata=termination,
+            metadata={"termination_after_commit": True, "prev_pid": prev_pid},
         )
         payload = {
             "manual": True,
             "reason": reason,
             "prev_lock": prev_lock,
+            "prev_pid": prev_pid,
+            "termination_after_commit": True,
         }
-        payload.update(termination)
         _append_event(
             conn, task_id, "reclaimed",
             payload,
             run_id=run_id,
         )
-    # Operator intervention — they've looked at the task, so the
-    # consecutive-failures counter is now stale. Give the next retry
-    # a fresh budget. (_clear_failure_counter opens its own write_txn,
-    # so it runs after the enclosing one commits.)
-    _clear_failure_counter(conn, task_id)
+    # The state transition and termination intent are durable before the
+    # irreversible process signal. A commit failure therefore sends nothing.
+    _terminate_reclaimed_worker(
+        prev_pid, prev_lock, signal_fn=signal_fn,
+    )
     return True
 
 
@@ -5340,6 +12161,7 @@ def reassign_task(
     *,
     reclaim_first: bool = False,
     reason: Optional[str] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> bool:
     """Reassign a task, optionally reclaiming a stuck running worker first.
 
@@ -5352,12 +12174,37 @@ def reassign_task(
     Returns True if the reassign landed. ``profile`` may be ``None`` to
     unassign entirely.
     """
+    canonical_profile = _canonical_assignee(profile)
+    row = conn.execute(
+        "SELECT assignee, olympus_context FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is not None and row["olympus_context"] is not None:
+        context = normalize_olympus_context(row["olympus_context"])
+        lease = context["lease"]
+        if not (
+            canonical_profile
+            == row["assignee"]
+            == context["agent_id"]
+            == lease["agent_id"]
+            == lease["holder"]
+        ):
+            raise OlympusContextError(
+                "olympus_reassignment_requires_rebind",
+                "governed reassignment cannot reclaim before canonical rebind",
+            )
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
-        reclaim_task(conn, task_id, reason=reason or "reassign")
+        reclaim_task(
+            conn,
+            task_id,
+            reason=reason or "reassign",
+            olympus_auth=olympus_auth,
+        )
     # assign_task handles its own txn + the still-running guard.
     try:
-        return assign_task(conn, task_id, profile)
+        return assign_task(
+            conn, task_id, canonical_profile, olympus_auth=olympus_auth,
+        )
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
@@ -5505,10 +12352,7 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
-    authority_verifier: Optional[AuthorityVerifier] = None,
-    actor: Optional[str] = None,
-    operation_id: Optional[str] = None,
-    expected_revision: Optional[int] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -5571,7 +12415,7 @@ def complete_task(
     with write_txn(conn):
         task_row = conn.execute(
             "SELECT status, assignee, claim_expires, current_run_id, "
-            "olympus_context "
+            "olympus_context, record_revision "
             "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
@@ -5585,17 +12429,12 @@ def complete_task(
                     assignee=task_row["assignee"],
                     now=now,
                 )
-                require_olympus_authority_verification(
-                    olympus,
-                    task_id=task_id,
-                    assignee=task_row["assignee"],
+                _authorize_task_mutation(
+                    conn,
+                    task_id,
                     action="complete",
                     capability=OLYMPUS_CAPABILITY_COMPLETE,
-                    actor=actor or "",
-                    expected_revision=expected_revision,  # type: ignore[arg-type]
-                    operation_id=operation_id or "",
-                    verifier=authority_verifier,
-                    now=now,
+                    auth=olympus_auth,
                 )
                 if task_row["status"] != "running" or task_row["current_run_id"] is None:
                     raise OlympusContextError(
@@ -5611,7 +12450,8 @@ def complete_task(
                         "governed completion requires an unexpired claim",
                     )
                 run_row = conn.execute(
-                    "SELECT olympus_context, ended_at FROM task_runs WHERE id = ?",
+                    "SELECT olympus_context, subject_revision, ended_at "
+                    "FROM task_runs WHERE id = ?",
                     (int(task_row["current_run_id"]),),
                 ).fetchone()
                 if run_row is None or run_row["ended_at"] is not None:
@@ -5624,6 +12464,8 @@ def complete_task(
                     task_context=olympus,
                     assignee=task_row["assignee"],
                     now=now,
+                    run_subject_revision=run_row["subject_revision"],
+                    task_record_revision=int(task_row["record_revision"]),
                 )
                 if run_olympus is None:
                     raise OlympusContextError(
@@ -5725,19 +12567,14 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
-    # Prose-scan the summary + result for t_<hex> references that do
-    # not resolve. Advisory — does not block the completion. Runs in
-    # its own txn so the completion itself is already durable by the
-    # time we emit the warning.
-    scan_text = " ".join(filter(None, [summary, result]))
-    if scan_text:
-        phantom_refs = _scan_prose_for_phantom_ids(conn, scan_text)
-        # Drop any phantom refs that were already flagged as verified
-        # above (shouldn't happen — verified means they exist — but
-        # belt-and-suspenders).
-        phantom_refs = [p for p in phantom_refs if p not in set(verified_cards)]
-        if phantom_refs:
-            with write_txn(conn):
+        # Keep advisory audit and counter reset in the same authorized
+        # completion transaction. No governed write is attempted after its
+        # exact permit has committed and been cleared.
+        scan_text = " ".join(filter(None, [summary, result]))
+        if scan_text:
+            phantom_refs = _scan_prose_for_phantom_ids(conn, scan_text)
+            phantom_refs = [p for p in phantom_refs if p not in set(verified_cards)]
+            if phantom_refs:
                 _append_event(
                     conn, task_id, "suspected_hallucinated_references",
                     {
@@ -5746,13 +12583,13 @@ def complete_task(
                     },
                     run_id=run_id,
                 )
-    # Successful completion — wipe the consecutive-failures counter.
-    # Failure history stays on the event log for audit; the counter
-    # just tracks "is there a current pathology the breaker should
-    # care about", and a success resets that question.
-    _clear_failure_counter(conn, task_id)
+        conn.execute(
+            "UPDATE tasks SET consecutive_failures = 0, "
+            "last_failure_error = NULL WHERE id = ?",
+            (task_id,),
+        )
     # Recompute ready status for dependents (separate txn so children see done).
-    recompute_ready(conn)
+    recompute_ready(conn, olympus_auth=olympus_auth)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     return True
@@ -6059,6 +12896,7 @@ def _maybe_emit_scratch_tip(
         _mark_scratch_tip_shown()
 
 
+@_guarded_task_mutation(action="edit_result", capability=OLYMPUS_CAPABILITY_EDIT)
 def edit_completed_task_result(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6126,6 +12964,7 @@ def edit_completed_task_result(
     return True
 
 
+@_guarded_task_mutation(action="block", capability=OLYMPUS_CAPABILITY_STATUS)
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6182,6 +13021,7 @@ def block_task(
 
 
 
+@_guarded_task_mutation(action="promote", capability=OLYMPUS_CAPABILITY_STATUS)
 def promote_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6252,6 +13092,7 @@ def promote_task(
     return True, None
 
 
+@_guarded_task_mutation(action="unblock", capability=OLYMPUS_CAPABILITY_STATUS)
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
@@ -6308,6 +13149,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         return True
 
 
+@_guarded_task_mutation(action="specify_triage", capability=OLYMPUS_CAPABILITY_TRIAGE)
 def specify_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6338,11 +13180,26 @@ def specify_triage_task(
     assignee = _canonical_assignee(assignee)
     with write_txn(conn):
         existing = conn.execute(
-            "SELECT title, body, assignee FROM tasks WHERE id = ? AND status = 'triage'",
+            "SELECT title, body, assignee, olympus_context FROM tasks "
+            "WHERE id = ? AND status = 'triage'",
             (task_id,),
         ).fetchone()
         if existing is None:
             return False
+        if existing["olympus_context"] is not None and assignee is not None:
+            context = normalize_olympus_context(existing["olympus_context"])
+            lease = context["lease"]
+            if not (
+                assignee
+                == existing["assignee"]
+                == context["agent_id"]
+                == lease["agent_id"]
+                == lease["holder"]
+            ):
+                raise OlympusContextError(
+                    "olympus_reassignment_requires_rebind",
+                    "governed triage cannot change assignee without canonical rebind",
+                )
         sets: list[str] = ["status = 'todo'"]
         params: list[Any] = []
         changed_fields: list[str] = []
@@ -6366,7 +13223,10 @@ def specify_triage_task(
         )
         if cur.rowcount != 1:
             return False
-        if changed_fields and author and author.strip():
+        if (
+            changed_fields and author and author.strip()
+            and existing["olympus_context"] is None
+        ):
             # Inline INSERT (rather than ``add_comment``) because we're
             # already inside this function's write_txn — nested BEGIN
             # IMMEDIATE would raise OperationalError. We also skip the
@@ -6399,6 +13259,7 @@ def specify_triage_task(
     return True
 
 
+@_guarded_task_mutation(action="decompose_triage", capability=OLYMPUS_CAPABILITY_TRIAGE)
 def decompose_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6684,14 +13545,33 @@ def decompose_triage_task(
     return child_ids
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+@_guarded_task_mutation(action="archive", capability=OLYMPUS_CAPABILITY_ARCHIVE)
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_record_revision: Optional[int] = None,
+) -> bool:
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'",
-            (task_id,),
-        )
+        if expected_record_revision is None:
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', "
+                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status != 'archived'",
+                (task_id,),
+            )
+        else:
+            if isinstance(expected_record_revision, bool) \
+                    or not isinstance(expected_record_revision, int) \
+                    or expected_record_revision < 1:
+                raise ValueError("expected_record_revision must be a positive integer")
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', "
+                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status != 'archived' "
+                "AND record_revision = ?",
+                (task_id, expected_record_revision),
+            )
         if cur.rowcount != 1:
             return False
         # If archive happened while a run was still in flight (e.g. user
@@ -6710,6 +13590,30 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
     return True
 
 
+def _authorize_delete_link_neighbors(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> list[tuple[str, bool, Optional[dict[str, Any]]]]:
+    """Authorize link removal against every governed neighbor aggregate."""
+    rows = conn.execute(
+        "SELECT DISTINCT CASE WHEN parent_id = ? THEN child_id ELSE parent_id END AS id "
+        "FROM task_links WHERE parent_id = ? OR child_id = ?",
+        (task_id, task_id, task_id),
+    ).fetchall()
+    permits: list[tuple[str, bool, Optional[dict[str, Any]]]] = []
+    for row in rows:
+        neighbor_id = str(row["id"])
+        authorization, owns = _authorize_task_mutation(
+            conn,
+            neighbor_id,
+            action="unlink_deleted_task",
+            capability=OLYMPUS_CAPABILITY_LINK,
+        )
+        permits.append((neighbor_id, owns, authorization))
+    return permits
+
+
+@_guarded_task_mutation(action="delete_archived", capability=OLYMPUS_CAPABILITY_DELETE)
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Permanently remove an already-archived task and its related rows.
 
@@ -6724,18 +13628,203 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
         ).fetchone()
         if not row or row["status"] != "archived":
             return False
-        conn.execute(
-            "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
-            (task_id, task_id),
+        permits = _authorize_delete_link_neighbors(conn, task_id)
+        try:
+            conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+                (task_id, task_id),
+            )
+            for neighbor_id, _, authorization in permits:
+                if authorization is not None:
+                    conn.execute(
+                        "UPDATE tasks SET record_revision = record_revision WHERE id = ?",
+                        (neighbor_id,),
+                    )
+            conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM kanban_effect_journal WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_attachments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (task_id,))
+            cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        finally:
+            for neighbor_id, owns, _ in reversed(permits):
+                _release_task_mutation_permit(conn, neighbor_id, owns)
+    return cur.rowcount == 1
+
+
+@_guarded_task_mutation(
+    action="edit_task",
+    capability=OLYMPUS_CAPABILITY_EDIT,
+    touch_aggregate=True,
+)
+def edit_task_fields(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    title: Optional[str] = None,
+    body: Optional[str] = None,
+    priority: Optional[int] = None,
+) -> bool:
+    """Edit dashboard-visible fields through the governed write boundary."""
+    if title is None and body is None and priority is None:
+        return False
+    if title is not None and not title.strip():
+        raise ValueError("title cannot be empty")
+    with write_txn(conn):
+        existing = conn.execute(
+            "SELECT title, body, priority FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if existing is None:
+            return False
+        sets: list[str] = []
+        values: list[Any] = []
+        changed_fields: list[str] = []
+        if title is not None and title.strip() != existing["title"]:
+            sets.append("title = ?")
+            values.append(title.strip())
+            changed_fields.append("title")
+        if body is not None and body != existing["body"]:
+            sets.append("body = ?")
+            values.append(body)
+            changed_fields.append("body")
+        if priority is not None and int(priority) != int(existing["priority"] or 0):
+            sets.append("priority = ?")
+            values.append(int(priority))
+            changed_fields.append("priority")
+        if not sets:
+            return False
+        values.append(task_id)
+        cur = conn.execute(
+            f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?",
+            values,
         )
-        conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (task_id,))
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        return cur.rowcount == 1
+        if cur.rowcount != 1:
+            return False
+        if "priority" in changed_fields:
+            _append_event(
+                conn, task_id, "reprioritized", {"priority": int(priority)},
+            )
+        if "title" in changed_fields or "body" in changed_fields:
+            _append_event(
+                conn,
+                task_id,
+                "edited",
+                {
+                    "fields": [
+                        name for name in ("title", "body")
+                        if name in changed_fields
+                    ]
+                },
+            )
+    return True
 
 
+def set_task_status(
+    conn: sqlite3.Connection,
+    task_id: str,
+    new_status: str,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> bool:
+    """Set a non-running status with atomic governed child demotion."""
+    if new_status not in VALID_STATUSES or new_status == "running":
+        raise ValueError("direct status must be a valid non-running status")
+    bound_auth = olympus_auth or _OLYMPUS_MUTATION_AUTH.get()
+    with olympus_mutation_scope(bound_auth), write_txn(conn):
+        permits: list[tuple[str, bool, Optional[dict[str, Any]]]] = []
+        try:
+            authorization, owns = _authorize_task_mutation(
+                conn,
+                task_id,
+                action="set_direct_status",
+                capability=OLYMPUS_CAPABILITY_STATUS,
+                auth=bound_auth,
+            )
+            permits.append((task_id, owns, authorization))
+            prev = conn.execute(
+                "SELECT status, current_run_id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if prev is None:
+                return False
+            if prev["status"] == new_status:
+                return False
+            if new_status == "ready" and conn.execute(
+                "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+                "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+                (task_id,),
+            ).fetchone() is not None:
+                return False
+            reopening = (
+                prev["status"] in {"done", "archived"}
+                and new_status not in {"done", "archived"}
+            )
+            children = (
+                conn.execute(
+                    "SELECT t.id FROM task_links l JOIN tasks t ON t.id = l.child_id "
+                    "WHERE l.parent_id = ? AND t.status = 'ready' ORDER BY t.id",
+                    (task_id,),
+                ).fetchall()
+                if reopening else []
+            )
+            for child in children:
+                child_id = str(child["id"])
+                child_auth, child_owns = _authorize_task_mutation(
+                    conn,
+                    child_id,
+                    action="demote_parent_reopened",
+                    capability=OLYMPUS_CAPABILITY_STATUS,
+                    auth=bound_auth,
+                )
+                permits.append((child_id, child_owns, child_auth))
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+                (new_status, task_id),
+            )
+            if cur.rowcount != 1:
+                return False
+            run_id = None
+            if prev["status"] == "running" and prev["current_run_id"]:
+                run_id = _end_run(
+                    conn,
+                    task_id,
+                    outcome="reclaimed",
+                    status="reclaimed",
+                    summary=f"status changed to {new_status} (direct)",
+                )
+            _append_event(
+                conn, task_id, "status", {"status": new_status}, run_id=run_id,
+            )
+            for child in children:
+                child_id = str(child["id"])
+                demoted = conn.execute(
+                    "UPDATE tasks SET status = 'todo' "
+                    "WHERE id = ? AND status = 'ready'",
+                    (child_id,),
+                )
+                if demoted.rowcount == 1:
+                    _append_event(
+                        conn,
+                        child_id,
+                        "status",
+                        {
+                            "status": "todo",
+                            "reason": "parent_reopened",
+                            "parent": task_id,
+                        },
+                    )
+        finally:
+            for permit_task, permit_owns, _ in reversed(permits):
+                _release_task_mutation_permit(conn, permit_task, permit_owns)
+    if new_status in {"done", "ready"}:
+        recompute_ready(conn, olympus_auth=bound_auth)
+    return True
+
+
+@_guarded_task_mutation(action="delete", capability=OLYMPUS_CAPABILITY_DELETE)
 def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Hard-delete a task and cascade to all related rows.
 
@@ -6747,14 +13836,34 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     if the task was not found.
     """
     with write_txn(conn):
-        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-        if cur.rowcount != 1:
+        if conn.execute(
+            "SELECT 1 FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone() is None:
             return False
-        conn.execute("DELETE FROM task_links WHERE parent_id = ? OR child_id = ?", (task_id, task_id))
-        conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
-        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (task_id,))
+        permits = _authorize_delete_link_neighbors(conn, task_id)
+        try:
+            conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? OR child_id = ?",
+                (task_id, task_id),
+            )
+            for neighbor_id, _, authorization in permits:
+                if authorization is not None:
+                    conn.execute(
+                        "UPDATE tasks SET record_revision = record_revision WHERE id = ?",
+                        (neighbor_id,),
+                    )
+            conn.execute("DELETE FROM task_comments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM kanban_effect_journal WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM task_attachments WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (task_id,))
+            cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+            if cur.rowcount != 1:
+                return False
+        finally:
+            for neighbor_id, owns, _ in reversed(permits):
+                _release_task_mutation_permit(conn, neighbor_id, owns)
     recompute_ready(conn)
     return True
 
@@ -6827,6 +13936,7 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     raise ValueError(f"unknown workspace_kind: {kind}")
 
 
+@_guarded_task_mutation(action="set_workspace", capability=OLYMPUS_CAPABILITY_WORKSPACE)
 def set_workspace_path(
     conn: sqlite3.Connection, task_id: str, path: Path | str
 ) -> None:
@@ -6838,6 +13948,7 @@ def set_workspace_path(
 
 
 # ---------------------------------------------------------------------------
+@_guarded_task_mutation(action="schedule", capability=OLYMPUS_CAPABILITY_STATUS)
 def schedule_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7215,6 +14326,7 @@ def _terminate_reclaimed_worker(
     return info
 
 
+@_guarded_task_mutation(action="heartbeat_worker", capability=OLYMPUS_CAPABILITY_HEARTBEAT)
 def heartbeat_worker(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7270,6 +14382,7 @@ def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
     signal_fn=None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> list[str]:
     """Terminate workers whose per-task ``max_runtime_seconds`` has elapsed.
 
@@ -7291,7 +14404,8 @@ def enforce_max_runtime(
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.current_run_id, "
+        "       t.record_revision, t.olympus_context "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -7311,57 +14425,112 @@ def enforce_max_runtime(
 
         pid = int(row["worker_pid"])
         tid = row["id"]
-        # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
-        # want a cleaner shutdown can install their own SIGTERM handler
-        # before the grace expires.
-        killed = False
-        kill = signal_fn if signal_fn is not None else (
-            os.kill if hasattr(os, "kill") else None
-        )
-        if kill is not None:
+        if row["olympus_context"] is not None:
+            if row["current_run_id"] is None:
+                continue
             try:
-                kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-            # Short polling wait — no time.sleep on the write txn.
-            for _ in range(10):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.5)
-            if _pid_alive(pid):
-                try:
-                    # signal.SIGKILL doesn't exist on Windows.
-                    _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    kill(pid, _sigkill)
-                    killed = True
-                except (ProcessLookupError, OSError):
-                    pass
-
-        with write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, "
-                "last_heartbeat_at = NULL "
-                "WHERE id = ? AND status = 'running'",
-                (tid,),
-            )
-            if cur.rowcount == 1:
-                payload = {
-                    "pid": pid,
-                    "elapsed_seconds": int(elapsed),
-                    "limit_seconds": int(row["max_runtime_seconds"]),
-                    "sigkill": killed,
-                }
-                run_id = _end_run(
+                state = _stage_execute_governed_recovery(
+                    conn,
+                    task_id=str(tid),
+                    run_id=int(row["current_run_id"]),
+                    reason=(
+                        f"elapsed {int(elapsed)}s > limit "
+                        f"{int(row['max_runtime_seconds'])}s"
+                    ),
+                    outcome="timed_out",
+                    event_kind="timed_out",
+                    olympus_auth=olympus_auth,
+                    signal_fn=signal_fn,
+                )
+            except OlympusContextError:
+                state = None
+            if state is not None:
+                timed_out.append(str(tid))
+            continue
+        try:
+            with write_txn(conn):
+                _authorize_task_mutation(
+                    conn,
+                    tid,
+                    action="enforce_max_runtime",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                )
+                current = conn.execute(
+                    "SELECT status, claim_lock, worker_pid, current_run_id, "
+                    "record_revision FROM tasks WHERE id = ?",
+                    (tid,),
+                ).fetchone()
+                if current is None or any((
+                    current["status"] != "running",
+                    current["claim_lock"] != row["claim_lock"],
+                    current["worker_pid"] != row["worker_pid"],
+                    current["current_run_id"] != row["current_run_id"],
+                    int(current["record_revision"]) != int(row["record_revision"]),
+                )):
+                    continue
+                # Signal while the exact authorized row snapshot is protected
+                # by BEGIN IMMEDIATE. A replacement claim cannot acquire the
+                # row until this transaction commits.
+                killed = False
+                kill = signal_fn if signal_fn is not None else (
+                    os.kill if hasattr(os, "kill") else None
+                )
+                if kill is not None:
+                    try:
+                        kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+                    for _ in range(10):
+                        if not _pid_alive(pid):
+                            break
+                        time.sleep(0.5)
+                    if _pid_alive(pid):
+                        try:
+                            _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
+                            kill(pid, _sigkill)
+                            killed = True
+                        except (ProcessLookupError, OSError):
+                            pass
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, "
+                    "last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "AND claim_lock IS ? AND worker_pid IS ? "
+                    "AND current_run_id IS ? AND record_revision = ?",
+                    (
+                        tid, row["claim_lock"], row["worker_pid"],
+                        row["current_run_id"], row["record_revision"],
+                    ),
+                )
+                if cur.rowcount == 1:
+                    payload = {
+                        "pid": pid,
+                        "elapsed_seconds": int(elapsed),
+                        "limit_seconds": int(row["max_runtime_seconds"]),
+                        "sigkill": killed,
+                    }
+                    run_id = _end_run(
                     conn, tid,
                     outcome="timed_out", status="timed_out",
                     error=f"elapsed {int(elapsed)}s > limit {int(row['max_runtime_seconds'])}s",
                     metadata=payload,
                 )
-                _append_event(
+                    _append_event(
                     conn, tid, "timed_out", payload, run_id=run_id,
                 )
-                timed_out.append(tid)
+                    timed_out.append(tid)
+        except OlympusContextError as exc:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    tid,
+                    "authority_contained",
+                    {"reason": exc.reason, "pid": pid, "recovery": "max_runtime"},
+                    run_id=_current_run_id(conn, tid),
+                )
+            continue
         # Increment the unified failure counter. Outside the write_txn
         # above because ``_record_task_failure`` opens its own. If the
         # breaker trips, this flips the task ``ready → blocked`` and
@@ -7375,6 +14544,7 @@ def enforce_max_runtime(
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "sigkill": killed},
+                olympus_auth=olympus_auth,
             )
     return timed_out
 
@@ -7391,6 +14561,7 @@ def detect_stale_running(
     *,
     stale_timeout_seconds: int = 0,
     signal_fn=None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> list[str]:
     """Reclaim ``running`` tasks that show no progress (heartbeat) within the
     staleness window.
@@ -7424,6 +14595,7 @@ def detect_stale_running(
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.last_heartbeat_at, t.claim_lock, "
+        "       t.current_run_id, t.record_revision, t.olympus_context, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
@@ -7448,36 +14620,85 @@ def detect_stale_running(
         tid = row["id"]
         lock = row["claim_lock"] or ""
 
-        # Terminate the worker if it's still host-local.
-        termination = _terminate_reclaimed_worker(
-            pid, lock, signal_fn=signal_fn,
-        )
-
-        with write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL, "
-                "last_heartbeat_at = NULL "
-                "WHERE id = ? AND status = 'running'",
-                (tid,),
-            )
-            if cur.rowcount != 1:
+        if row["olympus_context"] is not None:
+            if row["current_run_id"] is None:
                 continue
+            try:
+                state = _stage_execute_governed_recovery(
+                    conn,
+                    task_id=str(tid),
+                    run_id=int(row["current_run_id"]),
+                    reason=(
+                        f"no heartbeat for {int(hb_age)}s"
+                        if hb_age is not None else "no heartbeat ever"
+                    ) + f" after {int(elapsed)}s running",
+                    outcome="stale",
+                    event_kind="stale",
+                    olympus_auth=olympus_auth,
+                    signal_fn=signal_fn,
+                )
+            except OlympusContextError:
+                state = None
+            if state is not None:
+                reclaimed.append(str(tid))
+            continue
 
-            payload = {
-                "elapsed_seconds": int(elapsed),
-                "last_heartbeat_at": (
-                    int(last_hb) if last_hb is not None else None
-                ),
-                "heartbeat_age_seconds": (
-                    int(hb_age) if hb_age is not None else None
-                ),
-                "timeout_seconds": stale_timeout_seconds,
-                "pid": int(pid) if pid else None,
-            }
-            payload.update(termination)
+        try:
+            with write_txn(conn):
+                _authorize_task_mutation(
+                    conn,
+                    tid,
+                    action="recover_stale_running",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                )
+                current = conn.execute(
+                    "SELECT status, claim_lock, worker_pid, current_run_id, "
+                    "record_revision FROM tasks WHERE id = ?",
+                    (tid,),
+                ).fetchone()
+                if current is None or any((
+                    current["status"] != "running",
+                    current["claim_lock"] != row["claim_lock"],
+                    current["worker_pid"] != row["worker_pid"],
+                    current["current_run_id"] != row["current_run_id"],
+                    int(current["record_revision"]) != int(row["record_revision"]),
+                )):
+                    continue
+                termination = _terminate_reclaimed_worker(
+                    current["worker_pid"],
+                    current["claim_lock"],
+                    signal_fn=signal_fn,
+                )
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, "
+                    "last_heartbeat_at = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "AND claim_lock IS ? AND worker_pid IS ? "
+                    "AND current_run_id IS ? AND record_revision = ?",
+                    (
+                        tid, row["claim_lock"], row["worker_pid"],
+                        row["current_run_id"], row["record_revision"],
+                    ),
+                )
+                if cur.rowcount != 1:
+                    continue
 
-            run_id = _end_run(
+                payload = {
+                    "elapsed_seconds": int(elapsed),
+                    "last_heartbeat_at": (
+                        int(last_hb) if last_hb is not None else None
+                    ),
+                    "heartbeat_age_seconds": (
+                        int(hb_age) if hb_age is not None else None
+                    ),
+                    "timeout_seconds": stale_timeout_seconds,
+                    "pid": int(pid) if pid else None,
+                }
+                payload.update(termination)
+
+                run_id = _end_run(
                 conn, tid,
                 outcome="stale", status="stale",
                 error=(
@@ -7487,10 +14708,20 @@ def detect_stale_running(
                 ) + f" after {int(elapsed)}s running",
                 metadata=payload,
             )
-            _append_event(
+                _append_event(
                 conn, tid, "stale", payload, run_id=run_id,
             )
-            reclaimed.append(tid)
+                reclaimed.append(tid)
+        except OlympusContextError as exc:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    tid,
+                    "authority_contained",
+                    {"reason": exc.reason, "recovery": "stale_running"},
+                    run_id=_current_run_id(conn, tid),
+                )
+            continue
 
         # Intentionally NOT calling _record_task_failure here. Stale reclaim
         # is dispatcher-side detection of an absent heartbeat; the task is
@@ -7516,7 +14747,11 @@ def _error_fingerprint(error_text: str) -> str:
     return fp.lower().strip()
 
 
-def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
+def detect_crashed_workers(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
     Appends a ``crashed`` event and drops the task back to ``ready``.
@@ -7546,6 +14781,68 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+
+    # Governed workers are never recovered by PID liveness plus an in-place
+    # task update. First compare the live process to the exact registered
+    # host/boot/PID/birth token, then stage a durable termination/containment
+    # effect. Effect execution and settlement happen after the staging
+    # transaction and each performs its own canonical verification.
+    governed_rows = conn.execute(
+        "SELECT t.id, t.worker_pid, t.claim_lock, t.current_run_id, "
+        "COALESCE(r.started_at,t.started_at) AS active_started_at, "
+        "r.process_state, r.worker_host_id, r.worker_boot_id, "
+        "r.worker_start_token "
+        "FROM tasks t LEFT JOIN task_runs r ON r.id=t.current_run_id "
+        "WHERE t.status='running' AND t.worker_pid IS NOT NULL "
+        "AND t.olympus_context IS NOT NULL"
+    ).fetchall()
+    for row in governed_rows:
+        lock = str(row["claim_lock"] or "")
+        if not lock.startswith(host_prefix) or row["current_run_id"] is None:
+            continue
+        started_at = row["active_started_at"]
+        if started_at is not None \
+                and time.time() - int(started_at) < _resolve_crash_grace_seconds():
+            continue
+        stored = ProcessIdentity(
+            host_id=str(row["worker_host_id"] or ""),
+            boot_id=str(row["worker_boot_id"] or ""),
+            pid=int(row["worker_pid"] or 0),
+            start_token=str(row["worker_start_token"] or ""),
+        )
+        if (
+            row["process_state"] != "registered"
+            or not all((stored.host_id, stored.boot_id, stored.start_token))
+            or stored.pid <= 0
+        ):
+            continue
+        live = read_process_identity(stored.pid)
+        if live == stored:
+            continue
+        kind, code = _classify_worker_exit(stored.pid)
+        reason = (
+            f"registered process identity changed for pid {stored.pid}"
+            if live is not None
+            else (
+                f"registered worker exited ({kind}:{code})"
+                if code is not None else "registered worker is no longer live"
+            )
+        )
+        try:
+            state = _stage_execute_governed_recovery(
+                conn,
+                task_id=str(row["id"]),
+                run_id=int(row["current_run_id"]),
+                reason=reason,
+                outcome="crashed",
+                event_kind="crashed",
+                olympus_auth=olympus_auth,
+            )
+        except OlympusContextError:
+            state = None
+        if state is not None:
+            crashed.append(str(row["id"]))
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -7556,9 +14853,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            "WHERE status = 'running' AND worker_pid IS NOT NULL "
+            "AND olympus_context IS NULL"
         ).fetchall()
-        host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
             # Only check liveness for claims owned by this host.
             lock = row["claim_lock"] or ""
@@ -7627,6 +14924,24 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
+
+            try:
+                _authorize_task_mutation(
+                    conn,
+                    row["id"],
+                    action="recover_crashed_worker",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                )
+            except OlympusContextError as exc:
+                _append_event(
+                    conn,
+                    row["id"],
+                    "authority_contained",
+                    {"reason": exc.reason, "pid": pid, "recovery": "crashed"},
+                    run_id=_current_run_id(conn, row["id"]),
+                )
+                continue
 
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
@@ -7698,6 +15013,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
+                olympus_auth=olympus_auth,
             )
             if tripped:
                 auto_blocked.append(tid)
@@ -7712,6 +15028,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     return crashed
 
 
+@_guarded_task_mutation(
+    action="record_failure",
+    capability=OLYMPUS_CAPABILITY_RECOVER,
+)
 def _record_task_failure(
     conn: sqlite3.Connection,
     task_id: str,
@@ -7874,6 +15194,7 @@ def _record_spawn_failure(
     error: str,
     *,
     failure_limit: int = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> bool:
     return _record_task_failure(
         conn, task_id, error,
@@ -7881,9 +15202,11 @@ def _record_spawn_failure(
         failure_limit=failure_limit,
         release_claim=True,
         end_run=True,
+        olympus_auth=olympus_auth,
     )
 
 
+@_guarded_task_mutation(action="set_worker_pid", capability=OLYMPUS_CAPABILITY_CLAIM)
 def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     """Record the spawned child's pid + emit a ``spawned`` event.
 
@@ -8101,6 +15424,10 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+@_guarded_task_mutation(
+    action="release_unspawned_claim",
+    capability=OLYMPUS_CAPABILITY_RECOVER,
+)
 def _release_unspawned_claim(
     conn: sqlite3.Connection,
     task_id: str,
@@ -8148,6 +15475,8 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+    dispatcher_instance_id: Optional[str] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -8181,12 +15510,47 @@ def dispatch_once(
     # reap_worker_zombies() for the full rationale.
     reap_worker_zombies()
 
+    board_id = _connection_board_identity(conn)
+    dispatcher = (dispatcher_instance_id or "").strip()
+    if not dispatcher and olympus_auth is not None:
+        source_prefix = f"kanban-dispatcher:{board_id}:"
+        if olympus_auth.principal_source.startswith(source_prefix):
+            dispatcher = olympus_auth.principal_source[len(source_prefix):]
+    if not dispatcher:
+        # Ordinary Kanban has no authority dependency, but still receives a
+        # unique process-registration owner. Governed verification will reject
+        # a service principal that is not derived from its exact board/id pair.
+        dispatcher = f"local-{os.getpid()}-{id(conn)}"
+
+    def _invoke_spawn(spawn, task: Task, workspace: str, run: Run):
+        """Call old or lifecycle-aware spawn hooks without caller assertions."""
+        import inspect
+
+        kwargs: dict[str, Any] = {}
+        try:
+            signature = inspect.signature(spawn)
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+            for name, value in (
+                ("board", board),
+                ("launch_token", run.launch_token),
+                ("dispatcher_instance_id", dispatcher),
+            ):
+                if accepts_kwargs or name in signature.parameters:
+                    kwargs[name] = value
+        except (TypeError, ValueError):
+            kwargs = {}
+        return spawn(task, workspace, **kwargs)
+
     result = DispatchResult()
-    result.reclaimed = release_stale_claims(conn)
+    result.reclaimed = release_stale_claims(conn, olympus_auth=olympus_auth)
     result.stale = detect_stale_running(
         conn, stale_timeout_seconds=stale_timeout_seconds,
+        olympus_auth=olympus_auth,
     )
-    result.crashed = detect_crashed_workers(conn)
+    result.crashed = detect_crashed_workers(conn, olympus_auth=olympus_auth)
     # detect_crashed_workers stashes protocol-violation auto-blocks on
     # itself so the public list-return stays stable. Pull them into the
     # DispatchResult here so telemetry / tests see the trip.
@@ -8203,8 +15567,10 @@ def dispatch_once(
     )
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
-    result.timed_out = enforce_max_runtime(conn)
-    result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+    result.timed_out = enforce_max_runtime(conn, olympus_auth=olympus_auth)
+    result.promoted = recompute_ready(
+        conn, failure_limit=failure_limit, olympus_auth=olympus_auth,
+    )
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full
@@ -8299,17 +15665,11 @@ def dispatch_once(
                 if not dry_run:
                     try:
                         with write_txn(conn):
-                            conn.execute(
-                                "UPDATE tasks SET assignee = ? WHERE id = ? "
-                                "AND (assignee IS NULL OR assignee = '')",
-                                (_default_assignee, row["id"]),
-                            )
-                            _append_event(
-                                conn, row["id"], "assigned",
-                                {
-                                    "assignee": _default_assignee,
-                                    "source": "kanban.default_assignee",
-                                },
+                            assign_task(
+                                conn,
+                                row["id"],
+                                _default_assignee,
+                                olympus_auth=olympus_auth,
                             )
                     except Exception:
                         _log.debug(
@@ -8392,51 +15752,97 @@ def dispatch_once(
                     _per_profile_running.get(row_assignee, 0) + 1
                 )
             continue
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
-        if claimed is None:
+        reserved = reserve_worker_run(
+            conn, row["id"], ttl_seconds=ttl_seconds,
+            olympus_auth=olympus_auth,
+        )
+        if reserved is None:
+            continue
+        claimed = get_task(conn, row["id"])
+        if claimed is None or not reserved.launch_token:
             continue
         try:
             workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
+            if claimed.olympus_context is not None:
+                try:
+                    if fail_worker_launch(
+                        conn,
+                        task_id=claimed.id,
+                        run_id=reserved.id,
+                        launch_token=reserved.launch_token,
+                        error=f"workspace: {exc}",
+                        olympus_auth=olympus_auth,
+                    ):
+                        result.auto_blocked.append(claimed.id)
+                except OlympusContextError:
+                    pass
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
                 failure_limit=failure_limit,
+                olympus_auth=olympus_auth,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
         # Persist the resolved workspace path so the worker can cd there.
-        set_workspace_path(conn, claimed.id, str(workspace))
+        set_workspace_path(
+            conn, claimed.id, str(workspace), olympus_auth=olympus_auth,
+        )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Workspace setup can take long enough for Olympus to revoke or expire
-        # authority after the initial claim. Revalidate at the last durable
-        # boundary before process creation; a rejected claim never spawns.
-        if not heartbeat_claim(
-            conn,
-            claimed.id,
-            ttl_seconds=ttl_seconds,
-            claimer=claimed.claim_lock,
-        ):
-            _release_unspawned_claim(
-                conn, claimed.id, claim_lock=claimed.claim_lock
-            )
-            continue
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
-            # Back-compat: older spawn_fn signatures accept only
-            # (task, workspace). Test stubs in the suite rely on that.
-            # Introspect the callable and pass `board` only when supported.
-            import inspect
-            try:
-                sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
-            except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
-            if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+            if claimed.olympus_context is not None:
+                workspace_snapshot = {
+                    "board_id": board_id,
+                    "workspace_kind": claimed.workspace_kind,
+                    "workspace_path": str(workspace),
+                }
+                if not mark_worker_workspace_ready(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    workspace_snapshot=workspace_snapshot,
+                    olympus_auth=olympus_auth,
+                ) or not mark_worker_starting(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    olympus_auth=olympus_auth,
+                ):
+                    raise OlympusContextError(
+                        "worker_launch_state_conflict",
+                        "governed worker launch reservation changed before spawn",
+                    )
+            spawned_process = _invoke_spawn(
+                _spawn, claimed, str(workspace), reserved
+            )
+            if claimed.olympus_context is not None:
+                process_identity = (
+                    spawned_process
+                    if isinstance(spawned_process, ProcessIdentity)
+                    else read_process_identity(int(spawned_process or 0))
+                )
+                if process_identity is None or not register_worker_process(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    process_identity=process_identity,
+                    dispatcher_instance_id=dispatcher,
+                    olympus_auth=olympus_auth,
+                ):
+                    raise OlympusContextError(
+                        "worker_process_identity_unverified",
+                        "spawned governed worker could not be registered exactly",
+                    )
+            elif spawned_process:
+                _set_worker_pid(
+                    conn, claimed.id, int(spawned_process),
+                )
             # NOTE: we intentionally do NOT reset consecutive_failures
             # here. A successful spawn proves the worker can start but
             # doesn't prove the run will succeed. Under unified
@@ -8454,9 +15860,25 @@ def dispatch_once(
                     _per_profile_running.get(claimed.assignee, 0) + 1
                 )
         except Exception as exc:
+            if claimed.olympus_context is not None:
+                try:
+                    failed_closed = fail_worker_launch(
+                        conn,
+                        task_id=claimed.id,
+                        run_id=reserved.id,
+                        launch_token=reserved.launch_token,
+                        error=str(exc),
+                        olympus_auth=olympus_auth,
+                    )
+                except OlympusContextError:
+                    failed_closed = False
+                if failed_closed:
+                    result.auto_blocked.append(claimed.id)
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
                 failure_limit=failure_limit,
+                olympus_auth=olympus_auth,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -8491,30 +15913,55 @@ def dispatch_once(
         if dry_run:
             result.spawned.append((row["id"], row["assignee"], ""))
             continue
-        claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
-        if claimed is None:
+        reserved = reserve_worker_run(
+            conn, row["id"], review=True, ttl_seconds=ttl_seconds,
+            olympus_auth=olympus_auth,
+        )
+        if reserved is None:
+            continue
+        claimed = get_task(conn, row["id"])
+        if claimed is None or not reserved.launch_token:
             continue
         try:
             workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
+            if claimed.olympus_context is not None:
+                try:
+                    if fail_worker_launch(
+                        conn,
+                        task_id=claimed.id,
+                        run_id=reserved.id,
+                        launch_token=reserved.launch_token,
+                        error=f"workspace: {exc}",
+                        olympus_auth=olympus_auth,
+                    ):
+                        result.auto_blocked.append(claimed.id)
+                except OlympusContextError:
+                    pass
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
                 failure_limit=failure_limit,
+                olympus_auth=olympus_auth,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
         # Persist the resolved workspace path so the worker can cd there.
-        set_workspace_path(conn, claimed.id, str(workspace))
+        set_workspace_path(
+            conn, claimed.id, str(workspace), olympus_auth=olympus_auth,
+        )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         if not heartbeat_claim(
             conn,
             claimed.id,
             ttl_seconds=ttl_seconds,
             claimer=claimed.claim_lock,
+            olympus_auth=olympus_auth,
         ):
             _release_unspawned_claim(
-                conn, claimed.id, claim_lock=claimed.claim_lock
+                conn, claimed.id, claim_lock=claimed.claim_lock,
+                olympus_auth=olympus_auth,
             )
             continue
         # Force-load sdlc-review skill for review agents.  The
@@ -8525,23 +15972,77 @@ def dispatch_once(
         claimed.skills = ["sdlc-review"]
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
-            import inspect
-            try:
-                sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
-            except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
-            if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+            if claimed.olympus_context is not None:
+                if not mark_worker_workspace_ready(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    workspace_snapshot={
+                        "board_id": board_id,
+                        "workspace_kind": claimed.workspace_kind,
+                        "workspace_path": str(workspace),
+                    },
+                    olympus_auth=olympus_auth,
+                ) or not mark_worker_starting(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    olympus_auth=olympus_auth,
+                ):
+                    raise OlympusContextError(
+                        "worker_launch_state_conflict",
+                        "governed review launch changed before spawn",
+                    )
+            spawned_process = _invoke_spawn(
+                _spawn, claimed, str(workspace), reserved
+            )
+            if claimed.olympus_context is not None:
+                process_identity = (
+                    spawned_process
+                    if isinstance(spawned_process, ProcessIdentity)
+                    else read_process_identity(int(spawned_process or 0))
+                )
+                if process_identity is None or not register_worker_process(
+                    conn,
+                    task_id=claimed.id,
+                    run_id=reserved.id,
+                    launch_token=reserved.launch_token,
+                    process_identity=process_identity,
+                    dispatcher_instance_id=dispatcher,
+                    olympus_auth=olympus_auth,
+                ):
+                    raise OlympusContextError(
+                        "worker_process_identity_unverified",
+                        "spawned governed review worker was not registered",
+                    )
+            elif spawned_process:
+                _set_worker_pid(
+                    conn, claimed.id, int(spawned_process),
+                )
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
         except Exception as exc:
+            if claimed.olympus_context is not None:
+                try:
+                    failed_closed = fail_worker_launch(
+                        conn,
+                        task_id=claimed.id,
+                        run_id=reserved.id,
+                        launch_token=reserved.launch_token,
+                        error=str(exc),
+                        olympus_auth=olympus_auth,
+                    )
+                except OlympusContextError:
+                    failed_closed = False
+                if failed_closed:
+                    result.auto_blocked.append(claimed.id)
+                continue
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),
                 failure_limit=failure_limit,
+                olympus_auth=olympus_auth,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
@@ -8850,6 +16351,8 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+    launch_token: Optional[str] = None,
+    dispatcher_instance_id: Optional[str] = None,
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -8902,6 +16405,10 @@ def _default_spawn(
         env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
     if task.claim_lock:
         env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+    if launch_token:
+        env["HERMES_KANBAN_LAUNCH_TOKEN"] = launch_token
+    if dispatcher_instance_id:
+        env["HERMES_KANBAN_DISPATCHER_INSTANCE"] = dispatcher_instance_id
     # Goal-loop mode: the worker reads these and wraps its run in the
     # Ralph-style /goal judge loop (see cli.py quiet-mode path). Only set
     # when enabled so non-goal tasks keep a clean env.
@@ -9033,6 +16540,7 @@ def run_daemon(
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
 ) -> None:
     """Run the dispatcher in a loop until interrupted.
 
@@ -9068,6 +16576,7 @@ def run_daemon(
                     conn,
                     max_spawn=max_spawn,
                     failure_limit=failure_limit,
+                    olympus_auth=olympus_auth,
                 )
             if on_tick is not None:
                 try:
@@ -9429,6 +16938,12 @@ def task_age(task: Task) -> dict:
 # Notification subscriptions (used by the gateway kanban-notifier)
 # ---------------------------------------------------------------------------
 
+@_guarded_task_mutation(
+    action="add_notification_subscription",
+    capability=OLYMPUS_CAPABILITY_NOTIFY,
+    touch_aggregate=True,
+    success=bool,
+)
 def add_notify_sub(
     conn: sqlite3.Connection,
     *,
@@ -9438,31 +16953,44 @@ def add_notify_sub(
     thread_id: Optional[str] = None,
     user_id: Optional[str] = None,
     notifier_profile: Optional[str] = None,
-) -> None:
+) -> bool:
     """Register a gateway source that wants terminal-state notifications
-    for ``task_id``. Idempotent on (task, platform, chat, thread)."""
+    for ``task_id``.
+
+    An exact tuple is idempotent. Reusing the unique destination key with a
+    different user or notifier profile is an explicit identity conflict; it is
+    never silently ignored or backfilled.
+    """
     now = int(time.time())
     with write_txn(conn):
-        conn.execute(
+        canonical_thread = thread_id or ""
+        existing = conn.execute(
+            "SELECT user_id, notifier_profile FROM kanban_notify_subs "
+            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
+            (task_id, platform, chat_id, canonical_thread),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["user_id"] == user_id
+                and existing["notifier_profile"] == notifier_profile
+            ):
+                return False
+            raise OlympusContextError(
+                "notification_subscription_identity_conflict",
+                "notification destination is already bound to another user or profile",
+            )
+        inserted = conn.execute(
             """
-            INSERT OR IGNORE INTO kanban_notify_subs
+            INSERT INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (task_id, platform, chat_id, thread_id or "", user_id, notifier_profile, now),
+            (
+                task_id, platform, chat_id, canonical_thread,
+                user_id, notifier_profile, now,
+            ),
         )
-        if notifier_profile:
-            # Self-heal legacy rows that predate notifier ownership by
-            # backfilling only when the existing value is unset.
-            conn.execute(
-                """
-                UPDATE kanban_notify_subs
-                   SET notifier_profile = ?
-                 WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?
-                   AND (notifier_profile IS NULL OR notifier_profile = '')
-                """,
-                (notifier_profile, task_id, platform, chat_id, thread_id or ""),
-            )
+        return bool(inserted.rowcount)
 
 
 def list_notify_subs(
@@ -9477,6 +17005,11 @@ def list_notify_subs(
     return [dict(r) for r in rows]
 
 
+@_guarded_task_mutation(
+    action="remove_notification_subscription",
+    capability=OLYMPUS_CAPABILITY_NOTIFY,
+    touch_aggregate=True,
+)
 def remove_notify_sub(
     conn: sqlite3.Connection,
     *,
@@ -9492,6 +17025,334 @@ def remove_notify_sub(
             (task_id, platform, chat_id, thread_id or ""),
         )
     return cur.rowcount > 0
+
+
+def reserve_notification_effect(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    effect_kind: str,
+    operation_id: str,
+    event_id: int,
+    destination_key: str,
+    part: str,
+    payload: Mapping[str, Any],
+    source_identity: Optional[Mapping[str, Any]] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> int:
+    """Reserve a deterministic notification effect without moving its cursor."""
+    if effect_kind not in {"notify_text", "notify_artifact"}:
+        raise ValueError("invalid notification effect kind")
+    encoded, digest = _canonical_effect_payload(payload)
+    now = int(time.time())
+    with write_txn(conn):
+        task_row = conn.execute(
+            "SELECT olympus_context IS NOT NULL AS governed, record_revision "
+            "FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if task_row is None:
+            raise KeyError(task_id)
+        governed = bool(task_row["governed"])
+        if governed:
+            if olympus_auth is None:
+                raise OlympusContextError(
+                    "olympus_authority_verification_unavailable",
+                    "notification reservation requires canonical notifier authority",
+                )
+            expected_source = _canonical_notifier_effect_source(olympus_auth)
+            if source_identity is not None and dict(source_identity) != expected_source:
+                raise OlympusContextError(
+                    "olympus_effect_source_identity_conflict",
+                    "effect source does not match the canonical notifier identity",
+                )
+            source_mapping = expected_source
+        else:
+            if source_identity is None:
+                raise ValueError("source_identity is required for ordinary effects")
+            source_mapping = dict(source_identity)
+        source, _ = _canonical_effect_payload(source_mapping)
+        subject_revision = int(task_row["record_revision"])
+        mutation_binding = {
+            "schema_version": NOTIFICATION_EFFECT_RESERVATION_SCHEMA,
+            "action": "reserve_notification_effect",
+            "task_id": task_id,
+            "task_record_revision": subject_revision,
+            "effect_kind": effect_kind,
+            "operation_id": operation_id,
+            "event_id": int(event_id),
+            "destination_key": destination_key,
+            "part": part,
+            "source_identity": source,
+            "payload": encoded,
+            "payload_sha256": digest,
+            "target_post_revision": subject_revision,
+        }
+        with _task_mutation_permit(
+            conn,
+            task_id,
+            action="reserve_notification_effect",
+            capability=OLYMPUS_CAPABILITY_NOTIFY,
+            auth=olympus_auth,
+            mutation_binding=mutation_binding,
+        ):
+            permit = _issued_permit_row(conn, task_id)
+            if permit is None and task_row is not None and bool(task_row["governed"]):
+                raise OlympusContextError(
+                    "olympus_authority_verification_unavailable",
+                    "notification reservation requires an active exact permit",
+                )
+            auth_root_id = permit["auth_root_id"] if permit is not None else None
+            auth_root_revision = (
+                permit["auth_root_revision"] if permit is not None else None
+            )
+            permitted_revision = (
+                permit["subject_revision"]
+                if permit is not None
+                else subject_revision
+            )
+            prior = conn.execute(
+                "SELECT effect_kind FROM kanban_effect_journal "
+                "WHERE operation_id = ? LIMIT 1",
+                (operation_id,),
+            ).fetchone()
+            if prior is not None and prior["effect_kind"] != effect_kind:
+                raise OlympusContextError(
+                    "notification_effect_identity_conflict",
+                    "notification operation id belongs to another effect kind",
+                )
+            row = conn.execute(
+                "INSERT INTO kanban_effect_journal (effect_kind, operation_id, "
+                "task_id, event_id, destination_key, part, auth_root_id, "
+                "auth_root_revision, target_pre_revision, target_post_revision, "
+                "source_identity, payload, payload_sha256, state, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?) "
+                "ON CONFLICT(effect_kind, operation_id) DO NOTHING RETURNING id",
+                (
+                    effect_kind, operation_id, task_id, int(event_id),
+                    destination_key, part, auth_root_id,
+                    auth_root_revision, permitted_revision,
+                    permitted_revision, source, encoded, digest, now, now,
+                ),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT id, task_id, event_id, destination_key, part, "
+                    "source_identity, payload, payload_sha256, "
+                    "target_pre_revision, target_post_revision "
+                    "FROM kanban_effect_journal "
+                    "WHERE effect_kind = ? AND operation_id = ?",
+                    (effect_kind, operation_id),
+                ).fetchone()
+                if (
+                    row is None
+                    or row["task_id"] != task_id
+                    or row["event_id"] != int(event_id)
+                    or row["destination_key"] != destination_key
+                    or row["part"] != part
+                    or row["source_identity"] != source
+                    or row["payload"] != encoded
+                    or row["payload_sha256"] != digest
+                    or row["target_pre_revision"] != permitted_revision
+                    or row["target_post_revision"] != permitted_revision
+                ):
+                    raise OlympusContextError(
+                        "notification_effect_identity_conflict",
+                        "notification operation id was reused with different content",
+                    )
+    return int(row["id"])
+
+
+def claim_notification_effect(
+    conn: sqlite3.Connection,
+    effect_id: int,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> Optional[dict[str, Any]]:
+    """CAS one pending notification effect to applying after fresh auth."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM kanban_effect_journal WHERE id = ? "
+            "AND effect_kind IN ('notify_text','notify_artifact')",
+            (int(effect_id),),
+        ).fetchone()
+        if row is None or row["state"] != "pending":
+            return None
+        updated_at = int(time.time())
+        mutation_binding = {
+            "schema_version": NOTIFICATION_EFFECT_TRANSITION_SCHEMA,
+            "action": "claim_notification_effect",
+            "task_id": str(row["task_id"]),
+            "task_record_revision": int(
+                conn.execute(
+                    "SELECT record_revision FROM tasks WHERE id = ?",
+                    (row["task_id"],),
+                ).fetchone()["record_revision"]
+            ),
+            "effect_row_id": int(row["id"]),
+            "effect_kind": str(row["effect_kind"]),
+            "operation_id": str(row["operation_id"]),
+            "event_id": int(row["event_id"]),
+            "destination_key": str(row["destination_key"]),
+            "old_state": "pending",
+            "new_state": "applying",
+            "error": row["error"],
+            "updated_at": updated_at,
+            "applied_at": row["applied_at"],
+        }
+        with _task_mutation_permit(
+            conn,
+            str(row["task_id"]),
+            action="claim_notification_effect",
+            capability=OLYMPUS_CAPABILITY_NOTIFY,
+            auth=olympus_auth,
+            mutation_binding=mutation_binding,
+        ):
+            updated = conn.execute(
+                "UPDATE kanban_effect_journal SET state = 'applying', updated_at = ? "
+                "WHERE id = ? AND state = 'pending' RETURNING *",
+                (updated_at, int(effect_id)),
+            ).fetchone()
+            if updated is None:
+                return None
+    return dict(updated)
+
+
+def finish_notification_effect(
+    conn: sqlite3.Connection,
+    effect_id: int,
+    *,
+    success: bool,
+    may_have_sent: bool,
+    error: Optional[str] = None,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> str:
+    """Settle a send result; ambiguity is durable and never auto-retried."""
+    state = "applied" if success else ("unknown" if may_have_sent else "not_sent")
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT * FROM kanban_effect_journal WHERE id = ? "
+            "AND effect_kind IN ('notify_text','notify_artifact')",
+            (int(effect_id),),
+        ).fetchone()
+        if row is None:
+            raise KeyError(effect_id)
+        if row["state"] != "applying":
+            return str(row["state"])
+        settled_error = str(error)[:2000] if error else None
+        updated_at = int(time.time())
+        mutation_binding = {
+            "schema_version": NOTIFICATION_EFFECT_TRANSITION_SCHEMA,
+            "action": "finish_notification_effect",
+            "task_id": str(row["task_id"]),
+            "task_record_revision": int(
+                conn.execute(
+                    "SELECT record_revision FROM tasks WHERE id = ?",
+                    (row["task_id"],),
+                ).fetchone()["record_revision"]
+            ),
+            "effect_row_id": int(row["id"]),
+            "effect_kind": str(row["effect_kind"]),
+            "operation_id": str(row["operation_id"]),
+            "event_id": int(row["event_id"]),
+            "destination_key": str(row["destination_key"]),
+            "old_state": "applying",
+            "new_state": state,
+            "error": settled_error,
+            "updated_at": updated_at,
+            "applied_at": updated_at,
+        }
+        with _task_mutation_permit(
+            conn,
+            str(row["task_id"]),
+            action="finish_notification_effect",
+            capability=OLYMPUS_CAPABILITY_NOTIFY,
+            auth=olympus_auth,
+            mutation_binding=mutation_binding,
+        ):
+            conn.execute(
+                "UPDATE kanban_effect_journal SET state = ?, error = ?, "
+                "updated_at = ?, applied_at = ? WHERE id = ? AND state = 'applying'",
+                (
+                    state, settled_error, updated_at, updated_at, int(effect_id),
+                ),
+            )
+    return state
+
+
+def reconcile_effect_journal(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> int:
+    """Resolve crash-left applying effects without ever replaying them."""
+    rows = conn.execute(
+        "SELECT * FROM kanban_effect_journal WHERE state = 'applying'",
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        state = "unknown"
+        if row["effect_kind"] == "terminate_worker":
+            target = ProcessIdentity(
+                host_id=str(row["worker_host_id"] or ""),
+                boot_id=str(row["worker_boot_id"] or ""),
+                pid=int(row["worker_pid"] or 0),
+                start_token=str(row["worker_start_token"] or ""),
+            )
+            live = read_process_identity(target.pid)
+            state = (
+                "identity_unverified"
+                if live is None and _pid_alive(target.pid)
+                else "gone" if live is None else "unknown"
+            )
+            if live is not None and live != target:
+                state = "identity_mismatch"
+        try:
+            with write_txn(conn):
+                with _task_mutation_permit(
+                    conn,
+                    str(row["task_id"]),
+                    action="reconcile_effect_journal",
+                    capability=OLYMPUS_CAPABILITY_RECOVER,
+                    auth=olympus_auth,
+                ):
+                    cur = conn.execute(
+                        "UPDATE kanban_effect_journal SET state = ?, updated_at = ? "
+                        "WHERE id = ? AND state = 'applying'",
+                        (state, int(time.time()), int(row["id"])),
+                    )
+                    if cur.rowcount and row["effect_kind"] == "terminate_worker":
+                        conn.execute(
+                            "UPDATE task_runs SET process_state = ? WHERE id = ? "
+                            "AND process_state = 'termination_pending'",
+                            (
+                                "terminal" if state == "gone"
+                                else "identity_unverified",
+                                int(row["run_id"]),
+                            ),
+                        )
+                    changed += int(cur.rowcount or 0)
+        except OlympusContextError:
+            continue
+    return changed
+
+
+def reconcile_restart_state(
+    conn: sqlite3.Connection,
+    *,
+    olympus_auth: Optional[OlympusMutationAuth] = None,
+) -> dict[str, int]:
+    """Reconcile durable side effects and worker identities before dispatch.
+
+    Applying effects are settled first so a termination's run fence is no
+    longer ambiguous when unfinished worker runs are inspected. Pending
+    effects remain pending for their normal exact-once executor; they are never
+    replayed merely because the process restarted.
+    """
+    return {
+        "effects": reconcile_effect_journal(conn, olympus_auth=olympus_auth),
+        "worker_runs": reconcile_worker_runs(conn, olympus_auth=olympus_auth),
+    }
 
 
 def unseen_events_for_sub(
@@ -9543,6 +17404,12 @@ def unseen_events_for_sub(
     return max_id, out
 
 
+@_guarded_task_mutation(
+    action="claim_notification_delivery",
+    capability=OLYMPUS_CAPABILITY_NOTIFY,
+    touch_aggregate=True,
+    success=lambda result: bool(result and result[2]),
+)
 def claim_unseen_events_for_sub(
     conn: sqlite3.Connection,
     *,
@@ -9594,6 +17461,12 @@ def claim_unseen_events_for_sub(
         return old_cursor, new_cursor, events
 
 
+@_guarded_task_mutation(
+    action="advance_notification_cursor",
+    capability=OLYMPUS_CAPABILITY_NOTIFY,
+    touch_aggregate=True,
+    success=lambda _result: True,
+)
 def advance_notify_cursor(
     conn: sqlite3.Connection,
     *,
@@ -9611,6 +17484,11 @@ def advance_notify_cursor(
         )
 
 
+@_guarded_task_mutation(
+    action="rewind_notification_cursor",
+    capability=OLYMPUS_CAPABILITY_NOTIFY,
+    touch_aggregate=True,
+)
 def rewind_notify_cursor(
     conn: sqlite3.Connection,
     *,
@@ -9655,7 +17533,8 @@ def gc_events(
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))",
+            "(SELECT id FROM tasks WHERE status IN ('done', 'archived') "
+            "AND olympus_context IS NULL)",
             (cutoff,),
         )
     return int(cur.rowcount or 0)
@@ -9670,6 +17549,38 @@ def gc_worker_logs(
     log files live on disk, not in SQLite. Scoped to ``board`` (defaults
     to the active board) — per-board isolation means deleting logs from
     board A cannot touch board B's logs."""
+    # Resolve the existing DB without connect()/init side effects. Missing or
+    # unreadable governance state preserves every log.
+    db_file = kanban_db_path(board=board)
+    if not db_file.exists():
+        return 0
+    try:
+        ro = sqlite3.connect(f"{db_file.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            has_tasks = ro.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'tasks'"
+            ).fetchone() is not None
+            columns = (
+                {row[1] for row in ro.execute("PRAGMA table_info(tasks)")}
+                if has_tasks else set()
+            )
+            governed_task_ids = (
+                {
+                    str(row[0])
+                    for row in ro.execute(
+                        "SELECT id FROM tasks WHERE olympus_context IS NOT NULL"
+                    ).fetchall()
+                }
+                if "olympus_context" in columns else set()
+            )
+        finally:
+            ro.close()
+    except sqlite3.Error as exc:
+        raise OlympusContextError(
+            "olympus_gc_governance_unreadable",
+            "cannot prove worker logs are outside governed retention",
+        ) from exc
     log_dir = worker_logs_dir(board=board)
     if not log_dir.exists():
         return 0
@@ -9677,7 +17588,15 @@ def gc_worker_logs(
     removed = 0
     for p in log_dir.iterdir():
         try:
-            if p.is_file() and p.stat().st_mtime < cutoff:
+            if (
+                p.is_file()
+                and not any(
+                    p.name == f"{task_id}.log"
+                    or p.name.startswith(f"{task_id}.log.")
+                    for task_id in governed_task_ids
+                )
+                and p.stat().st_mtime < cutoff
+            ):
                 p.unlink()
                 removed += 1
         except OSError:
