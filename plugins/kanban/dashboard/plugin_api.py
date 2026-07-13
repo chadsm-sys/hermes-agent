@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from hermes_cli import kanban_db
@@ -54,6 +54,31 @@ from hermes_cli import kanban_diagnostics as kd
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _deny_generic_governed_mutation(
+    conn: sqlite3.Connection,
+    *task_ids: str,
+    operation: str,
+) -> None:
+    """Make the dashboard's non-authoritative role explicit and fail closed."""
+    ids = [str(task_id) for task_id in task_ids if task_id]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    row = conn.execute(
+        f"SELECT id FROM tasks WHERE id IN ({placeholders}) "
+        "AND olympus_context IS NOT NULL LIMIT 1",
+        ids,
+    ).fetchone()
+    if row is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"governed task {row['id']} cannot be {operation} through the "
+                "generic dashboard; canonical authority is required"
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +627,9 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(
+            conn, *payload.parents, operation="used as a dashboard parent",
+        )
         task_id = kanban_db.create_task(
             conn,
             title=payload.title,
@@ -676,8 +704,12 @@ def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        _deny_generic_governed_mutation(
+            conn, task_id, operation="mutated",
+        )
         return {
             "attachments": [
                 _attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)
@@ -703,28 +735,36 @@ async def upload_task_attachment(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        if kanban_db.get_task(conn, task_id) is None:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        if task.olympus_context is not None:
+            raise HTTPException(
+                status_code=403,
+                detail="governed attachment upload requires canonical authority",
+            )
 
         safe_name = _safe_attachment_name(file.filename or "")
 
         # Stream to disk with a hard size cap so a huge upload can't fill
         # the disk. Read in chunks; abort + clean up if the cap is hit.
-        dest_dir = kanban_db.task_attachments_dir(task_id, board=board)
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
         # Resolve name collisions: foo.pdf → foo (1).pdf, foo (2).pdf, …
         stem, dot, ext = safe_name.partition(".")
         candidate = safe_name
         n = 1
-        while (dest_dir / candidate).exists():
-            candidate = f"{stem} ({n}){dot}{ext}"
-            n += 1
-        dest_path = dest_dir / candidate
+        while True:
+            try:
+                out, dest_path = kanban_db.open_attachment_for_write(
+                    task_id, candidate, board=board,
+                )
+                break
+            except FileExistsError:
+                candidate = f"{stem} ({n}){dot}{ext}"
+                n += 1
 
         total = 0
         try:
-            with open(dest_path, "wb") as out:
+            with out:
                 while True:
                     chunk = await file.read(1024 * 1024)
                     if not chunk:
@@ -732,7 +772,9 @@ async def upload_task_attachment(
                     total += len(chunk)
                     if total > _MAX_ATTACHMENT_BYTES:
                         out.close()
-                        dest_path.unlink(missing_ok=True)
+                        kanban_db.unlink_attachment_blob(
+                            task_id, dest_path, board=board,
+                        )
                         raise HTTPException(
                             status_code=413,
                             detail=(
@@ -743,19 +785,32 @@ async def upload_task_attachment(
         except HTTPException:
             raise
         except OSError as exc:
+            try:
+                kanban_db.unlink_attachment_blob(task_id, dest_path, board=board)
+            except (OSError, ValueError):
+                pass
             raise HTTPException(status_code=500, detail=f"failed to store attachment: {exc}")
 
-        att_id = kanban_db.add_attachment(
-            conn,
-            task_id,
-            filename=candidate,
-            stored_path=str(dest_path.resolve()),
-            content_type=file.content_type,
-            size=total,
-            uploaded_by=(uploaded_by or "dashboard"),
-        )
+        try:
+            att_id = kanban_db.add_attachment(
+                conn,
+                task_id,
+                filename=candidate,
+                stored_path=str(dest_path),
+                content_type=file.content_type,
+                size=total,
+                uploaded_by=(uploaded_by or "dashboard"),
+                board=board,
+            )
+        except Exception:
+            # A blob without its authoritative metadata row is not a valid
+            # attachment. Remove the exact direct-child name using unlinkat.
+            kanban_db.unlink_attachment_blob(task_id, dest_path, board=board)
+            raise
         att = kanban_db.get_attachment(conn, att_id)
         return {"attachment": _attachment_dict(att) if att else None}
+    except kanban_db.OlympusContextError as e:
+        raise HTTPException(status_code=403, detail=e.reason)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     finally:
@@ -770,20 +825,33 @@ def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
         att = kanban_db.get_attachment(conn, attachment_id)
         if att is None:
             raise HTTPException(status_code=404, detail="attachment not found")
-        # Confirm the blob still lives under the board's attachments root
-        # before serving — defense in depth against a tampered DB row.
-        root = kanban_db.attachments_root(board=board).resolve()
+        # Open the direct child with openat/O_NOFOLLOW and keep that descriptor
+        # pinned for the entire response; a path swap after validation cannot
+        # redirect the download.
         try:
-            stored = Path(att.stored_path).resolve()
-            stored.relative_to(root)
+            opened = kanban_db.open_attachment_for_read(
+                att.task_id,
+                att.stored_path,
+                board=board,
+            )
         except (ValueError, OSError):
             raise HTTPException(status_code=404, detail="attachment file unavailable")
-        if not stored.is_file():
-            raise HTTPException(status_code=404, detail="attachment file missing on disk")
-        return FileResponse(
-            path=str(stored),
-            filename=att.filename,
+        def _chunks():
+            with opened:
+                while True:
+                    chunk = opened.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        quoted_name = att.filename.replace('"', "")
+        return StreamingResponse(
+            _chunks(),
             media_type=att.content_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{quoted_name}"',
+                "Content-Length": str(int(att.size)),
+            },
         )
     finally:
         conn.close()
@@ -794,10 +862,17 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
-        att = kanban_db.delete_attachment(conn, attachment_id)
+        existing = kanban_db.get_attachment(conn, attachment_id)
+        if existing is not None:
+            _deny_generic_governed_mutation(
+                conn, existing.task_id, operation="attachment-deleted",
+            )
+        att = kanban_db.delete_attachment(conn, attachment_id, board=board)
         if att is None:
             raise HTTPException(status_code=404, detail="attachment not found")
         return {"ok": True, "id": attachment_id}
+    except kanban_db.OlympusContextError as exc:
+        raise HTTPException(status_code=403, detail=exc.reason)
     finally:
         conn.close()
 
@@ -873,7 +948,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     ok = kanban_db.unblock_task(conn, task_id)
                 else:
                     # Direct status write for drag-drop (todo -> ready etc).
-                    ok = _set_status_direct(conn, task_id, "ready")
+                    ok = kanban_db.set_task_status(conn, task_id, "ready")
             elif s == "archived":
                 ok = kanban_db.archive_task(conn, task_id)
             elif s == "running":
@@ -882,7 +957,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     detail="Cannot set status to 'running' directly; use the dispatcher/claim path",
                 )
             elif s in ("todo", "triage", "scheduled"):
-                ok = _set_status_direct(conn, task_id, s)
+                ok = kanban_db.set_task_status(conn, task_id, s)
             else:
                 raise HTTPException(status_code=400, detail=f"unknown status: {s}")
             if not ok:
@@ -908,44 +983,25 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     detail=f"status transition to {s!r} not valid from current state",
                 )
 
-        # --- priority -----------------------------------------------------
-        if payload.priority is not None:
-            with kanban_db.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET priority = ? WHERE id = ?",
-                    (int(payload.priority), task_id),
+        # --- priority / title / body --------------------------------------
+        if payload.priority is not None or payload.title is not None or payload.body is not None:
+            try:
+                kanban_db.edit_task_fields(
+                    conn,
+                    task_id,
+                    priority=payload.priority,
+                    title=payload.title,
+                    body=payload.body,
                 )
-                conn.execute(
-                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                    "VALUES (?, 'reprioritized', ?, ?)",
-                    (task_id, json.dumps({"priority": int(payload.priority)}),
-                     int(time.time())),
-                )
-
-        # --- title / body -------------------------------------------------
-        if payload.title is not None or payload.body is not None:
-            with kanban_db.write_txn(conn):
-                sets, vals = [], []
-                if payload.title is not None:
-                    if not payload.title.strip():
-                        raise HTTPException(status_code=400, detail="title cannot be empty")
-                    sets.append("title = ?")
-                    vals.append(payload.title.strip())
-                if payload.body is not None:
-                    sets.append("body = ?")
-                    vals.append(payload.body)
-                vals.append(task_id)
-                conn.execute(
-                    f"UPDATE tasks SET {', '.join(sets)} WHERE id = ?", vals,
-                )
-                conn.execute(
-                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                    "VALUES (?, 'edited', NULL, ?)",
-                    (task_id, int(time.time())),
-                )
+            except kanban_db.OlympusContextError:
+                raise
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
 
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(updated) if updated else None}
+    except kanban_db.OlympusContextError as exc:
+        raise HTTPException(status_code=403, detail=exc.reason)
     finally:
         conn.close()
 
@@ -959,10 +1015,13 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(conn, task_id, operation="deleted")
         ok = kanban_db.delete_task(conn, task_id)
         if not ok:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {"deleted": True, "task_id": task_id}
+    except kanban_db.OlympusContextError as exc:
+        raise HTTPException(status_code=403, detail=exc.reason)
     finally:
         conn.close()
 
@@ -993,103 +1052,8 @@ def _parents_blocking_ready(
 def _set_status_direct(
     conn: sqlite3.Connection, task_id: str, new_status: str,
 ) -> bool:
-    """Direct status write for drag-drop moves that aren't covered by the
-    structured complete/block/unblock/archive verbs (e.g. todo<->ready,
-    running<->ready). Appends a ``status`` event row for the live feed.
-
-    When this transitions OFF ``running`` to anything other than the
-    terminal verbs above (which own their own run closing), we close the
-    active run with outcome='reclaimed' so attempt history isn't
-    orphaned. ``running -> ready`` via drag-drop is the common case
-    (user yanking a stuck worker back to the queue).
-    """
-    with kanban_db.write_txn(conn):
-        # Snapshot current state so we know whether to close a run.
-        prev = conn.execute(
-            "SELECT status, current_run_id FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if prev is None:
-            return False
-
-        # Guard: don't allow promoting to 'ready' unless all parents are done.
-        # Prevents the dispatcher from spawning a child whose upstream work
-        # hasn't completed (e.g. T4 dispatched while T3 is still blocked).
-        if new_status == "ready":
-            parent_statuses = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if parent_statuses and not all(
-                p["status"] == "done" for p in parent_statuses
-            ):
-                return False
-
-        was_running = prev["status"] == "running"
-        reopening_satisfied_parent = (
-            prev["status"] in {"done", "archived"}
-            and new_status not in {"done", "archived"}
-        )
-
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, "
-            "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
-            "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
-            "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
-            "WHERE id = ?",
-            (new_status, new_status, new_status, new_status, task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        run_id = None
-        if was_running and new_status != "running" and prev["current_run_id"]:
-            run_id = kanban_db._end_run(
-                conn, task_id,
-                outcome="reclaimed", status="reclaimed",
-                summary=f"status changed to {new_status} (dashboard/direct)",
-            )
-        conn.execute(
-            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-            "VALUES (?, ?, 'status', ?, ?)",
-            (task_id, run_id, json.dumps({"status": new_status}), int(time.time())),
-        )
-        if reopening_satisfied_parent:
-            # A parent leaving done/archived invalidates any direct child that
-            # was sitting in ready solely because that parent used to satisfy
-            # the dependency gate. Demote those children immediately so the
-            # dashboard does not keep advertising stale-ready work.
-            for row in conn.execute(
-                "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-                (task_id,),
-            ).fetchall():
-                child_id = row["child_id"]
-                demoted = conn.execute(
-                    "UPDATE tasks SET status = 'todo' "
-                    "WHERE id = ? AND status = 'ready'",
-                    (child_id,),
-                )
-                if demoted.rowcount == 1:
-                    conn.execute(
-                        "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                        "VALUES (?, 'status', ?, ?)",
-                        (
-                            child_id,
-                            json.dumps(
-                                {
-                                    "status": "todo",
-                                    "reason": "parent_reopened",
-                                    "parent": task_id,
-                                }
-                            ),
-                            int(time.time()),
-                        ),
-                    )
-    # If we re-opened something, children may have gone stale.
-    if new_status in {"done", "ready"}:
-        kanban_db.recompute_ready(conn)
-    return True
+    """Compatibility wrapper around the governed central status API."""
+    return kanban_db.set_task_status(conn, task_id, new_status)
 
 
 # ---------------------------------------------------------------------------
@@ -1110,6 +1074,7 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
     try:
         if kanban_db.get_task(conn, task_id) is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        _deny_generic_governed_mutation(conn, task_id, operation="commented on")
         kanban_db.add_comment(
             conn, task_id, author=payload.author or "dashboard", body=payload.body,
         )
@@ -1132,6 +1097,9 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(
+            conn, payload.parent_id, payload.child_id, operation="linked",
+        )
         kanban_db.link_tasks(conn, payload.parent_id, payload.child_id)
         return {"ok": True}
     except ValueError as e:
@@ -1149,6 +1117,9 @@ def delete_link(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(
+            conn, parent_id, child_id, operation="unlinked",
+        )
         ok = kanban_db.unlink_tasks(conn, parent_id, child_id)
         return {"ok": bool(ok)}
     finally:
@@ -1191,6 +1162,16 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                 task = kanban_db.get_task(conn, tid)
                 if task is None:
                     entry.update(ok=False, error="not found")
+                    results.append(entry)
+                    continue
+                if task.olympus_context is not None:
+                    entry.update(
+                        ok=False,
+                        error=(
+                            "governed task cannot be mutated through the generic "
+                            "dashboard; canonical authority is required"
+                        ),
+                    )
                     results.append(entry)
                     continue
                 if payload.archive:
@@ -1249,17 +1230,9 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                     except RuntimeError as e:
                         entry.update(ok=False, error=str(e))
                 if payload.priority is not None:
-                    with kanban_db.write_txn(conn):
-                        conn.execute(
-                            "UPDATE tasks SET priority = ? WHERE id = ?",
-                            (int(payload.priority), tid),
-                        )
-                        conn.execute(
-                            "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                            "VALUES (?, 'reprioritized', ?, ?)",
-                            (tid, json.dumps({"priority": int(payload.priority)}),
-                             int(time.time())),
-                        )
+                    kanban_db.edit_task_fields(
+                        conn, tid, priority=int(payload.priority),
+                    )
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)
@@ -1440,6 +1413,9 @@ def get_run_endpoint(
         r = kanban_db.get_run(conn, run_id)
         if r is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        _deny_generic_governed_mutation(
+            conn, r.task_id, operation="terminated",
+        )
         return {"run": _run_dict(r)}
     finally:
         conn.close()
@@ -1546,6 +1522,9 @@ def terminate_run_endpoint(
         r = kanban_db.get_run(conn, run_id)
         if r is None:
             raise HTTPException(status_code=404, detail=f"run {run_id} not found")
+        _deny_generic_governed_mutation(
+            conn, r.task_id, operation="run-terminated",
+        )
         if r.ended_at is not None:
             raise HTTPException(
                 status_code=409,
@@ -1589,6 +1568,7 @@ def reclaim_task_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(conn, task_id, operation="reclaimed")
         ok = kanban_db.reclaim_task(conn, task_id, reason=payload.reason)
         if not ok:
             raise HTTPException(
@@ -1631,6 +1611,11 @@ def specify_task_endpoint(
     ``async def`` without an explicit ``run_in_executor``.
     """
     board = _resolve_board(board)
+    check = _conn(board=board)
+    try:
+        _deny_generic_governed_mutation(check, task_id, operation="specified")
+    finally:
+        check.close()
     # Pin the board for the duration of this call so the specifier module
     # (which calls ``kb.connect()`` with no args) hits the right DB. Use a
     # context-local override rather than mutating the process-global
@@ -1677,6 +1662,7 @@ def reassign_task_endpoint(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(conn, task_id, operation="reassigned")
         ok = kanban_db.reassign_task(
             conn, task_id,
             payload.profile or None,
@@ -1845,14 +1831,20 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         task = kanban_db.get_task(conn, task_id)
         if task is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-        kanban_db.add_notify_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=home["chat_id"],
-            thread_id=home["thread_id"] or None,
-            notifier_profile=_active_profile_name(),
-        )
+        _deny_generic_governed_mutation(conn, task_id, operation="subscribed")
+        try:
+            kanban_db.add_notify_sub(
+                conn,
+                task_id=task_id,
+                platform=platform,
+                chat_id=home["chat_id"],
+                thread_id=home["thread_id"] or None,
+                notifier_profile=_active_profile_name(),
+            )
+        except kanban_db.OlympusContextError as exc:
+            if exc.reason != "notification_subscription_identity_conflict":
+                raise
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "task_id": task_id, "home_channel": home}
     finally:
         conn.close()
@@ -1871,6 +1863,7 @@ def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(N
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        _deny_generic_governed_mutation(conn, task_id, operation="unsubscribed")
         kanban_db.remove_notify_sub(
             conn,
             task_id=task_id,
@@ -1973,6 +1966,14 @@ def dispatch(
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
+        governed = conn.execute(
+            "SELECT id FROM tasks WHERE olympus_context IS NOT NULL "
+            "AND status IN ('ready','running','review') LIMIT 1"
+        ).fetchone()
+        if governed is not None:
+            _deny_generic_governed_mutation(
+                conn, str(governed["id"]), operation="dispatched",
+            )
         result = kanban_db.dispatch_once(
             conn, dry_run=dry_run, max_spawn=max_n, board=board,
         )
@@ -2242,6 +2243,13 @@ def decompose_task_endpoint(
     can take minutes on reasoning models.
     """
     board = _resolve_board(board)
+    check = _conn(board=board)
+    try:
+        _deny_generic_governed_mutation(
+            check, task_id, operation="decomposed",
+        )
+    finally:
+        check.close()
     # Context-local board pin (see specify endpoint above): this sync
     # endpoint runs in FastAPI's threadpool, so mutating the process-global
     # HERMES_KANBAN_BOARD env var would let concurrent requests for

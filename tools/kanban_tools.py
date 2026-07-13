@@ -176,6 +176,30 @@ def _connect(board: Optional[str] = None):
     return kb, kb.connect(board=board)
 
 
+def _worker_olympus_auth(kb, conn, task_id: str, action: str):
+    """Issue authority only from the registered process-local worker session."""
+    task = kb.get_task(conn, task_id)
+    if task is None or task.olympus_context is None:
+        return None
+    session = kb.current_olympus_worker_auth_session()
+    if session is None or session.task_id != task_id:
+        raise kb.OlympusContextError(
+            "olympus_worker_session_unavailable",
+            "governed worker mutation lacks a registered authority session",
+        )
+    capability = kb.KANBAN_TASK_ACTION_CAPABILITIES[action]
+    return session.issue(conn, action, capability)
+
+
+def install_olympus_worker_authority(verifier):
+    """Trusted agent composition-root hook for a dispatched worker process."""
+    kb, conn = _connect()
+    try:
+        return kb.install_olympus_worker_auth_session_from_env(conn, verifier)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Runtime-activity → board-heartbeat bridge (#31752)
 # ---------------------------------------------------------------------------
@@ -236,7 +260,14 @@ def heartbeat_current_worker_from_env() -> bool:
         try:
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
             try:
-                claim_current = kb.heartbeat_claim(conn, tid, claimer=claim_lock)
+                claim_current = kb.heartbeat_claim(
+                    conn,
+                    tid,
+                    claimer=claim_lock,
+                    olympus_auth=_worker_olympus_auth(
+                        kb, conn, tid, "heartbeat"
+                    ),
+                )
             except Exception:
                 logger.debug("auto-heartbeat: heartbeat_claim failed", exc_info=True)
                 claim_current = False
@@ -248,7 +279,15 @@ def heartbeat_current_worker_from_env() -> bool:
                 run_id = None
             if claim_current:
                 try:
-                    kb.heartbeat_worker(conn, tid, note=None, expected_run_id=run_id)
+                    kb.heartbeat_worker(
+                        conn,
+                        tid,
+                        note=None,
+                        expected_run_id=run_id,
+                        olympus_auth=_worker_olympus_auth(
+                            kb, conn, tid, "heartbeat_worker"
+                        ),
+                    )
                 except Exception:
                     logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
         finally:
@@ -561,6 +600,9 @@ def _handle_complete(args: dict, **kw) -> str:
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
                     expected_run_id=_worker_run_id(tid),
+                    olympus_auth=_worker_olympus_auth(
+                        kb, conn, tid, "complete"
+                    ),
                 )
             except kb.HallucinatedCardsError as hall_err:
                 # Structured rejection — surface the phantom ids so the
@@ -618,6 +660,9 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 expected_run_id=_worker_run_id(tid),
+                olympus_auth=_worker_olympus_auth(
+                    kb, conn, tid, "block"
+                ),
             )
             if not ok:
                 return tool_error(
@@ -664,7 +709,14 @@ def _handle_heartbeat(args: dict, **kw) -> str:
             # default _claimer_id() covers locally-driven workers that
             # never went through the dispatcher path.
             claim_lock = os.environ.get("HERMES_KANBAN_CLAIM_LOCK")
-            if not kb.heartbeat_claim(conn, tid, claimer=claim_lock):
+            if not kb.heartbeat_claim(
+                conn,
+                tid,
+                claimer=claim_lock,
+                olympus_auth=_worker_olympus_auth(
+                    kb, conn, tid, "heartbeat"
+                ),
+            ):
                 return tool_error(
                     f"could not heartbeat {tid} (claim or canonical authority is not current)"
                 )
@@ -674,6 +726,9 @@ def _handle_heartbeat(args: dict, **kw) -> str:
                 tid,
                 note=note,
                 expected_run_id=_worker_run_id(tid),
+                olympus_auth=_worker_olympus_auth(
+                    kb, conn, tid, "heartbeat_worker"
+                ),
             )
             if not ok:
                 return tool_error(
@@ -714,7 +769,15 @@ def _handle_comment(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
-            cid = kb.add_comment(conn, tid, author=author, body=str(body))
+            cid = kb.add_comment(
+                conn,
+                tid,
+                author=author,
+                body=str(body),
+                olympus_auth=_worker_olympus_auth(
+                    kb, conn, tid, "comment"
+                ),
+            )
             return _ok(task_id=tid, comment_id=cid)
         finally:
             conn.close()
@@ -801,6 +864,13 @@ def _handle_create(args: dict, **kw) -> str:
                     "governed child creation requires the dedicated canonical-authority "
                     "route; generic kanban_create cannot inherit or inject Olympus context"
                 )
+            for parent_id in parents:
+                parent_task = kb.get_task(conn, str(parent_id))
+                if parent_task is not None and parent_task.olympus_context is not None:
+                    return tool_error(
+                        f"governed parent {parent_id} cannot be linked through "
+                        "generic kanban_create; canonical authority is required"
+                    )
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
