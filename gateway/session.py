@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import json
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -25,6 +26,59 @@ logger = logging.getLogger(__name__)
 def _now() -> datetime:
     """Return the current local time."""
     return datetime.now()
+
+
+_OLYMPUS_SELECTION_KEYS = {
+    "schema_version",
+    "board",
+    "root_task_id",
+    "mission_id",
+    "agent_id",
+}
+_OLYMPUS_TASK_ID_RE = re.compile(r"^t_[0-9a-f]+$")
+_OLYMPUS_MISSION_ID_RE = re.compile(
+    r"^M-20[0-9]{6}-[a-z0-9][a-z0-9-]{0,39}$"
+)
+_OLYMPUS_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def normalize_olympus_selection(value: Any) -> Dict[str, Any]:
+    """Validate the small durable pointer stored for Telegram routing.
+
+    Authority is deliberately not copied into ``sessions.json``.  The
+    selection points at an existing governed Kanban task; callers must reload
+    and validate that task's current Olympus context before every create or
+    control operation.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("Olympus selection must be an object")
+    unknown = sorted(set(value) - _OLYMPUS_SELECTION_KEYS)
+    if unknown:
+        raise ValueError(
+            "Olympus selection contains unknown field(s): " + ", ".join(unknown)
+        )
+    if value.get("schema_version") != 1:
+        raise ValueError("Olympus selection schema_version must be 1")
+
+    board = str(value.get("board") or "default").strip().lower()
+    root_task_id = str(value.get("root_task_id") or "").strip()
+    mission_id = str(value.get("mission_id") or "").strip()
+    agent_id = str(value.get("agent_id") or "").strip().lower()
+    if not _OLYMPUS_NAME_RE.fullmatch(board):
+        raise ValueError("Olympus selection board is invalid")
+    if not _OLYMPUS_TASK_ID_RE.fullmatch(root_task_id):
+        raise ValueError("Olympus selection root_task_id is invalid")
+    if not _OLYMPUS_MISSION_ID_RE.fullmatch(mission_id):
+        raise ValueError("Olympus selection mission_id is invalid")
+    if not _OLYMPUS_NAME_RE.fullmatch(agent_id):
+        raise ValueError("Olympus selection agent_id is invalid")
+    return {
+        "schema_version": 1,
+        "board": board,
+        "root_task_id": root_task_id,
+        "mission_id": mission_id,
+        "agent_id": agent_id,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +562,11 @@ class SessionEntry:
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
 
+    # Durable Telegram routing pointer. The referenced Kanban task remains
+    # the source of current authority and lease truth; this is only operator
+    # selection state and never grants permission by itself.
+    olympus_selection: Optional[Dict[str, Any]] = None
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -539,6 +598,10 @@ class SessionEntry:
             "auto_reset_reason": self.auto_reset_reason,
             "reset_had_activity": self.reset_had_activity,
         }
+        if self.olympus_selection is not None:
+            result["olympus_selection"] = normalize_olympus_selection(
+                self.olympus_selection
+            )
         if self.origin:
             result["origin"] = self.origin.to_dict()
         return result
@@ -563,6 +626,17 @@ class SessionEntry:
                 last_resume_marked_at = datetime.fromisoformat(_lrma)
             except (TypeError, ValueError):
                 last_resume_marked_at = None
+
+        olympus_selection = None
+        if data.get("olympus_selection") is not None:
+            try:
+                olympus_selection = normalize_olympus_selection(
+                    data["olympus_selection"]
+                )
+            except (TypeError, ValueError) as exc:
+                logger.warning(
+                    "Ignoring invalid persisted Olympus selection: %s", exc
+                )
 
         return cls(
             session_key=data["session_key"],
@@ -590,6 +664,7 @@ class SessionEntry:
             was_auto_reset=data.get("was_auto_reset", False),
             auto_reset_reason=data.get("auto_reset_reason"),
             reset_had_activity=data.get("reset_had_activity", False),
+            olympus_selection=olympus_selection,
         )
 
 
@@ -908,6 +983,12 @@ class SessionStore:
         with self._lock:
             self._ensure_loaded_locked()
 
+            preserved_olympus_selection = None
+            if session_key in self._entries:
+                preserved_olympus_selection = self._entries[
+                    session_key
+                ].olympus_selection
+
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
 
@@ -962,6 +1043,7 @@ class SessionStore:
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
+                olympus_selection=preserved_olympus_selection,
             )
 
             self._entries[session_key] = entry
@@ -1002,6 +1084,38 @@ class SessionStore:
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
                 self._save()
+
+    def get_olympus_selection(
+        self, session_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return a defensive copy of this session's routing selection."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None or entry.olympus_selection is None:
+                return None
+            return dict(normalize_olympus_selection(entry.olympus_selection))
+
+    def set_olympus_selection(
+        self,
+        session_key: str,
+        selection: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Persist or clear a routing selection on an existing session."""
+        normalized = (
+            normalize_olympus_selection(selection)
+            if selection is not None
+            else None
+        )
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return False
+            entry.olympus_selection = normalized
+            entry.updated_at = _now()
+            self._save()
+            return True
 
     def suspend_session(self, session_key: str) -> bool:
         """Mark a session as suspended so it auto-resets on next access.
@@ -1188,6 +1302,7 @@ class SessionStore:
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
                 is_fresh_reset=True,
+                olympus_selection=old_entry.olympus_selection,
             )
 
             self._entries[session_key] = new_entry
@@ -1248,6 +1363,7 @@ class SessionStore:
                 display_name=old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                olympus_selection=old_entry.olympus_selection,
             )
 
             self._entries[session_key] = new_entry

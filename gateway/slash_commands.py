@@ -392,6 +392,421 @@ class GatewaySlashCommandsMixin:
             output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
         return output or t("gateway.kanban.no_output")
 
+    @staticmethod
+    def _validate_current_olympus_task(
+        kb,
+        task,
+        *,
+        expected_mission_id: Optional[str] = None,
+        allow_archived: bool = False,
+    ) -> dict[str, Any]:
+        """Return a current canonical context or fail closed.
+
+        A session selection is only a pointer. The referenced Kanban row is
+        reloaded for every operation, and Hermes' canonical Olympus context
+        validator remains the authority contract.
+        """
+        normalize = getattr(kb, "normalize_olympus_context", None)
+        if normalize is None:
+            raise RuntimeError(
+                "Olympus Kanban authority binding is unavailable; integrate "
+                "M-20260713-olympus-hermes-bind before enabling this route"
+            )
+        if task is None:
+            raise ValueError("target task does not exist")
+        if getattr(task, "status", None) == "archived" and not allow_archived:
+            raise ValueError("target task is archived")
+        raw_context = getattr(task, "olympus_context", None)
+        if raw_context is None:
+            raise ValueError("target task has no Olympus authority context")
+        require_current = getattr(kb, "_require_current_olympus_context", None)
+        if require_current is not None:
+            context = require_current(
+                raw_context,
+                assignee=getattr(task, "assignee", None),
+            )
+        else:
+            # Compatibility seam for the pinned Mission 3 unit branch. The
+            # integrated system always uses Mission 2's canonical current-
+            # context gate above.
+            context = normalize(raw_context)
+        mission_id = context.get("mission_id")
+        if expected_mission_id and mission_id != expected_mission_id:
+            raise ValueError("target task belongs to a different Olympus mission")
+
+        now = int(time.time())
+        authority = context.get("authority") or {}
+        lease = context.get("lease") or {}
+        if authority.get("mission_id") != mission_id:
+            raise ValueError("target task authority references another mission")
+        if lease.get("mission_id") != mission_id:
+            raise ValueError("target task lease references another mission")
+        if authority.get("status") != "active":
+            raise ValueError("target task authority is not active")
+        if lease.get("status") != "active":
+            raise ValueError("target task lease is not active")
+        if int(authority.get("expires_at") or 0) <= now:
+            raise ValueError("target task authority is expired")
+        if int(lease.get("expires_at") or 0) <= now:
+            raise ValueError("target task lease is expired")
+        return context
+
+    @staticmethod
+    def _olympus_operator_tag(event: MessageEvent) -> str:
+        source = event.source
+        stable_id = str(getattr(source, "user_id", "") or "unknown")
+        digest = hashlib.sha256(stable_id.encode("utf-8")).hexdigest()[:12]
+        return f"telegram:{digest}"
+
+    def _olympus_selection_for_event(
+        self, event: MessageEvent
+    ) -> Optional[dict[str, Any]]:
+        store = getattr(self, "session_store", None)
+        if store is None or not hasattr(store, "get_olympus_selection"):
+            return None
+        session_key = self._session_key_for_source(event.source)
+        selection = store.get_olympus_selection(session_key)
+        return selection if isinstance(selection, dict) else None
+
+    async def _route_olympus_telegram_intake(
+        self,
+        event: MessageEvent,
+        *,
+        prompt_override: Optional[str] = None,
+    ) -> Optional[str]:
+        """Route selected Telegram input into the existing Kanban.
+
+        ``None`` means the event is outside this route. Any selected Telegram
+        event returns a visible success or fail-closed response and never falls
+        through to the conversational agent.
+        """
+        source = event.source
+        if source is None or source.platform != Platform.TELEGRAM:
+            return None
+        if prompt_override is None and event.get_command():
+            return None
+
+        selection = self._olympus_selection_for_event(event)
+        if selection is None:
+            return None
+
+        prompt = str(
+            prompt_override if prompt_override is not None else event.text or ""
+        ).strip()
+        if not prompt:
+            return "Olympus intake blocked: the task prompt is empty."
+        if event.media_urls or event.media_types:
+            return (
+                "Olympus intake blocked: durable attachment transfer is not "
+                "certified yet. Use `/background --ephemeral ...` for this "
+                "message or submit a text-only task."
+            )
+
+        delivery_id = None
+        if event.platform_update_id is not None:
+            delivery_id = f"update:{int(event.platform_update_id)}"
+        elif event.message_id:
+            delivery_id = f"message:{event.message_id}"
+        if delivery_id is None:
+            return (
+                "Olympus intake blocked: Telegram supplied no stable delivery "
+                "identifier, so idempotency cannot be proven."
+            )
+
+        session_entry = self.session_store.get_or_create_session(source)
+        operator_tag = self._olympus_operator_tag(event)
+        board = selection["board"]
+        root_task_id = selection["root_task_id"]
+        mission_id = selection["mission_id"]
+        agent_id = selection["agent_id"]
+        source_fingerprint = "|".join(
+            (
+                str(source.chat_id or ""),
+                str(source.thread_id or ""),
+                delivery_id,
+                board,
+                root_task_id,
+                mission_id,
+            )
+        )
+        idempotency_key = (
+            "olympus-telegram:v1:"
+            + hashlib.sha256(source_fingerprint.encode("utf-8")).hexdigest()
+        )
+        title = " ".join(prompt.split())[:120]
+
+        def _create() -> tuple[str, Optional[str]]:
+            from hermes_cli import kanban_db as kb
+
+            if board != "default" and not kb.board_exists(board):
+                raise ValueError(f"Kanban board {board!r} does not exist")
+            conn = kb.connect(board=board)
+            try:
+                root = kb.get_task(conn, root_task_id)
+                root_context = self._validate_current_olympus_task(
+                    kb,
+                    root,
+                    expected_mission_id=mission_id,
+                )
+                derive = getattr(kb, "derive_olympus_child_context", None)
+                if derive is None:
+                    raise RuntimeError(
+                        "Olympus child-context binding is unavailable"
+                    )
+                child_context = derive(root_context, agent_id=agent_id)
+                task_id = kb.create_task(
+                    conn,
+                    title=title,
+                    body=prompt,
+                    assignee=agent_id,
+                    created_by=operator_tag,
+                    idempotency_key=idempotency_key,
+                    session_id=session_entry.session_id,
+                    board=board,
+                    olympus_context=child_context,
+                )
+                notify_error = None
+                try:
+                    kb.add_notify_sub(
+                        conn,
+                        task_id=task_id,
+                        platform="telegram",
+                        chat_id=str(source.chat_id),
+                        thread_id=(
+                            str(source.thread_id) if source.thread_id else None
+                        ),
+                        user_id=str(source.user_id) if source.user_id else None,
+                        notifier_profile=(
+                            getattr(self, "_kanban_notifier_profile", None)
+                            or self._active_profile_name()
+                        ),
+                    )
+                except Exception as exc:
+                    notify_error = str(exc)
+                return task_id, notify_error
+            finally:
+                conn.close()
+
+        try:
+            task_id, notify_error = await asyncio.to_thread(_create)
+        except Exception as exc:
+            logger.warning(
+                "Olympus Telegram intake denied for mission %s: %s",
+                mission_id,
+                exc,
+            )
+            return f"Olympus intake blocked: {exc}"
+
+        result = (
+            f"Queued `{task_id}` for mission `{mission_id}` on board "
+            f"`{board}` with agent `{agent_id}`."
+        )
+        if notify_error:
+            logger.warning(
+                "Olympus task %s was created but notification subscription "
+                "failed: %s",
+                task_id,
+                notify_error,
+            )
+            result += " Notification subscription failed; inspect the task directly."
+        return result
+
+    async def _handle_olympus_command(self, event: MessageEvent) -> str:
+        """Manage durable Telegram selection and explicitly targeted controls."""
+        if event.source.platform != Platform.TELEGRAM:
+            return "`/olympus` is currently available only on Telegram."
+        try:
+            tokens = shlex.split(event.get_command_args().strip())
+        except ValueError as exc:
+            return f"Olympus command parse error: {exc}"
+        action = tokens[0].lower() if tokens else "status"
+        args = tokens[1:]
+        session_entry = self.session_store.get_or_create_session(event.source)
+        session_key = session_entry.session_key
+
+        usage = (
+            "Usage:\n"
+            "`/olympus select <root-task-id> [--board <slug>] [--agent <profile>]`\n"
+            "`/olympus status` | `/olympus clear`\n"
+            "`/olympus pause|resume|interrupt|cancel <task-id>`"
+        )
+
+        if action == "clear":
+            if args:
+                return usage
+            self.session_store.set_olympus_selection(session_key, None)
+            return "Olympus durable intake selection cleared."
+
+        if action == "select":
+            if not args:
+                return usage
+            root_task_id = args[0]
+            board = "default"
+            requested_agent = None
+            i = 1
+            while i < len(args):
+                token = args[i]
+                if token in {"--board", "--agent"} and i + 1 < len(args):
+                    if token == "--board":
+                        board = args[i + 1]
+                    else:
+                        requested_agent = args[i + 1]
+                    i += 2
+                    continue
+                return usage
+
+            def _select() -> dict[str, Any]:
+                from gateway.session import normalize_olympus_selection
+                from hermes_cli import kanban_db as kb
+
+                board_normalized = str(board).strip().lower()
+                if board_normalized != "default" and not kb.board_exists(
+                    board_normalized
+                ):
+                    raise ValueError(
+                        f"Kanban board {board_normalized!r} does not exist"
+                    )
+                conn = kb.connect(board=board_normalized)
+                try:
+                    root = kb.get_task(conn, root_task_id)
+                    context = self._validate_current_olympus_task(kb, root)
+                finally:
+                    conn.close()
+                return normalize_olympus_selection(
+                    {
+                        "schema_version": 1,
+                        "board": board_normalized,
+                        "root_task_id": root_task_id,
+                        "mission_id": context["mission_id"],
+                        "agent_id": requested_agent or context["agent_id"],
+                    }
+                )
+
+            try:
+                selection = await asyncio.to_thread(_select)
+            except Exception as exc:
+                return f"Olympus selection blocked: {exc}"
+            self.session_store.set_olympus_selection(session_key, selection)
+            return (
+                f"Olympus durable intake selected mission "
+                f"`{selection['mission_id']}`, root `{selection['root_task_id']}`, "
+                f"board `{selection['board']}`, agent `{selection['agent_id']}`."
+            )
+
+        selection = self.session_store.get_olympus_selection(session_key)
+        if action == "status":
+            if args:
+                return usage
+            if selection is None:
+                return "No Olympus durable intake is selected.\n" + usage
+
+            def _status() -> str:
+                from hermes_cli import kanban_db as kb
+
+                conn = kb.connect(board=selection["board"])
+                try:
+                    root = kb.get_task(conn, selection["root_task_id"])
+                    self._validate_current_olympus_task(
+                        kb,
+                        root,
+                        expected_mission_id=selection["mission_id"],
+                    )
+                    return str(getattr(root, "status", "unknown"))
+                finally:
+                    conn.close()
+
+            try:
+                root_status = await asyncio.to_thread(_status)
+                authority_state = "current"
+            except Exception as exc:
+                root_status = "blocked"
+                authority_state = f"invalid: {exc}"
+            return (
+                f"Olympus selection: mission `{selection['mission_id']}`, root "
+                f"`{selection['root_task_id']}` ({root_status}), board "
+                f"`{selection['board']}`, agent `{selection['agent_id']}`, "
+                f"authority {authority_state}."
+            )
+
+        if action not in {"pause", "resume", "interrupt", "cancel"}:
+            return usage
+        if selection is None:
+            return "Olympus control blocked: select a governed mission root first."
+        if len(args) != 1:
+            return usage
+        task_id = args[0]
+        operator_tag = self._olympus_operator_tag(event)
+
+        def _control() -> str:
+            from hermes_cli import kanban_db as kb
+
+            conn = kb.connect(board=selection["board"])
+            try:
+                root = kb.get_task(conn, selection["root_task_id"])
+                self._validate_current_olympus_task(
+                    kb,
+                    root,
+                    expected_mission_id=selection["mission_id"],
+                )
+                target = kb.get_task(conn, task_id)
+                self._validate_current_olympus_task(
+                    kb,
+                    target,
+                    expected_mission_id=selection["mission_id"],
+                )
+
+                # Record the targeted request before mutation. If the state
+                # transition is refused, the attempted operator action remains
+                # attributable instead of disappearing from the audit trail.
+                kb.add_comment(
+                    conn,
+                    task_id,
+                    operator_tag,
+                    f"Olympus Telegram targeted action: {action}",
+                )
+
+                if action == "interrupt":
+                    changed = kb.reclaim_task(
+                        conn,
+                        task_id,
+                        reason=f"targeted Telegram interrupt by {operator_tag}",
+                    )
+                elif action == "pause":
+                    if getattr(target, "status", None) == "running":
+                        kb.reclaim_task(
+                            conn,
+                            task_id,
+                            reason=f"targeted Telegram pause by {operator_tag}",
+                        )
+                    changed = kb.block_task(
+                        conn,
+                        task_id,
+                        reason=f"targeted Telegram pause by {operator_tag}",
+                    )
+                elif action == "resume":
+                    changed = kb.unblock_task(conn, task_id)
+                else:
+                    if getattr(target, "status", None) == "running":
+                        kb.reclaim_task(
+                            conn,
+                            task_id,
+                            reason=f"targeted Telegram cancel by {operator_tag}",
+                        )
+                    changed = kb.archive_task(conn, task_id)
+                if not changed:
+                    raise ValueError(
+                        f"task {task_id} is not in a state that can {action}"
+                    )
+                return str(getattr(kb.get_task(conn, task_id), "status", "unknown"))
+            finally:
+                conn.close()
+
+        try:
+            new_status = await asyncio.to_thread(_control)
+        except Exception as exc:
+            return f"Olympus {action} blocked: {exc}"
+        return f"Olympus {action} applied to `{task_id}`; status is `{new_status}`."
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
@@ -2004,15 +2419,40 @@ class GatewaySlashCommandsMixin:
         return t("gateway.rollback.restore_failed", error=result["error"])
 
     async def _handle_background_command(self, event: MessageEvent) -> str:
-        """Handle /background <prompt> — run a prompt in a separate background session.
+        """Handle durable Telegram or explicitly ephemeral background work.
 
-        Spawns a new AIAgent in a background thread with its own session.
-        When it completes, sends the result back to the same chat without
-        modifying the active session's conversation history.
+        Selected Telegram sessions submit to Hermes Kanban by default. The
+        historical process-local AIAgent path remains available there only via
+        ``--ephemeral``. Other platforms retain their existing behavior.
         """
-        prompt = event.get_command_args().strip()
+        raw_args = event.get_command_args().strip()
+        ephemeral = False
+        if raw_args == "--ephemeral":
+            ephemeral = True
+            raw_args = ""
+        elif raw_args.startswith("--ephemeral "):
+            ephemeral = True
+            raw_args = raw_args[len("--ephemeral "):].lstrip()
+        prompt = raw_args
         if not prompt:
-            return t("gateway.background.usage")
+            return (
+                "Usage: /background [--ephemeral] <prompt>"
+                if event.source.platform == Platform.TELEGRAM
+                else t("gateway.background.usage")
+            )
+
+        if event.source.platform == Platform.TELEGRAM and not ephemeral:
+            routed = await self._route_olympus_telegram_intake(
+                event,
+                prompt_override=prompt,
+            )
+            if routed is not None:
+                return routed
+            return (
+                "Durable background submission requires an Olympus selection. "
+                "Use `/olympus select <root-task-id>` first, or explicitly use "
+                "`/background --ephemeral <prompt>` for process-local work."
+            )
 
         source = event.source
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{os.urandom(3).hex()}"

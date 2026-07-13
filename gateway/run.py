@@ -3828,6 +3828,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True  # handled (silently dropped); do not fall through
 
+        # A selected Telegram lane is durable intake, not conversational
+        # follow-up. Persist it before any drain/interrupt logic so an
+        # unrelated message cannot cancel the active agent and survives a
+        # gateway restart. Approval/clarify replies bypass this handler in the
+        # base adapter and still reach their dedicated resolver.
+        routed = await self._route_olympus_telegram_intake(event)
+        if routed is not None:
+            adapter = self.adapters.get(event.source.platform)
+            if adapter:
+                reply_anchor = self._reply_anchor_for_event(event)
+                await adapter._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=routed,
+                    reply_to=reply_anchor,
+                    metadata=self._thread_metadata_for_source(
+                        event.source, reply_anchor
+                    ),
+                )
+            return True
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self.adapters.get(event.source.platform)
@@ -6923,6 +6943,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
 
+        # Normal Telegram text in a selected Olympus lane becomes a durable
+        # Kanban task. This occurs before the running-agent priority guard and
+        # before a new conversational slot is claimed, so it never interrupts
+        # or starts a process-local agent turn.
+        _olympus_routed = await self._route_olympus_telegram_intake(event)
+        if _olympus_routed is not None:
+            return _olympus_routed
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -7199,6 +7227,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return await self._handle_commands_command(event)
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
+                if _cmd_def_inner.name == "olympus":
+                    return await self._handle_olympus_command(event)
                 if _cmd_def_inner.name == "update":
                     return await self._handle_update_command(event)
                 if _cmd_def_inner.name == "version":
@@ -7511,6 +7541,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
+
+        if canonical == "olympus":
+            return await self._handle_olympus_command(event)
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)
