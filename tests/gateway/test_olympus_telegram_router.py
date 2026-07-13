@@ -189,9 +189,21 @@ async def test_select_requires_current_governed_root(session_store, governed_boa
 
 
 @pytest.mark.asyncio
-async def test_unbound_or_expired_root_fails_closed(session_store, governed_board):
+async def test_unbound_or_expired_root_fails_closed(
+    session_store, governed_board, monkeypatch
+):
     runner = _runner(session_store)
-    governed_board.contexts[governed_board.root_id]["lease"]["expires_at"] = 1
+
+    def canonical_gate(_context, *, assignee):
+        assert assignee == "coding"
+        raise ValueError("lease is expired")
+
+    monkeypatch.setattr(
+        governed_board.kb,
+        "_require_current_olympus_context",
+        canonical_gate,
+        raising=False,
+    )
     result = await runner._handle_olympus_command(
         _event(f"/olympus select {governed_board.root_id}", 3)
     )

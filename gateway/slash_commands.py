@@ -421,10 +421,16 @@ class GatewaySlashCommandsMixin:
             raise ValueError("target task has no Olympus authority context")
         require_current = getattr(kb, "_require_current_olympus_context", None)
         if require_current is not None:
-            context = require_current(
-                raw_context,
-                assignee=getattr(task, "assignee", None),
-            )
+            try:
+                context = require_current(
+                    raw_context,
+                    assignee=getattr(task, "assignee", None),
+                )
+            except Exception as exc:
+                detail = str(exc).strip() or type(exc).__name__
+                if not detail.startswith("target task "):
+                    detail = f"target task {detail}"
+                raise ValueError(detail) from exc
         else:
             # Compatibility seam for the pinned Mission 3 unit branch. The
             # integrated system always uses Mission 2's canonical current-
