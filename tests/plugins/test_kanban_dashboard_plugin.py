@@ -114,6 +114,34 @@ def test_create_task_appears_on_board(client):
     assert "researcher" in data["assignees"]
 
 
+def test_generic_dashboard_cannot_inject_or_replace_olympus_context(client):
+    context = {"schema_version": 2, "forged": "caller assertion"}
+    injected = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "governed API task",
+            "assignee": "coding",
+            "olympus_context": context,
+        },
+    )
+    assert injected.status_code == 422
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "ordinary API task", "assignee": "coding"},
+    )
+    assert created.status_code == 200, created.text
+    task = created.json()["task"]
+    assert task["olympus_context"] is None
+    updated = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"olympus_context": context},
+    )
+    assert updated.status_code == 422, updated.text
+    detail = client.get(f"/api/plugins/kanban/tasks/{task['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["task"]["olympus_context"] is None
+
+
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
     """Scheduled/time-delay tasks must not be silently bucketed into todo."""
 

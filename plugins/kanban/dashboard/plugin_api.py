@@ -46,7 +46,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_diagnostics as kd
@@ -231,6 +231,7 @@ def _run_dict(r: kanban_db.Run) -> dict[str, Any]:
         "summary": r.summary,
         "metadata": r.metadata,
         "error": r.error,
+        "olympus_context": r.olympus_context,
     }
 
 
@@ -578,6 +579,8 @@ def get_task(
 # ---------------------------------------------------------------------------
 
 class CreateTaskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     body: Optional[str] = None
     assignee: Optional[str] = None
@@ -804,6 +807,8 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 # ---------------------------------------------------------------------------
 
 class UpdateTaskBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: Optional[str] = None
     assignee: Optional[str] = None
     priority: Optional[int] = None
@@ -829,6 +834,14 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         # --- assignee ----------------------------------------------------
         if payload.assignee is not None:
+            if task.olympus_context is not None and payload.assignee != task.assignee:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "governed task reassignment requires the dedicated "
+                        "canonical-authority path"
+                    ),
+                )
             try:
                 ok = kanban_db.assign_task(
                     conn, task_id, payload.assignee or None,
