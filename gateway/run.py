@@ -5070,6 +5070,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
             return True  # handled (silently dropped); do not fall through
 
+        # Selected Telegram input is durable Kanban intake, never a
+        # conversational interruption. Persist it before drain/busy handling.
+        routed = await self._route_olympus_telegram_intake(event)
+        if routed is not None:
+            adapter = self.adapters.get(event.source.platform)
+            if adapter:
+                reply_anchor = self._reply_anchor_for_event(event)
+                await adapter._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=routed,
+                    reply_to=reply_anchor,
+                    metadata=self._thread_metadata_for_source(
+                        event.source, reply_anchor
+                    ),
+                )
+            return True
+
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
             adapter = self._adapter_for_source(event.source)
@@ -8854,6 +8871,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the confirm doesn't block normal usage indefinitely.  The user
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
+
+        # A normal Telegram message in a selected Olympus lane becomes a
+        # durable submission before any running-agent priority/interrupt path.
+        _olympus_routed = await self._route_olympus_telegram_intake(event)
+        if _olympus_routed is not None:
+            return _olympus_routed
 
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages

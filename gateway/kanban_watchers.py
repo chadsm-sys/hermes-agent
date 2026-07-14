@@ -1306,13 +1306,32 @@ class GatewayKanbanWatchersMixin:
                 reconciled = _kb.reconcile_restart_state(
                     conn, olympus_auth=olympus_auth,
                 )
-                if reconciled["effects"] or reconciled["worker_runs"]:
+                terminations = {"executed": 0, "confirmed": 0}
+                telegram_controls = 0
+                if olympus_auth is not None:
+                    terminations = _kb.process_pending_worker_termination_effects(
+                        conn, olympus_auth=olympus_auth,
+                    )
+                    telegram_controls = _kb.reconcile_olympus_telegram_controls(
+                        conn, service_auth=olympus_auth,
+                    )
+                if (
+                    reconciled["effects"]
+                    or reconciled["worker_runs"]
+                    or terminations["executed"]
+                    or terminations["confirmed"]
+                    or telegram_controls
+                ):
                     logger.warning(
                         "kanban dispatcher [%s]: restart reconciliation "
-                        "effects=%d worker_runs=%d",
+                        "effects=%d worker_runs=%d terminations=%d "
+                        "exits=%d telegram_controls=%d",
                         slug,
                         reconciled["effects"],
                         reconciled["worker_runs"],
+                        terminations["executed"],
+                        terminations["confirmed"],
+                        telegram_controls,
                     )
                 return _kb.dispatch_once(
                     conn,
