@@ -6,6 +6,8 @@ import os
 import subprocess
 import tarfile
 import time
+import urllib.error
+import urllib.request
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -576,7 +578,119 @@ class TestExplicitPathNoAutoDownload:
 
 
 # ---------------------------------------------------------------------------
-# Cosign provenance verification (P1)
+# Pinned release download security
+# ---------------------------------------------------------------------------
+
+class TestPinnedReleaseDownload:
+    def test_successful_pinned_asset_selection(self):
+        asset = _tirith_mod._pinned_asset_for_target("aarch64-apple-darwin")
+        assert asset["version"] == "0.3.3"
+        assert asset["name"] == "tirith-aarch64-apple-darwin.tar.gz"
+        assert asset["url"] == (
+            "https://github.com/sheeki03/tirith/releases/download/v0.3.3/"
+            "tirith-aarch64-apple-darwin.tar.gz"
+        )
+        assert asset["sha256"] == (
+            "720ed4637d16fed908c2d268fd1da854632a15d59ce74c3d78903c5a92ccbc1c"
+        )
+
+    def test_checksum_mismatch_fails_closed(self, tmp_path):
+        archive = tmp_path / "tirith.tar.gz"
+        archive.write_bytes(b"tampered")
+        assert not _tirith_mod._verify_pinned_checksum(
+            str(archive), "0" * 64
+        )
+
+    @patch("tools.tirith_security._verify_tirith_version")
+    @patch("tools.tirith_security.tarfile.open")
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=False)
+    @patch("tools.tirith_security.shutil.which", return_value=None)
+    @patch("tools.tirith_security._download_file")
+    @patch("tools.tirith_security._detect_target", return_value="aarch64-apple-darwin")
+    def test_checksum_mismatch_stops_before_archive_execution(
+        self, _target, _download, _which, _checksum, tar_open, verify_version,
+    ):
+        path, reason = _tirith_mod._install_tirith(log_failures=False)
+        assert path is None
+        assert reason == "checksum_failed"
+        tar_open.assert_not_called()
+        verify_version.assert_not_called()
+
+    def test_wrong_architecture_is_unsupported(self):
+        assert _tirith_mod._pinned_asset_for_target("riscv64-unknown-linux-gnu") is None
+
+    def test_missing_asset_fails_closed(self):
+        with patch("tools.tirith_security._detect_target",
+                   return_value="aarch64-apple-darwin"), \
+             patch("tools.tirith_security._download_file",
+                   side_effect=urllib.error.HTTPError(
+                       "https://example.invalid/missing", 404, "not found", {}, None
+                   )):
+            path, reason = _tirith_mod._install_tirith(log_failures=False)
+        assert path is None
+        assert reason == "download_failed"
+
+    @pytest.mark.parametrize("redirect_url", [
+        "https://evil.example/tirith-aarch64-apple-darwin.tar.gz",
+        "https://release-assets.githubusercontent.com/"
+        "github-production-release-asset/999999999/not-the-pinned-repository"
+        "?response-content-disposition=attachment%3B%20filename%3D"
+        "tirith-aarch64-apple-darwin.tar.gz",
+        "https://release-assets.githubusercontent.com/"
+        "github-production-release-asset/1147679251/pinned-repository-wrong-asset"
+        "?response-content-disposition=attachment%3B%20filename%3D"
+        "tirith-aarch64-apple-darwin.tar.gz.bak",
+    ])
+    def test_unexpected_redirect_is_rejected(self, redirect_url):
+        handler = _tirith_mod._PinnedReleaseRedirectHandler(
+            "tirith-aarch64-apple-darwin.tar.gz"
+        )
+        request = urllib.request.Request(
+            "https://github.com/sheeki03/tirith/releases/download/v0.3.3/"
+            "tirith-aarch64-apple-darwin.tar.gz"
+        )
+        with pytest.raises(urllib.error.HTTPError, match="unexpected redirect"):
+            handler.redirect_request(
+                request, None, 302, "Found", {},
+                redirect_url,
+            )
+
+    def test_mutable_latest_url_is_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="immutable pinned Tirith release"):
+            _tirith_mod._download_file(
+                "https://github.com/sheeki03/tirith/releases/latest/download/"
+                "tirith-aarch64-apple-darwin.tar.gz",
+                str(tmp_path / "tirith.tar.gz"),
+                expected_asset="tirith-aarch64-apple-darwin.tar.gz",
+            )
+
+    def test_allowed_asset_redirect_strips_authorization(self):
+        asset = "tirith-aarch64-apple-darwin.tar.gz"
+        handler = _tirith_mod._PinnedReleaseRedirectHandler(asset)
+        request = urllib.request.Request(
+            f"{_tirith_mod._TIRITH_RELEASE_BASE}/{asset}",
+            headers={"Authorization": "token secret"},
+        )
+        redirect_url = (
+            "https://release-assets.githubusercontent.com/"
+            "github-production-release-asset/1147679251/immutable-object"
+            "?response-content-disposition=attachment%3B%20filename%3D"
+            f"{asset}"
+        )
+        redirected = handler.redirect_request(
+            request, None, 302, "Found", {}, redirect_url,
+        )
+        assert redirected.get_header("Authorization") is None
+
+    def test_version_drift_fails_closed(self, tmp_path):
+        binary = tmp_path / "tirith"
+        binary.write_text("#!/bin/sh\nprintf 'tirith 0.3.4\\n'\n", encoding="utf-8")
+        binary.chmod(0o755)
+        assert not _tirith_mod._verify_tirith_version(str(binary), "0.3.3")
+
+
+# ---------------------------------------------------------------------------
+# Cosign provenance verification (P1 — secure auto-install)
 # ---------------------------------------------------------------------------
 
 class TestCosignVerification:
@@ -660,7 +774,7 @@ class TestCosignVerification:
         assert reason == "cosign_verification_failed"
 
     @patch("tools.tirith_security.tarfile.open")
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security.shutil.which", return_value=None)
     @patch("tools.tirith_security._download_file")
     @patch("tools.tirith_security._detect_target", return_value="aarch64-apple-darwin")
@@ -682,7 +796,7 @@ class TestCosignVerification:
         assert mock_checksum.called  # SHA-256 verification ran
 
     @patch("tools.tirith_security.tarfile.open")
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security._verify_cosign", return_value=None)
     @patch("tools.tirith_security.shutil.which", return_value="/usr/local/bin/cosign")
     @patch("tools.tirith_security._download_file")
@@ -704,7 +818,7 @@ class TestCosignVerification:
         assert mock_checksum.called
 
     @patch("tools.tirith_security.tarfile.open")
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security.shutil.which", return_value="/usr/local/bin/cosign")
     @patch("tools.tirith_security._download_file")
     @patch("tools.tirith_security._detect_target", return_value="aarch64-apple-darwin")
@@ -715,7 +829,8 @@ class TestCosignVerification:
         from tools.tirith_security import _install_tirith
         import urllib.request
 
-        def _dl_side_effect(url, dest, timeout=10):
+        def _dl_side_effect(url, dest, timeout=10, **kwargs):
+            del kwargs
             if url.endswith(".sig") or url.endswith(".pem"):
                 raise urllib.request.URLError("404 Not Found")
 
@@ -732,7 +847,7 @@ class TestCosignVerification:
         assert mock_checksum.called
 
     @patch("tools.tirith_security.tarfile.open")
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security._verify_cosign", return_value=True)
     @patch("tools.tirith_security.shutil.which", return_value="/usr/local/bin/cosign")
     @patch("tools.tirith_security._download_file")
@@ -772,8 +887,11 @@ class TestInstallArchiveMemberValidation:
         return archive, checksums
 
     def _download_side_effect(self, archive, checksums):
-        def _download(url, dest, timeout=10):
+        def _download(url, dest, timeout=10, **kwargs):
             del timeout
+            assert url.startswith(_tirith_mod._TIRITH_RELEASE_BASE + "/")
+            assert "/releases/latest/" not in url
+            assert kwargs["expected_asset"] == url.rsplit("/", 1)[-1]
             if url.endswith(".tar.gz"):
                 with open(archive, "rb") as src, open(dest, "wb") as dst:
                     dst.write(src.read())
@@ -786,7 +904,7 @@ class TestInstallArchiveMemberValidation:
 
         return _download
 
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security.shutil.which", return_value=None)
     @patch("tools.tirith_security._detect_target", return_value="aarch64-apple-darwin")
     def test_install_extracts_regular_tirith_member(self, mock_target, mock_which,
@@ -795,7 +913,7 @@ class TestInstallArchiveMemberValidation:
         del mock_target, mock_which, mock_checksum
         from tools.tirith_security import _install_tirith
 
-        payload = b"#!/bin/sh\nexit 0\n"
+        payload = b"#!/bin/sh\nprintf 'tirith 0.3.3\\n'\n"
         member = tarfile.TarInfo("bin/tirith")
         member.mode = 0o755
         member.size = len(payload)
@@ -814,7 +932,7 @@ class TestInstallArchiveMemberValidation:
         with open(path, "rb") as f:
             assert f.read() == payload
 
-    @patch("tools.tirith_security._verify_checksum", return_value=True)
+    @patch("tools.tirith_security._verify_pinned_checksum", return_value=True)
     @patch("tools.tirith_security.shutil.which", return_value=None)
     @patch("tools.tirith_security._detect_target", return_value="aarch64-apple-darwin")
     def test_install_rejects_non_regular_tirith_member(self, mock_target, mock_which,

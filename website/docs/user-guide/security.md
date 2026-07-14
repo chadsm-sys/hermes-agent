@@ -561,6 +561,17 @@ When `tirith_fail_open` is `true` (default), commands proceed if tirith is not i
 
 Tirith ships prebuilt binaries for Linux (x86_64 / aarch64) and macOS (x86_64 / arm64). On platforms with no prebuilt binary (Windows, etc.), tirith is silently skipped — pattern-matching guards still run, and the CLI does not surface an "unavailable" banner. To use tirith on Windows, run Hermes under WSL.
 
+#### Upgrading the pinned Tirith installer release
+
+Hermes auto-install is intentionally pinned in `tools/tirith_security.py`; it never resolves `releases/latest`. A Tirith upgrade requires an explicit reviewed commit:
+
+1. Select one immutable Tirith tag and confirm all four supported assets exist: macOS `arm64`/`x86_64` and Linux `arm64`/`x86_64`.
+2. Update `_TIRITH_VERSION` and every SHA-256 in `_TIRITH_PINNED_ASSETS` from independently downloaded assets.
+3. If GitHub's repository release-asset ID changes, update `_TIRITH_RELEASE_REPOSITORY_ID` after verifying the redirect belongs to `sheeki03/tirith`.
+4. Run `uv run pytest tests/tools/test_tirith_security.py -q` and the full test suite. Review the commit diff before merge.
+
+Do not add a `latest` fallback. Missing assets, unsupported targets, checksum/version mismatches, and unexpected redirects must continue to fail closed.
+
 Tirith's verdict integrates with the approval flow: safe commands pass through, while both suspicious and blocked commands trigger user approval with the full tirith findings (severity, title, description, safer alternatives). Users can approve or deny — the default choice is deny to keep unattended scenarios secure.
 
 ### Context File Injection Protection
