@@ -203,6 +203,8 @@ AUTHOR_MAP = {
     "yuhanglin@YuhangdeMac-mini.local": "1960697431",
     "admin@fent.quest": "XVVH",
     "despitemeguru@gmail.com": "definitelynotguru",
+    # Canonical identity for chadsm-sys; required by contributor-check.yml.
+    "chadsm1985@gmail.com": "chadsm-sys",
     "chaslui@outlook.com": "ChasLui",
     "rio.jeong@thebytesize.ai": "rio-jeong",
     "cdddo@users.noreply.github.com": "Cdddo",
@@ -1857,6 +1859,7 @@ AUTHOR_MAP = {
     "poli.koltsova@gmail.com": "wnuuee1",  # commit 9fd2b2cb PR author
     "yosapol@jitrak.dev": "Eji4h",  # direct email match
     "kiljadn@gmail.com": "designnotdrum",  # PR #56480 salvage (toolset static-inference fix)
+    "chadsm@umich.edu": "chadsm-sys",  # memorygraph provider (Memory Graph v2)
 }
 
 
