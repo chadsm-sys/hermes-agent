@@ -67,3 +67,8 @@ def test_singleton_dispatcher_lock_is_exclusive(tmp_path):
     h3, st3 = _acquire_singleton_lock(lock)
     assert st3 == "held" and h3 is not None
     _release_singleton_lock(h3)
+def test_dispatcher_reconciles_durable_restart_state_before_dispatch():
+    source = inspect.getsource(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+    reconcile_at = source.index("_kb.reconcile_restart_state(")
+    dispatch_at = source.index("return _kb.dispatch_once(")
+    assert reconcile_at < dispatch_at

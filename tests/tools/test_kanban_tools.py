@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -1005,6 +1006,151 @@ def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
         child = kb.get_task(conn, d["task_id"])
         assert child.workspace_kind == "dir"
         assert child.workspace_path == proj
+    finally:
+        conn.close()
+
+
+def test_generic_create_cannot_inherit_worker_olympus_authority(monkeypatch, worker_env):
+    """A model-facing tool cannot derive privileged child authority."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time())
+    context = {
+        "schema_version": 2,
+        "goal_id": "g-tool",
+        "program_id": "p-tool",
+        "milestone_id": "ms-tool",
+        "mission_id": "m-tool",
+        "workstream_id": "ws-tool",
+        "authority": {
+            "authority_id": "authority-tool",
+            "status": "ACTIVE",
+            "scope": ["m-tool"],
+            "capabilities": [kb.OLYMPUS_CAPABILITY_CREATE],
+            "revision": 1,
+            "source": "mission-control:test",
+            "expires_at": now + 3600,
+        },
+        "lease": {
+            "lease_id": "lease-tool",
+            "mission_id": "m-tool",
+            "agent_id": "test-worker",
+            "holder": "test-worker",
+            "repository": "chadsm-sys/hermes-agent",
+            "branch": "test/m-tool",
+            "worktree": "/test/m-tool",
+            "revision": 1,
+            "source": "acp:test",
+            "status": "ACTIVE",
+            "expires_at": now + 1800,
+        },
+        "risk": "high",
+        "agent_id": "test-worker",
+        "review_status": "pending",
+        "evidence_refs": [],
+    }
+    def allow(request):
+        issued = time.time()
+        return {
+            "schema_version": kb.AUTHORITY_VERIFICATION_SCHEMA,
+            "verification_id": f"verification:{request['request_id'].split(':', 1)[1]}",
+            "decision": "ALLOW",
+            "current": True,
+            "verified_at": issued - 1,
+            "valid_until": min(
+                issued + 60,
+                request["target"]["authority"]["expires_at"],
+                request["target"]["lease"]["expires_at"],
+            ),
+            "verified_principal": json.loads(json.dumps(request["principal"])),
+            "verified_actor": request["actor"],
+            "request_id": request["request_id"],
+            "request": json.loads(json.dumps(request)),
+            "target_verification": {
+                "authority_current": True,
+                "containment_target": False,
+                "subject": json.loads(json.dumps(request["target"])),
+            },
+            "authorization_root_verification": None,
+        }
+    conn = kb.connect()
+    try:
+        board_id = kb._connection_board_identity(conn)
+        dispatcher = "tool-test"
+        self_tid = kb.create_olympus_task(
+            conn,
+            olympus_context=context,
+            olympus_auth=kb.OlympusMutationAuth(
+                verifier=allow,
+                principal_type="service",
+                principal_id=(
+                    f"kanban-service-dispatcher:{board_id}:{dispatcher}"
+                ),
+                principal_source=(
+                    f"kanban-dispatcher:{board_id}:{dispatcher}"
+                ),
+                actor="test-worker",
+                operation_id="tool-parent",
+            ),
+            title="governed worker",
+            assignee="test-worker",
+            initial_status="blocked",
+        )
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", self_tid)
+
+    created = json.loads(
+        kt._handle_create({"title": "governed child", "assignee": "peer"})
+    )
+    assert "error" in created
+    assert "dedicated canonical-authority route" in created["error"]
+    conn = kb.connect()
+    try:
+        ordinary = kb.create_task(conn, title="ordinary link target", assignee="peer")
+        before = {
+            "task": kb.get_task(conn, self_tid),
+            "events": [tuple(row) for row in conn.execute(
+                "SELECT * FROM task_events WHERE task_id=? ORDER BY id", (self_tid,),
+            )],
+            "comments": [tuple(row) for row in conn.execute(
+                "SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (self_tid,),
+            )],
+            "links": [tuple(row) for row in conn.execute(
+                "SELECT * FROM task_links WHERE parent_id=? OR child_id=?",
+                (self_tid, self_tid),
+            )],
+        }
+        assert all(task.title != "governed child" for task in kb.list_tasks(conn))
+    finally:
+        conn.close()
+
+    denied = (
+        kt._handle_complete({"task_id": self_tid, "summary": "forged complete"}),
+        kt._handle_block({"task_id": self_tid, "reason": "forged block"}),
+        kt._handle_heartbeat({"task_id": self_tid, "note": "forged heartbeat"}),
+        kt._handle_comment({"task_id": self_tid, "body": "forged comment"}),
+        kt._handle_link({"parent_id": self_tid, "child_id": ordinary}),
+    )
+    assert all("error" in json.loads(result) for result in denied)
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    unblock = kt._handle_unblock({"task_id": self_tid})
+    assert "error" in json.loads(unblock)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", self_tid)
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, self_tid) == before["task"]
+        assert [tuple(row) for row in conn.execute(
+            "SELECT * FROM task_events WHERE task_id=? ORDER BY id", (self_tid,),
+        )] == before["events"]
+        assert [tuple(row) for row in conn.execute(
+            "SELECT * FROM task_comments WHERE task_id=? ORDER BY id", (self_tid,),
+        )] == before["comments"]
+        assert [tuple(row) for row in conn.execute(
+            "SELECT * FROM task_links WHERE parent_id=? OR child_id=?",
+            (self_tid, self_tid),
+        )] == before["links"]
     finally:
         conn.close()
 

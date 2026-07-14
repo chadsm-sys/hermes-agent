@@ -2707,7 +2707,8 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     removed_ws = 0
     with kb.connect_closing() as conn:
         rows = conn.execute(
-            "SELECT id, workspace_kind, workspace_path FROM tasks WHERE status = 'archived'"
+            "SELECT id, workspace_kind, workspace_path FROM tasks "
+            "WHERE status = 'archived' AND olympus_context IS NULL"
         ).fetchall()
     for row in rows:
         if row["workspace_kind"] != "scratch":
