@@ -306,7 +306,8 @@ class TestEnsureInstalled:
     @patch("tools.tirith_security._load_security_config")
     def test_not_found_returns_none(self, mock_cfg):
         mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
-                                 "tirith_timeout": 5, "tirith_fail_open": True}
+                                 "tirith_timeout": 5, "tirith_fail_open": True,
+                                 "tirith_auto_install": True}
         _tirith_mod._resolved_path = None
         with patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
@@ -323,7 +324,8 @@ class TestEnsureInstalled:
     @patch("tools.tirith_security._load_security_config")
     def test_startup_prefetch_can_suppress_install_failure_logs(self, mock_cfg):
         mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
-                                 "tirith_timeout": 5, "tirith_fail_open": True}
+                                 "tirith_timeout": 5, "tirith_fail_open": True,
+                                 "tirith_auto_install": True}
         _tirith_mod._resolved_path = None
         with patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
@@ -451,13 +453,13 @@ class TestFailedDownloadCaching:
         _tirith_mod._resolved_path = None
 
         # First call: tries install, fails
-        _resolve_tirith_path("tirith")
+        _resolve_tirith_path("tirith", allow_auto_install=True)
         assert mock_install.call_count == 1
         assert _tirith_mod._resolved_path is _INSTALL_FAILED
         mock_mark.assert_called_once_with("download_failed")  # reason persisted
 
         # Second call: hits the cache, does NOT call _install_tirith again
-        _resolve_tirith_path("tirith")
+        _resolve_tirith_path("tirith", allow_auto_install=True)
         assert mock_install.call_count == 1  # still 1, not 2
 
         _tirith_mod._resolved_path = None
@@ -474,7 +476,8 @@ class TestFailedDownloadCaching:
         """After cached miss, check_command_security hits OSError → fail_open."""
         _tirith_mod._resolved_path = None
         mock_cfg.return_value = {"tirith_enabled": True, "tirith_path": "tirith",
-                                 "tirith_timeout": 5, "tirith_fail_open": True}
+                                 "tirith_timeout": 5, "tirith_fail_open": True,
+                                 "tirith_auto_install": True}
         mock_run.side_effect = FileNotFoundError("No such file: tirith")
         # First command triggers install attempt + cached miss + scan
         result = check_command_security("echo hello")
@@ -527,17 +530,49 @@ class TestExplicitPathNoAutoDownload:
     @patch("tools.tirith_security._is_install_failed_on_disk", return_value=False)
     @patch("tools.tirith_security._install_tirith", return_value=("/auto/tirith", ""))
     @patch("tools.tirith_security.shutil.which", return_value=None)
-    def test_default_path_does_auto_download(self, mock_which, mock_install,
-                                              mock_disk_check, mock_mark):
-        """The default bare 'tirith' SHOULD trigger auto-download."""
+    def test_default_path_does_auto_download_only_when_opted_in(
+        self, mock_which, mock_install, mock_disk_check, mock_mark
+    ):
+        """The default bare path downloads only after explicit opt-in."""
         from tools.tirith_security import _resolve_tirith_path
         _tirith_mod._resolved_path = None
 
-        result = _resolve_tirith_path("tirith")
+        result = _resolve_tirith_path("tirith", allow_auto_install=True)
         mock_install.assert_called_once()
         assert result == "/auto/tirith"
 
         _tirith_mod._resolved_path = None
+
+    @patch("tools.tirith_security._install_tirith")
+    @patch("tools.tirith_security.shutil.which", return_value=None)
+    def test_default_path_does_not_auto_download_by_default(
+        self, mock_which, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _tirith_mod._resolved_path = None
+
+        result = _tirith_mod._resolve_tirith_path("tirith")
+
+        assert result == "tirith"
+        mock_install.assert_not_called()
+        assert _tirith_mod._install_failure_reason == "auto_install_disabled"
+
+    @patch("tools.tirith_security._is_install_failed_on_disk", return_value=False)
+    @patch("tools.tirith_security._install_tirith", return_value=("/auto/tirith", ""))
+    @patch("tools.tirith_security.shutil.which", return_value=None)
+    def test_later_explicit_opt_in_recovers_without_restart(
+        self, mock_which, mock_install, mock_disk_check, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _tirith_mod._resolved_path = None
+        assert _tirith_mod._resolve_tirith_path("tirith") == "tirith"
+
+        result = _tirith_mod._resolve_tirith_path(
+            "tirith", allow_auto_install=True
+        )
+
+        assert result == "/auto/tirith"
+        mock_install.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -815,7 +850,8 @@ class TestBackgroundInstall:
 
         with patch("tools.tirith_security._load_security_config",
                    return_value={"tirith_enabled": True, "tirith_path": "tirith",
-                                 "tirith_timeout": 5, "tirith_fail_open": True}), \
+                                 "tirith_timeout": 5, "tirith_fail_open": True,
+                                 "tirith_auto_install": True}), \
              patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=False), \
@@ -837,7 +873,8 @@ class TestBackgroundInstall:
 
         with patch("tools.tirith_security._load_security_config",
                    return_value={"tirith_enabled": True, "tirith_path": "tirith",
-                                 "tirith_timeout": 5, "tirith_fail_open": True}), \
+                                 "tirith_timeout": 5, "tirith_fail_open": True,
+                                 "tirith_auto_install": True}), \
              patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
              patch("tools.tirith_security._read_failure_reason", return_value="download_failed"), \
@@ -960,7 +997,7 @@ class TestDiskFailureMarker:
         from tools.tirith_security import _resolve_tirith_path
         _tirith_mod._resolved_path = None
 
-        _resolve_tirith_path("tirith")
+        _resolve_tirith_path("tirith", allow_auto_install=True)
         mock_mark.assert_called_once_with("cosign_missing")
 
         _tirith_mod._resolved_path = None
@@ -975,7 +1012,7 @@ class TestDiskFailureMarker:
         from tools.tirith_security import _resolve_tirith_path
         _tirith_mod._resolved_path = None
 
-        result = _resolve_tirith_path("tirith")
+        result = _resolve_tirith_path("tirith", allow_auto_install=True)
         assert result == "/installed/tirith"
         mock_clear.assert_called_once()
 
@@ -991,7 +1028,7 @@ class TestDiskFailureMarker:
              patch("tools.tirith_security._read_failure_reason", return_value="download_failed"), \
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=True), \
              patch("tools.tirith_security._install_tirith") as mock_install:
-            _resolve_tirith_path("tirith")
+            _resolve_tirith_path("tirith", allow_auto_install=True)
             mock_install.assert_not_called()
             assert _tirith_mod._resolved_path is _INSTALL_FAILED
             assert _tirith_mod._install_failure_reason == "download_failed"
@@ -1005,7 +1042,7 @@ class TestDiskFailureMarker:
 
         with patch("tools.tirith_security.shutil.which", return_value="/usr/local/bin/tirith"), \
              patch("tools.tirith_security._clear_install_failed") as mock_clear:
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             assert result == "/usr/local/bin/tirith"
             assert _tirith_mod._resolved_path == "/usr/local/bin/tirith"
             mock_clear.assert_called_once()
@@ -1028,7 +1065,7 @@ class TestDiskFailureMarker:
         with patch("tools.tirith_security.shutil.which", return_value=None), \
              patch("tools.tirith_security._hermes_bin_dir", return_value=tmpdir), \
              patch("tools.tirith_security._clear_install_failed") as mock_clear:
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             assert result == hermes_bin
             assert _tirith_mod._resolved_path == hermes_bin
             mock_clear.assert_called_once()
@@ -1060,7 +1097,7 @@ class TestDiskFailureMarker:
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=False), \
              patch("tools.tirith_security._install_tirith", return_value=("/new/tirith", "")) as mock_install, \
              patch("tools.tirith_security._clear_install_failed"):
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             mock_install.assert_called_once()  # network retry happened
             assert result == "/new/tirith"
 
@@ -1084,7 +1121,7 @@ class TestDiskFailureMarker:
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=False), \
              patch("tools.tirith_security._install_tirith", return_value=("/new/tirith", "")) as mock_install, \
              patch("tools.tirith_security._clear_install_failed"):
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             mock_install.assert_called_once()  # network retry happened
             assert result == "/new/tirith"
 
@@ -1130,7 +1167,7 @@ class TestDiskFailureMarker:
              patch("tools.tirith_security._hermes_bin_dir", return_value="/nonexistent"), \
              patch("tools.tirith_security._read_failure_reason", return_value="cosign_missing"), \
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=True):
-            _resolve_tirith_path("tirith")
+            _resolve_tirith_path("tirith", allow_auto_install=True)
             assert _tirith_mod._resolved_path is _INSTALL_FAILED
             assert _tirith_mod._install_failure_reason == "cosign_missing"
 
@@ -1147,7 +1184,7 @@ class TestDiskFailureMarker:
              patch("tools.tirith_security._is_install_failed_on_disk", return_value=False), \
              patch("tools.tirith_security._install_tirith", return_value=("/new/tirith", "")) as mock_install, \
              patch("tools.tirith_security._clear_install_failed"):
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             mock_install.assert_called_once()
             assert result == "/new/tirith"
 
@@ -1489,6 +1526,6 @@ class TestMkdtempOSErrorNoSpace:
              patch("tools.tirith_security._is_install_failed_on_disk",
                    return_value=False), \
              patch("tools.tirith_security._mark_install_failed") as mock_mark:
-            result = _resolve_tirith_path("tirith")
+            result = _resolve_tirith_path("tirith", allow_auto_install=True)
             assert _tirith_mod._resolved_path is _INSTALL_FAILED
             mock_mark.assert_called_once_with("no_space")

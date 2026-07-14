@@ -120,15 +120,49 @@ jobs:
           # and produced false positives that trained reviewers to ignore the scanner.
           SETUP_HITS=$(git diff --name-only "$BASE"..."$HEAD" | grep -E '^(setup\.py|setup\.cfg|sitecustomize\.py|usercustomize\.py|__init__\.pth)$' || true)
           if [ -n "$SETUP_HITS" ]; then
-            FINDINGS="${FINDINGS}
-          ### 🚨 CRITICAL: Install-hook file added or modified
-          These files can execute code during package installation or interpreter startup.
+            printf '%s\n' "$SETUP_HITS" > /tmp/setup-hits.txt
+            python3 scripts/ci/verify_supply_chain_attestation.py render \
+              --files-file /tmp/setup-hits.txt \
+              --output /tmp/setup-finding.md
+            SETUP_FINDING=$(cat /tmp/setup-finding.md)
 
-          **Files:**
-          \`\`\`
-          ${SETUP_HITS}
-          \`\`\`
+            # Only setup.py can use the exact-digest review path. Every other
+            # install/startup hook, and any multi-file finding, still fails
+            # unconditionally. The attestation is an authenticated PR comment;
+            # a repo file alone cannot assert a maintainer identity.
+            if [ "$SETUP_HITS" = "setup.py" ]; then
+              SETUP_BLOB_SHA=$(git rev-parse "${HEAD}:setup.py")
+              SETUP_CONTENT_SHA256=$(git show "${HEAD}:setup.py" | sha256sum | awk '{print $1}')
+              if gh api --paginate --slurp \
+                "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments?per_page=100" \
+                > /tmp/pr-comments.json \
+                && python3 scripts/ci/verify_supply_chain_attestation.py verify \
+                  --comments-file /tmp/pr-comments.json \
+                  --finding-file /tmp/setup-finding.md \
+                  --repository "${{ github.repository }}" \
+                  --pull-request "${{ github.event.pull_request.number }}" \
+                  --head-sha "$HEAD" \
+                  --path setup.py \
+                  --blob-sha "$SETUP_BLOB_SHA" \
+                  --content-sha256 "$SETUP_CONTENT_SHA256" \
+                  --required-maintainer "${{ github.repository_owner }}" \
+                  2> /tmp/attestation-error.txt; then
+                echo "attested=true" >> "$GITHUB_OUTPUT"
+                echo "Exact setup.py finding has a valid maintainer attestation."
+              else
+                echo "attested=false" >> "$GITHUB_OUTPUT"
+                FINDINGS="${FINDINGS}${SETUP_FINDING}
+
+          **Attestation status:** invalid or absent. The exact finding remains blocking.
           "
+                if [ -s /tmp/attestation-error.txt ]; then
+                  cat /tmp/attestation-error.txt
+                fi
+              fi
+            else
+              echo "attested=false" >> "$GITHUB_OUTPUT"
+              FINDINGS="${FINDINGS}${SETUP_FINDING}"
+            fi
           fi
 
           if [ -n "$FINDINGS" ]; then

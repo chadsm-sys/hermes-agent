@@ -545,7 +545,7 @@ Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level
 - Pipe-to-interpreter patterns (`curl | bash`, `wget | sh`)
 - Terminal injection attacks
 
-Tirith auto-installs from GitHub releases on first use with SHA-256 checksum verification (and cosign provenance verification if cosign is available).
+Hermes uses an existing Tirith binary from `tirith_path` or `PATH`. Network installation from GitHub releases is disabled by default; operators may explicitly enable it with `tirith_auto_install`. Downloads use SHA-256 checksum verification (and cosign provenance verification if cosign is available).
 
 ```yaml
 # In ~/.hermes/config.yaml
@@ -554,6 +554,7 @@ security:
   tirith_path: "tirith"      # Path to tirith binary (default: PATH lookup)
   tirith_timeout: 5          # Subprocess timeout in seconds
   tirith_fail_open: true     # Allow execution when tirith is unavailable (default: true)
+  tirith_auto_install: false # Explicitly allow GitHub release download (default: false)
 ```
 
 When `tirith_fail_open` is `true` (default), commands proceed if tirith is not installed or times out. Set to `false` in high-security environments to block commands when tirith is unavailable.

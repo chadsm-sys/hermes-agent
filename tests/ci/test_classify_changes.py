@@ -83,3 +83,15 @@ CASES = {
 @pytest.mark.parametrize("files,expected", CASES.values(), ids=CASES.keys())
 def test_classify(files, expected):
     assert classify(files) == expected
+
+
+def test_detector_uses_complete_exact_sha_local_diff():
+    root = Path(__file__).resolve().parents[2]
+    action = (root / ".github/actions/detect-changes/action.yml").read_text()
+    workflow = (root / ".github/workflows/ci.yml").read_text()
+
+    assert "gh api" not in action
+    assert 'git diff --name-only --diff-filter=ACDMRT' in action
+    assert 'test "$(git rev-parse HEAD)" = "$HEAD_SHA"' in action
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert "fetch-depth: 0" in workflow

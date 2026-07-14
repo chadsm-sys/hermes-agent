@@ -35,8 +35,6 @@ runs:
       id: classify
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        REPO: ${{ github.repository }}
         EVENT_NAME: ${{ github.event_name }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -47,14 +45,14 @@ runs:
         # dispatch) leave CHANGED empty, so the classifier fails open and every
         # lane runs. Post-merge / on-demand validation is never weakened.
         if [ "$EVENT_NAME" = "pull_request" ]; then
-          # Use the compare endpoint with the pinned base/head SHAs from the
-          # event payload instead of the "current PR files" endpoint. The SHAs
-          # are frozen at trigger time, so the file list is deterministic even
-          # if the PR receives a new push between trigger and detect.
-          CHANGED="$(gh api \
-            --paginate \
-            "repos/${REPO}/compare/${BASE_SHA}...${HEAD_SHA}" \
-            --jq '.files[].filename' || true)"
+          # Derive the complete file set from the exact event SHAs. GitHub's
+          # compare API truncates the files array at 300 entries even when the
+          # response is requested with pagination, which can silently skip a
+          # required CI lane on a large PR.
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          CHANGED="$(git diff --name-only --diff-filter=ACDMRT \
+            "${BASE_SHA}...${HEAD_SHA}")"
         fi
 
         echo "Changed files:"
