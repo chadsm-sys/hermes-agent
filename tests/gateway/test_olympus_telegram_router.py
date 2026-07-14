@@ -2152,3 +2152,47 @@ def test_olympus_command_bypasses_active_session_guard():
     from hermes_cli.commands import should_bypass_active_session
 
     assert should_bypass_active_session("olympus") is True
+
+
+def _install_message_dispatch_stubs(runner):
+    runner._scale_to_zero_note_real_inbound = lambda: None
+    runner._route_olympus_telegram_intake = AsyncMock(return_value=None)
+    runner._check_slash_access = lambda *_args, **_kwargs: None
+    runner.hooks = SimpleNamespace(
+        emit=AsyncMock(),
+        emit_collect=AsyncMock(return_value=[]),
+        loaded_hooks=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cold_runner_dispatches_olympus_command(session_store):
+    runner = _runner(session_store)
+    _install_message_dispatch_stubs(runner)
+    runner._handle_olympus_command = AsyncMock(return_value="olympus:cold")
+    event = _event("/olympus status", 320)
+
+    assert await runner._handle_message(event) == "olympus:cold"
+    runner._handle_olympus_command.assert_awaited_once_with(event)
+
+
+@pytest.mark.asyncio
+async def test_active_runner_dispatches_olympus_command(session_store):
+    runner = _runner(session_store)
+    _install_message_dispatch_stubs(runner)
+    runner._handle_olympus_command = AsyncMock(return_value="olympus:active")
+    event = _event("/olympus status", 321)
+    key = runner._session_key_for_source(event.source)
+    agent = MagicMock()
+    agent.get_activity_summary.return_value = {
+        "seconds_since_activity": 0,
+        "last_activity_desc": "synthetic active command",
+        "api_call_count": 1,
+        "max_iterations": 10,
+    }
+    runner._running_agents[key] = agent
+    runner._running_agents_ts[key] = time.time()
+
+    assert await runner._handle_message(event) == "olympus:active"
+    runner._handle_olympus_command.assert_awaited_once_with(event)
+    agent.interrupt.assert_not_called()
