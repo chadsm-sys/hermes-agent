@@ -1661,6 +1661,43 @@ def test_load_pool_prefers_anthropic_env_token_over_file_backed_oauth(tmp_path, 
     assert entry.access_token == "env-override-token"
 
 
+def test_selected_claude_config_credential_is_never_seeded_into_shared_pool(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "selected-account"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+    monkeypatch.setattr(
+        "hermes_cli.auth.is_provider_explicitly_configured", lambda _pid: True
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_hermes_oauth_credentials", lambda: None
+    )
+    selected_reader_calls = []
+
+    def _selected_reader():
+        selected_reader_calls.append(True)
+        return {
+            "accessToken": "synthetic-selected-token",
+            "refreshToken": "synthetic-selected-refresh",
+            "expiresAt": int(time.time() * 1000) + 3_600_000,
+        }
+
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_claude_code_credentials", _selected_reader
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("anthropic")
+
+    assert selected_reader_calls == []
+    assert pool.entries() == []
+
+
 def test_load_pool_api_key_path_skips_oauth_autodiscovery(tmp_path, monkeypatch):
     """API-key auth path: autodiscovered OAuth creds must NOT be seeded.
 

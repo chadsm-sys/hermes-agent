@@ -1837,10 +1837,19 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tup
 
         from agent.anthropic_adapter import read_claude_code_credentials, read_hermes_oauth_credentials
 
-        for source_name, creds in (
+        singleton_credentials = [
             ("hermes_pkce", read_hermes_oauth_credentials()),
-            ("claude_code", read_claude_code_credentials()),
-        ):
+        ]
+        # CLAUDE_CONFIG_DIR is an explicit account-selection boundary. The
+        # selected credential may be used directly by the Anthropic adapter,
+        # but must never be copied into the shared rotation pool where another
+        # session/account could select it later.
+        if not (_get_secret("CLAUDE_CONFIG_DIR", "") or "").strip():
+            singleton_credentials.append(
+                ("claude_code", read_claude_code_credentials())
+            )
+
+        for source_name, creds in singleton_credentials:
             if creds and creds.get("accessToken"):
                 if _is_suppressed(provider, source_name):
                     continue

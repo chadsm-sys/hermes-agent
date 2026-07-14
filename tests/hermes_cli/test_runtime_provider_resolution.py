@@ -45,6 +45,39 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["source"] == "manual"
 
 
+@pytest.mark.parametrize("selected_dir", ["/synthetic/claude-account", "relative/account"])
+def test_anthropic_selected_config_dir_skips_pool_before_strict_resolution(
+    selected_dir, monkeypatch
+):
+    """A selected account cannot be shadowed by an unrelated pool entry."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", selected_dir)
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {"provider": "anthropic", "base_url": "https://api.anthropic.com"},
+    )
+
+    def _pool_must_not_load(_provider):
+        raise AssertionError("selected Claude account must bypass credential pool")
+
+    monkeypatch.setattr(rp, "load_pool", _pool_must_not_load)
+    if selected_dir.startswith("/"):
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.resolve_anthropic_token",
+            lambda: "synthetic-selected-token",
+        )
+        resolved = rp.resolve_runtime_provider(requested="anthropic")
+        assert resolved["api_key"] == "synthetic-selected-token"
+    else:
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.resolve_anthropic_token",
+            lambda: None,
+        )
+        with pytest.raises(rp.AuthError, match="No Anthropic credentials found"):
+            rp.resolve_runtime_provider(requested="anthropic")
+
+
 def test_resolve_runtime_provider_nous_pool_uses_env_base_url_override(monkeypatch):
     entry = SimpleNamespace(
         provider="nous",
