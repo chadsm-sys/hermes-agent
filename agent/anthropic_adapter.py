@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.secret_scope import get_secret as _get_secret
 from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, normalize_proxy_env_vars
@@ -902,6 +903,9 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
         logger.debug("Keychain: no entry found for 'Claude Code-credentials'")
         return None
 
+    if not isinstance(result.stdout, str):
+        logger.debug("Keychain: credentials payload is not text")
+        return None
     raw = result.stdout.strip()
     if not raw:
         return None
@@ -926,18 +930,64 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     return None
 
 
-def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
-    """Read Claude Code OAuth credentials from ~/.claude/.credentials.json.
+class _ClaudeConfigDirError(ValueError):
+    """Raised when an explicit Claude account directory is not deterministic."""
+
+
+def _explicit_claude_config_dir() -> Optional[Path]:
+    """Return the canonical CLAUDE_CONFIG_DIR for a pinned Claude account.
+
+    Claude Code supports account isolation through CLAUDE_CONFIG_DIR.  Hermes
+    should honor the same convention so multi-account Claude wrappers can route
+    Anthropic OAuth requests to a specific account instead of the default
+    ~/.claude account or the global macOS Keychain entry.
+
+    A configured path is an authority boundary: it must be absolute after
+    ``~`` expansion, resolve to an existing directory, and have no broken
+    symlink component. Invalid configured paths raise rather than degrading to
+    the default account.
+    """
+    raw = (_get_secret("CLAUDE_CONFIG_DIR", "") or "").strip()
+    if not raw:
+        return None
+    selected = Path(raw).expanduser()
+    if not selected.is_absolute():
+        raise _ClaudeConfigDirError(
+            "CLAUDE_CONFIG_DIR must be absolute after user expansion"
+        )
+    try:
+        canonical = selected.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _ClaudeConfigDirError(
+            "CLAUDE_CONFIG_DIR does not resolve to an existing directory"
+        ) from exc
+    if not canonical.is_dir():
+        raise _ClaudeConfigDirError(
+            "CLAUDE_CONFIG_DIR canonical target is not a directory"
+        )
+    return canonical
+
+
+def _read_claude_code_credentials_from_file(
+    config_dir: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Read Claude Code OAuth credentials from the selected config directory.
+
+    If CLAUDE_CONFIG_DIR is set, read only that account's .credentials.json.
+    Otherwise fall back to ~/.claude/.credentials.json.
 
     Returns dict with {accessToken, refreshToken?, expiresAt?, source} or None.
     """
-    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if config_dir is None:
+        config_dir = _explicit_claude_config_dir()
+    cred_path = (config_dir if config_dir else Path.home() / ".claude") / ".credentials.json"
     if not cred_path.exists():
+        logger.debug("Claude Code credentials file does not exist: %s", cred_path)
         return None
     try:
         data = json.loads(cred_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, IOError) as e:
-        logger.debug("Failed to read ~/.claude/.credentials.json: %s", e)
+        logger.debug("Failed to read Claude Code credentials file %s: %s", cred_path, e)
         return None
 
     oauth_data = data.get("claudeAiOauth")
@@ -950,18 +1000,20 @@ def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
         "accessToken": access_token,
         "refreshToken": oauth_data.get("refreshToken", ""),
         "expiresAt": oauth_data.get("expiresAt", 0),
-        "source": "claude_code_credentials_file",
+        "source": "claude_config_dir_credentials_file" if config_dir else "claude_code_credentials_file",
     }
 
 
 def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
     """Read refreshable Claude Code OAuth credentials.
 
-    Reads from two possible sources and reconciles them:
-      1. macOS Keychain (Darwin only) — "Claude Code-credentials" entry
-      2. ~/.claude/.credentials.json file
+    Reads from these sources and reconciles them:
+      1. CLAUDE_CONFIG_DIR/.credentials.json when CLAUDE_CONFIG_DIR is set
+         (strict account pinning; skip global Keychain/default account)
+      2. macOS Keychain (Darwin only) — "Claude Code-credentials" entry
+      3. ~/.claude/.credentials.json file
 
-    Selection rules when both are present:
+    Selection rules when the default Keychain/file sources are both present:
       - If exactly one is non-expired, prefer that one. (Handles the case
         where Claude Code refreshes one source but not the other — observed
         in the wild on Claude Code 2.1.x.)
@@ -970,11 +1022,19 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
 
     This intentionally excludes ~/.claude.json primaryApiKey. Opencode's
     subscription flow is OAuth/setup-token based with refreshable credentials,
-    and native direct Anthropic provider usage should follow that path rather
-    than auto-detecting Claude's first-party managed key.
+    and native direct Anthropic provider usage should follow that path
+    rather than auto-detecting Claude's first-party managed key.
 
     Returns dict with {accessToken, refreshToken?, expiresAt?, source} or None.
     """
+    try:
+        config_dir = _explicit_claude_config_dir()
+    except _ClaudeConfigDirError as exc:
+        logger.warning("Invalid CLAUDE_CONFIG_DIR; refusing credential fallback: %s", exc)
+        return None
+    if config_dir:
+        return _read_claude_code_credentials_from_file(config_dir)
+
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
 
@@ -1133,14 +1193,19 @@ def _write_claude_code_credentials(
     *,
     scopes: Optional[list] = None,
 ) -> None:
-    """Write refreshed credentials back to ~/.claude/.credentials.json.
+    """Write refreshed credentials to the selected or default Claude account.
 
     The optional *scopes* list (e.g. ``["user:inference", "user:profile", ...]``)
     is persisted so that Claude Code's own auth check recognises the credential
     as valid.  Claude Code >=2.1.81 gates on the presence of ``"user:inference"``
     in the stored scopes before it will use the token.
     """
-    cred_path = Path.home() / ".claude" / ".credentials.json"
+    try:
+        config_dir = _explicit_claude_config_dir()
+    except _ClaudeConfigDirError as exc:
+        logger.warning("Invalid CLAUDE_CONFIG_DIR; refusing credential write: %s", exc)
+        return
+    cred_path = (config_dir if config_dir else Path.home() / ".claude") / ".credentials.json"
     try:
         # Read existing file to preserve other fields
         existing = {}
@@ -1277,35 +1342,74 @@ def resolve_anthropic_token() -> Optional[str]:
     Priority:
       1. ANTHROPIC_TOKEN env var (OAuth/setup token saved by Hermes)
       2. CLAUDE_CODE_OAUTH_TOKEN env var
-      3. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
-         — with automatic refresh if expired and a refresh token is available
+      3. Claude Code credentials (CLAUDE_CONFIG_DIR when set, otherwise
+         ~/.claude.json or ~/.claude/.credentials.json) — with automatic
+         refresh if expired and a refresh token is available
       4. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
       5. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
 
+    When CLAUDE_CONFIG_DIR is set, the selected Claude account is strict:
+    Hermes will not silently fall back to the default account, credential_pool,
+    or ANTHROPIC_API_KEY if that account's OAuth credentials are unusable.
+
     Returns the token string or None.
     """
-    creds = read_claude_code_credentials()
+    token = (_get_secret("ANTHROPIC_TOKEN", "") or "").strip()
+    cc_token = (_get_secret("CLAUDE_CODE_OAUTH_TOKEN", "") or "").strip()
+
+    try:
+        explicit_config_dir = _explicit_claude_config_dir()
+    except _ClaudeConfigDirError as exc:
+        # Explicit token sources remain higher priority than the selected
+        # directory. Without either token, an invalid selection is a strict
+        # failure and must not reach any default/keychain/pool/API-key source.
+        if token:
+            return token
+        if cc_token:
+            return cc_token
+        logger.warning("Invalid CLAUDE_CONFIG_DIR; refusing credential fallback: %s", exc)
+        return None
+
+    creds = (
+        _read_claude_code_credentials_from_file(explicit_config_dir)
+        if explicit_config_dir and not (token or cc_token)
+        else None
+    )
 
     # 1. Hermes-managed OAuth/setup token env var
-    token = os.getenv("ANTHROPIC_TOKEN", "").strip()
     if token:
-        preferred = _prefer_refreshable_claude_code_token(token, creds)
-        if preferred:
-            return preferred
+        # Preserve the legacy refreshable-file preference only for the
+        # unpinned default account. An explicitly selected account is source
+        # #3 and cannot override source #1.
+        if explicit_config_dir is None:
+            creds = read_claude_code_credentials()
+            preferred = _prefer_refreshable_claude_code_token(token, creds)
+            if preferred:
+                return preferred
         return token
 
     # 2. CLAUDE_CODE_OAUTH_TOKEN (used by Claude Code for setup-tokens)
-    cc_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     if cc_token:
-        preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
-        if preferred:
-            return preferred
+        if explicit_config_dir is None:
+            creds = read_claude_code_credentials()
+            preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
+            if preferred:
+                return preferred
         return cc_token
 
     # 3. Claude Code credential file
+    if explicit_config_dir is None:
+        creds = read_claude_code_credentials()
     resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
     if resolved_claude_token:
         return resolved_claude_token
+
+    if explicit_config_dir:
+        logger.warning(
+            "CLAUDE_CONFIG_DIR is set to %s but no usable Claude Code OAuth token was resolved; refusing API-key fallback",
+            explicit_config_dir,
+        )
+        return None
 
     # 4. Hermes credential_pool OAuth entry.
     resolved_pool_token = _resolve_anthropic_pool_token()
@@ -1314,7 +1418,7 @@ def resolve_anthropic_token() -> Optional[str]:
 
     # 5. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Hermes configs.
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = (_get_secret("ANTHROPIC_API_KEY", "") or "").strip()
     if api_key:
         return api_key
 
@@ -1357,7 +1461,7 @@ def run_oauth_setup_token() -> Optional[str]:
 
     # Check env vars that may have been set
     for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_TOKEN"):
-        val = os.getenv(env_var, "").strip()
+        val = (_get_secret(env_var, "") or "").strip()
         if val:
             return val
 

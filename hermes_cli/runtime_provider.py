@@ -1666,6 +1666,12 @@ def resolve_runtime_provider(
         return explicit_runtime
 
     should_use_pool = provider != "openrouter"
+    if provider == "anthropic" and _getenv("CLAUDE_CONFIG_DIR", "").strip():
+        # A selected Claude config directory is an exclusive account boundary.
+        # Pool selection happens before resolve_anthropic_token(), so allowing
+        # the pool here could silently choose another account or bypass a
+        # malformed selected path instead of failing closed.
+        should_use_pool = False
     if provider == "openrouter":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
