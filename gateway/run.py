@@ -9120,6 +9120,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "background":
                 return await self._handle_background_command(event)
 
+            # Olympus is a Telegram control-plane command. Dispatch it while a
+            # conversational agent is active rather than returning the generic
+            # busy response; its own handler enforces platform, authority, and
+            # durable idempotency boundaries.
+            if _cmd_def_inner and _cmd_def_inner.name == "olympus":
+                return await self._handle_olympus_command(event)
+
             # /kanban must bypass the guard. It writes to a profile-agnostic
             # DB (kanban.db), not to the running agent's state. In fact
             # /kanban unblock is often the only way to free a worker that
@@ -9521,6 +9528,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
+
+        if canonical == "olympus":
+            return await self._handle_olympus_command(event)
 
         if canonical == "suggestions":
             return await self._handle_suggestions_command(event)

@@ -201,6 +201,18 @@ class TestCommandBypassActiveSession:
         )
 
     @pytest.mark.asyncio
+    async def test_olympus_bypasses_guard(self):
+        """/olympus must reach the runner instead of entering the chat queue."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event("/olympus status"))
+
+        assert sk not in adapter._pending_messages
+        assert any("handled:olympus" in r for r in adapter.sent_responses)
+
+    @pytest.mark.asyncio
     async def test_steer_bypasses_guard(self):
         """/steer must bypass the Level-1 active-session guard so it reaches
         the gateway runner's /steer handler and injects into the running

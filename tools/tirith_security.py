@@ -10,8 +10,9 @@ JSON stdout enriches findings/summary but never overrides the verdict.
 Operational failures (spawn error, timeout, unknown exit code) respect
 the fail_open config setting. Programming errors propagate.
 
-Auto-install: if tirith is not found on PATH or at the configured path,
-it is automatically downloaded from GitHub releases to $HERMES_HOME/bin/tirith.
+Optional auto-install: if explicitly enabled and tirith is not found on PATH or
+at the configured path, it is downloaded from GitHub releases to
+$HERMES_HOME/bin/tirith. Automatic network installation is disabled by default.
 The download always verifies SHA-256 checksums.  When cosign is available on
 PATH, provenance verification (GitHub Actions workflow signature) is also
 performed.  If cosign is not installed, the download proceeds with SHA-256
@@ -72,6 +73,7 @@ def _load_security_config() -> dict:
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
+        "tirith_auto_install": False,
     }
     try:
         from hermes_cli.config import load_config
@@ -84,6 +86,9 @@ def _load_security_config() -> dict:
         "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", defaults["tirith_path"])),
         "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", defaults["tirith_timeout"])),
         "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", defaults["tirith_fail_open"])),
+        # Network installation is a non-secret operator policy, so it is
+        # configuration-only rather than environment-controlled.
+        "tirith_auto_install": bool(cfg.get("tirith_auto_install", defaults["tirith_auto_install"])),
     }
 
 
@@ -489,7 +494,11 @@ def _is_explicit_path(configured_path: str) -> bool:
     return configured_path != "tirith"
 
 
-def _resolve_tirith_path(configured_path: str) -> str:
+def _resolve_tirith_path(
+    configured_path: str,
+    *,
+    allow_auto_install: bool = False,
+) -> str:
     """Resolve the tirith binary path, auto-installing if necessary.
 
     If the user explicitly set a path (anything other than the bare "tirith"
@@ -499,7 +508,8 @@ def _resolve_tirith_path(configured_path: str) -> str:
     For the default "tirith":
     1. PATH lookup via shutil.which
     2. $HERMES_HOME/bin/tirith (previously auto-installed)
-    3. Auto-install from GitHub releases → $HERMES_HOME/bin/tirith
+    3. If explicitly allowed, auto-install from GitHub releases
+       → $HERMES_HOME/bin/tirith
 
     Failed installs are cached for the process lifetime (and persisted to
     disk for 24h) to avoid repeated network attempts.
@@ -555,11 +565,23 @@ def _resolve_tirith_path(configured_path: str) -> str:
         _clear_install_failed()
         return hermes_bin
 
+    if not allow_auto_install:
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "auto_install_disabled"
+        return expanded
+
     # Local checks failed.  If a previous install attempt already failed,
     # skip the network retry — UNLESS the failure was "cosign_missing" and
     # cosign is now available (retryable cause resolved in-process).
     if install_failed:
-        if _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
+        if _install_failure_reason == "auto_install_disabled":
+            # The operator may have enabled auto-install after the first local
+            # lookup. Honor that explicit transition without requiring a
+            # process restart.
+            _resolved_path = None
+            _install_failure_reason = ""
+            install_failed = False
+        elif _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
             # Retryable cause resolved — clear sentinel and fall through to retry
             _resolved_path = None
             _install_failure_reason = ""
@@ -689,9 +711,19 @@ def ensure_installed(*, log_failures: bool = True):
         _clear_install_failed()
         return hermes_bin
 
+    # Never initiate a network download unless the operator explicitly opted
+    # in. Existing PATH/configured binaries continue to work unchanged.
+    if not cfg.get("tirith_auto_install", False):
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "auto_install_disabled"
+        return None
+
     # If previously failed in-memory, check if the cause is now resolved
     if _resolved_path is _INSTALL_FAILED:
-        if _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
+        if _install_failure_reason == "auto_install_disabled":
+            _resolved_path = None
+            _install_failure_reason = ""
+        elif _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
             _resolved_path = None
             _install_failure_reason = ""
             _clear_install_failed()
@@ -758,7 +790,10 @@ def check_command_security(command: str) -> dict:
     if not is_platform_supported():
         return {"action": "allow", "findings": [], "summary": ""}
 
-    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
+    tirith_path = _resolve_tirith_path(
+        cfg["tirith_path"],
+        allow_auto_install=cfg.get("tirith_auto_install", False),
+    )
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
 
