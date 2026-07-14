@@ -1,12 +1,12 @@
 ---
 sidebar_position: 4
 title: "Memory Providers"
-description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, RetainDB, ByteRover, Supermemory"
+description: "External memory provider plugins — Honcho, OpenViking, Mem0, Hindsight, Holographic, Memory Graph, RetainDB, ByteRover, Supermemory"
 ---
 
 # Memory Providers
 
-Hermes Agent ships with 8 external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
+Hermes Agent ships with external memory provider plugins that give the agent persistent, cross-session knowledge beyond the built-in MEMORY.md and USER.md. Only **one** external provider can be active at a time — the built-in memory is always active alongside it.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Or set manually in `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
-  provider: openviking   # or honcho, mem0, hindsight, holographic, retaindb, byterover, supermemory
+  provider: openviking   # or honcho, mem0, hindsight, holographic, memorygraph, retaindb, byterover, supermemory
 ```
 
 ## How It Works
@@ -452,6 +452,45 @@ hermes config set memory.provider holographic
 
 ---
 
+### Memory Graph (memorygraph)
+
+Governed knowledge graph: typed entities (people, projects, goals, skills, businesses, ...), time-aware relationships, and evidence-linked claims with confidence tracking, contradiction/duplicate detection, knowledge aging, and candidate → established → core promotion.
+
+| | |
+|---|---|
+| **Best for** | Structured, auditable knowledge with provenance and lifecycle governance, fully local |
+| **Requires** | Nothing (stdlib SQLite only) |
+| **Data storage** | Local SQLite (`$HERMES_HOME/memory_graph.db`) |
+| **Cost** | Free |
+
+**Tools:** `graph_memory` (13 actions: remember, link, unlink, about, query, timeline, contradictions, resolve, duplicates, feedback, forget, sweep, stats)
+
+**Setup:**
+```bash
+hermes memory setup    # select "memorygraph"
+# Or manually:
+hermes config set memory.provider memorygraph
+```
+
+**Config:** `$HERMES_HOME/memorygraph.json` (optional)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `db_path` | `$HERMES_HOME/memory_graph.db` | SQLite database path |
+| `half_life_days` | `90` | Knowledge aging half-life (confidence decay) |
+| `duplicate_similarity` | `0.88` | Near-duplicate detection threshold (0–1) |
+| `prefetch_enabled` | `true` | Inject graph recall before each turn |
+| `sweep_on_session_end` | `true` | Run aging + promotion at session end |
+
+**Unique capabilities:**
+- Time-aware knowledge — claims and relationships carry validity windows; superseded values stay queryable via `timeline`
+- Write-time governance — duplicates reinforce instead of duplicating; conflicting exclusive values are superseded or flagged as contradictions for review
+- Promotion tiers — knowledge graduates candidate → established → core based on confidence, evidence links, reinforcement, and age
+- Evidence links + append-only governance audit log
+- Mirrors built-in MEMORY.md/USER.md writes into the graph automatically
+
+---
+
 ### RetainDB
 
 Cloud memory API with hybrid search (Vector + BM25 + Reranking), 7 memory types, and delta compression.
@@ -598,6 +637,7 @@ hermes memory setup
 | **Mem0** | Cloud/Self-hosted | Free/Paid | 5 | `mem0ai` | Server-side LLM extraction + OSS mode |
 | **Hindsight** | Cloud/Local | Free/Paid | 3 | `hindsight-client` | Knowledge graph + reflect synthesis |
 | **Holographic** | Local | Free | 2 | None | HRR algebra + trust scoring |
+| **Memory Graph** | Local | Free | 1 | None | Governed knowledge graph: evidence, contradiction detection, aging, promotion |
 | **RetainDB** | Cloud | $20/mo | 5 | `requests` | Delta compression |
 | **ByteRover** | Local/Cloud | Free/Paid | 3 | `brv` CLI | Pre-compression extraction |
 | **Supermemory** | Cloud | Paid | 4 | `supermemory` | Context fencing + session graph ingest + multi-container |
@@ -607,7 +647,7 @@ hermes memory setup
 
 Each provider's data is isolated per [profile](/user-guide/profiles):
 
-- **Local storage providers** (Holographic, ByteRover) use `$HERMES_HOME/` paths which differ per profile
+- **Local storage providers** (Holographic, Memory Graph, ByteRover) use `$HERMES_HOME/` paths which differ per profile
 - **Config file providers** (Honcho, Mem0, Hindsight, Supermemory) store config in `$HERMES_HOME/` so each profile has its own credentials
 - **Cloud providers** (RetainDB) auto-derive profile-scoped project names
 - **Env var providers** (OpenViking) are configured via each profile's `.env` file
