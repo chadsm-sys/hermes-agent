@@ -584,12 +584,22 @@ NOTIFIER_MUTATION_WRITE_SCHEMA = "kanban-notifier-mutation-write/1"
 WORKER_REGISTRATION_WRITE_SCHEMA = "kanban-worker-registration-write/1"
 CREATE_RECEIPT_WRITE_SCHEMA = "kanban-create-receipt-write/1"
 RELEASE_RECEIPT_WRITE_SCHEMA = "kanban-release-receipt-write/1"
+RELEASE_RECEIPT_ATTESTATION_SCHEMA = (
+    "olympus-task-release-receipt-attestation/1"
+)
 _OLYMPUS_RELEASE_RECEIPT_KEYS = frozenset({
     "schema_version", "operation_id", "task_id", "previous_status", "status",
     "previous_revision", "record_revision", "verification_id", "request_id",
     "actor", "principal", "authority_id", "authority_revision",
     "authority_source", "lease_id", "lease_revision", "lease_source",
     "created_at",
+})
+_OLYMPUS_RELEASE_ATTESTATION_KEYS = frozenset({
+    "schema_version", "operation_id", "task_id", "subject_revision",
+    "receipt_sha256", "receipt",
+})
+_OLYMPUS_RELEASE_ATTESTABLE_STATUSES = frozenset({
+    "ready", "running", "review", "done", "archived",
 })
 _NOTIFICATION_EFFECT_RESERVATION_KEYS = frozenset({
     "schema_version", "action", "task_id", "task_record_revision",
@@ -8125,6 +8135,237 @@ def get_olympus_release_receipt(
             "release operation identity was reused for another task or revision",
         )
     return _decode_olympus_release_receipt(row)
+
+
+def attest_olympus_release_receipt(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    subject_revision: int,
+    operation_id: str,
+    olympus_auth: OlympusMutationAuth,
+) -> dict[str, Any]:
+    """Return deterministic, freshly verified evidence for one release.
+
+    The stored v1 receipt remains the immutable historical fact.  Attestation
+    re-reads and checksum-verifies that exact row, proves its canonical
+    service-dispatcher and governance identities, binds it to the durable
+    ``unblocked`` event, and performs a fresh read-only authority inspection.
+    Later legal task progress therefore does not erase release evidence, while
+    a rolled-back, foreign, stale, or ambiguously replayed aggregate fails
+    closed.  No process-local mutation permit is installed by this function.
+    """
+    if (
+        not isinstance(task_id, str)
+        or not task_id.strip()
+        or isinstance(subject_revision, bool)
+        or not isinstance(subject_revision, int)
+        or subject_revision < 1
+        or not isinstance(operation_id, str)
+        or not operation_id.strip()
+    ):
+        raise OlympusContextError(
+            "olympus_release_identity_invalid",
+            "release attestation requires task, revision, and operation identity",
+        )
+    task_id = task_id.strip()
+    operation_id = operation_id.strip()
+    row = conn.execute(
+        "SELECT * FROM kanban_olympus_release_receipts "
+        "WHERE operation_id = ? OR (task_id = ? AND subject_revision = ?)",
+        (operation_id, task_id, subject_revision),
+    ).fetchone()
+    if row is None:
+        raise OlympusContextError(
+            "olympus_release_receipt_missing",
+            "release attestation requires an immutable receipt",
+        )
+    if (
+        row["operation_id"] != operation_id
+        or row["task_id"] != task_id
+        or int(row["subject_revision"]) != subject_revision
+    ):
+        raise OlympusContextError(
+            "olympus_release_receipt_conflict",
+            "release operation identity was reused for another task or revision",
+        )
+    receipt = _decode_olympus_release_receipt(row)
+    receipt_sha256 = str(row["receipt_sha256"])
+
+    current_row = conn.execute(
+        "SELECT id, assignee, status, record_revision, olympus_context "
+        "FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if current_row is None or current_row["olympus_context"] is None:
+        raise OlympusContextError(
+            "olympus_release_replay_orphaned",
+            "release receipt no longer has a live governed task",
+        )
+    receipt_record_revision = receipt.get("record_revision")
+    if (
+        isinstance(receipt_record_revision, bool)
+        or not isinstance(receipt_record_revision, int)
+    ):
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            "release receipt record revision is not an integer",
+        )
+    current_revision = int(current_row["record_revision"])
+    current_status = str(current_row["status"])
+    if (
+        current_revision < receipt_record_revision
+        or current_status not in _OLYMPUS_RELEASE_ATTESTABLE_STATUSES
+        or (
+            current_revision == receipt_record_revision
+            and current_status != "ready"
+        )
+    ):
+        raise OlympusContextError(
+            "olympus_release_attestation_state_rollback",
+            "live task is not a monotonic post-release aggregate",
+        )
+
+    raw_context: Any = current_row["olympus_context"]
+    if isinstance(raw_context, str):
+        try:
+            raw_context = json.loads(raw_context)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OlympusContextError(
+                "olympus_context_invalid",
+                "stored Olympus context is not valid JSON",
+            ) from exc
+    context = _require_current_olympus_context(
+        raw_context, assignee=str(current_row["assignee"] or "")
+    )
+    assert context is not None
+    board_id = _connection_board_identity(conn)
+    expected_suffix = (
+        f":release_blocked_task:{task_id}:r{subject_revision}:"
+        f"target:{task_id}:r{subject_revision}"
+    )
+    try:
+        canonical_principal = _normalize_kanban_principal(
+            receipt.get("principal"),
+            action="release_blocked_task",
+            target=_olympus_subject(
+                context,
+                subject_id=task_id,
+                subject_revision=subject_revision,
+                subject_status="blocked",
+                assignee=str(current_row["assignee"] or ""),
+            ),
+            now=time.time(),
+        )
+    except (AuthorityContractError, TypeError, ValueError) as exc:
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            f"release receipt principal is not canonical: {exc}",
+        ) from exc
+    authority = context["authority"]
+    lease = context["lease"]
+    exact_receipt = (
+        receipt.get("operation_id") == operation_id
+        and operation_id.endswith(expected_suffix)
+        and len(operation_id) > len(expected_suffix)
+        and receipt.get("task_id") == task_id
+        and receipt.get("previous_status") == "blocked"
+        and receipt.get("status") == "ready"
+        and receipt.get("previous_revision") == subject_revision
+        and not isinstance(receipt.get("previous_revision"), bool)
+        and receipt.get("record_revision") == subject_revision + 1
+        and not isinstance(receipt.get("record_revision"), bool)
+        and isinstance(receipt.get("verification_id"), str)
+        and bool(receipt["verification_id"].strip())
+        and isinstance(receipt.get("request_id"), str)
+        and bool(receipt["request_id"].strip())
+        and isinstance(receipt.get("actor"), str)
+        and receipt["actor"] == lease["holder"]
+        and canonical_principal == receipt.get("principal")
+        and canonical_principal["kind"] == "kanban_service_dispatcher"
+        and canonical_principal["board_id"] == board_id
+        and receipt.get("authority_id") == authority["authority_id"]
+        and receipt.get("authority_revision") == authority["revision"]
+        and not isinstance(receipt.get("authority_revision"), bool)
+        and receipt.get("authority_source") == authority["source"]
+        and receipt.get("lease_id") == lease["lease_id"]
+        and receipt.get("lease_revision") == lease["revision"]
+        and not isinstance(receipt.get("lease_revision"), bool)
+        and receipt.get("lease_source") == lease["source"]
+        and isinstance(receipt.get("created_at"), int)
+        and not isinstance(receipt.get("created_at"), bool)
+        and receipt["created_at"] >= 0
+    )
+    if not exact_receipt:
+        raise OlympusContextError(
+            "olympus_release_receipt_invalid",
+            "release receipt is not the exact canonical task, authority, and lease evidence",
+        )
+
+    matching_events = []
+    for event_row in conn.execute(
+        "SELECT run_id, payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'unblocked' ORDER BY id",
+        (task_id,),
+    ).fetchall():
+        try:
+            payload = json.loads(event_row["payload"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            event_row["run_id"] is None
+            and isinstance(payload, dict)
+            and set(payload) == {
+                "governed_release", "from_revision", "operation_id", "request_id",
+            }
+            and payload["governed_release"] is True
+            and payload["from_revision"] == subject_revision
+            and not isinstance(payload["from_revision"], bool)
+            and payload["operation_id"] == operation_id
+            and payload["request_id"] == receipt["request_id"]
+        ):
+            matching_events.append(payload)
+    if len(matching_events) != 1:
+        raise OlympusContextError(
+            "olympus_release_event_invalid",
+            "release receipt lacks one exact durable unblocked event",
+        )
+
+    actor = str(olympus_auth.actor or current_row["assignee"] or "")
+    authorization = require_olympus_authority_verification(
+        context,
+        subject_id=task_id,
+        subject_revision=current_revision,
+        assignee=str(current_row["assignee"] or ""),
+        action="inspect_governed_status",
+        capability=OLYMPUS_CAPABILITY_INSPECT,
+        actor=actor,
+        operation_id=(
+            f"{operation_id}:attest_release_receipt:r{current_revision}"
+        ),
+        principal=olympus_auth,
+        expected_status=current_status,
+        board_id=board_id,
+    )
+    if (
+        authorization["request"]["principal"] != receipt["principal"]
+        or authorization["request"]["actor"] != receipt["actor"]
+    ):
+        raise OlympusContextError(
+            "olympus_release_replay_principal_conflict",
+            "fresh attestation principal does not match the durable release identity",
+        )
+
+    attestation = {
+        "schema_version": RELEASE_RECEIPT_ATTESTATION_SCHEMA,
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "subject_revision": subject_revision,
+        "receipt_sha256": receipt_sha256,
+        "receipt": receipt,
+    }
+    assert set(attestation) == _OLYMPUS_RELEASE_ATTESTATION_KEYS
+    return attestation
 
 
 def _verify_olympus_release_replay(

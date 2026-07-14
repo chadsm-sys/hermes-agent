@@ -2053,6 +2053,300 @@ def test_release_receipt_archived_deleted_and_corrupt_recovery_paths(conn):
     assert caught.value.reason == "olympus_release_receipt_invalid"
 
 
+def test_release_receipt_attestation_is_stable_after_progress_and_restart(conn):
+    context = _context()
+    task_id = _create(
+        conn,
+        context,
+        initial_status="blocked",
+        operation_id="attest:create",
+    )
+    revision = kb.get_task(conn, task_id).record_revision
+    receipt = kb.release_olympus_task(
+        conn,
+        task_id,
+        subject_revision=revision,
+        olympus_auth=_auth(conn, context, operation_id="attest:release"),
+    )
+    operation_id = kb.olympus_release_operation_id(
+        task_id, revision, "attest:release"
+    )
+    permits_before = copy.deepcopy(
+        getattr(conn, "_olympus_permit_registry", {})
+    )
+    attestation = kb.attest_olympus_release_receipt(
+        conn,
+        task_id=task_id,
+        subject_revision=revision,
+        operation_id=operation_id,
+        olympus_auth=_auth(conn, context, operation_id="ignored:attestation"),
+    )
+    assert set(attestation) == {
+        "schema_version", "operation_id", "task_id", "subject_revision",
+        "receipt_sha256", "receipt",
+    }
+    assert attestation == {
+        "schema_version": kb.RELEASE_RECEIPT_ATTESTATION_SCHEMA,
+        "operation_id": operation_id,
+        "task_id": task_id,
+        "subject_revision": revision,
+        "receipt_sha256": hashlib.sha256(
+            json.dumps(
+                receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest(),
+        "receipt": receipt,
+    }
+    assert getattr(conn, "_olympus_permit_registry", {}) == permits_before
+    assert kb.attest_olympus_release_receipt(
+        conn,
+        task_id=task_id,
+        subject_revision=revision,
+        operation_id=operation_id,
+        olympus_auth=_auth(conn, context, operation_id="ignored:retry"),
+    ) == attestation
+
+    claimed = kb.claim_task(
+        conn,
+        task_id,
+        claimer="dispatcher:attestation",
+        olympus_auth=_auth(conn, context, operation_id="attest:claim"),
+    )
+    assert claimed is not None and claimed.status == "running"
+    assert kb.set_task_status(
+        conn,
+        task_id,
+        "done",
+        olympus_auth=_auth(conn, context, operation_id="attest:done"),
+    )
+    assert kb.attest_olympus_release_receipt(
+        conn,
+        task_id=task_id,
+        subject_revision=revision,
+        operation_id=operation_id,
+        olympus_auth=_auth(conn, context, operation_id="ignored:done"),
+    ) == attestation
+
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    reopened = kb.connect(db_path)
+    try:
+        assert kb.attest_olympus_release_receipt(
+            reopened,
+            task_id=task_id,
+            subject_revision=revision,
+            operation_id=operation_id,
+            olympus_auth=_auth(
+                reopened, context, operation_id="ignored:reopened"
+            ),
+        ) == attestation
+    finally:
+        reopened.close()
+
+
+def test_release_receipt_attestation_fails_closed_for_live_authority(conn):
+    context = _context()
+    task_id = _create(
+        conn,
+        context,
+        initial_status="blocked",
+        operation_id="attest:authority:create",
+    )
+    revision = kb.get_task(conn, task_id).record_revision
+    operation_id = kb.olympus_release_operation_id(
+        task_id, revision, "attest:authority:release"
+    )
+    with pytest.raises(kb.OlympusContextError) as caught:
+        kb.attest_olympus_release_receipt(
+            conn,
+            task_id=task_id,
+            subject_revision=revision,
+            operation_id=operation_id,
+            olympus_auth=_auth(conn, context),
+        )
+    assert caught.value.reason == "olympus_release_receipt_missing"
+
+    kb.release_olympus_task(
+        conn,
+        task_id,
+        subject_revision=revision,
+        olympus_auth=_auth(
+            conn, context, operation_id="attest:authority:release"
+        ),
+    )
+    board_id = kb._connection_board_identity(conn)
+    dispatcher = "foreign-dispatcher"
+    foreign_auth = kb.OlympusMutationAuth(
+        verifier=_allow,
+        principal_type="service",
+        principal_id=f"kanban-service-dispatcher:{board_id}:{dispatcher}",
+        principal_source=f"kanban-dispatcher:{board_id}:{dispatcher}",
+        actor=context["agent_id"],
+        operation_id="ignored:foreign",
+    )
+    with pytest.raises(kb.OlympusContextError) as caught:
+        kb.attest_olympus_release_receipt(
+            conn,
+            task_id=task_id,
+            subject_revision=revision,
+            operation_id=operation_id,
+            olympus_auth=foreign_auth,
+        )
+    assert caught.value.reason == "olympus_release_replay_principal_conflict"
+
+    def stale(request):
+        result = _allow(request)
+        result["current"] = False
+        return result
+
+    def revoked(request):
+        result = _allow(request)
+        result["decision"] = "DENY"
+        return result
+
+    for verifier in (stale, revoked):
+        with pytest.raises(kb.OlympusContextError) as caught:
+            kb.attest_olympus_release_receipt(
+                conn,
+                task_id=task_id,
+                subject_revision=revision,
+                operation_id=operation_id,
+                olympus_auth=_auth(conn, context, verifier=verifier),
+            )
+        assert caught.value.reason == "olympus_authority_verification_denied"
+
+
+def test_release_receipt_attestation_rejects_rehashed_forgery(conn):
+    context = _context()
+    cases = {}
+    for field in ("principal", "authority_id", "lease_id"):
+        task_id = _create(
+            conn,
+            context,
+            initial_status="blocked",
+            operation_id=f"attest:forge:{field}:create",
+        )
+        revision = kb.get_task(conn, task_id).record_revision
+        receipt = kb.release_olympus_task(
+            conn,
+            task_id,
+            subject_revision=revision,
+            olympus_auth=_auth(
+                conn, context, operation_id=f"attest:forge:{field}:release"
+            ),
+        )
+        operation_id = kb.olympus_release_operation_id(
+            task_id, revision, f"attest:forge:{field}:release"
+        )
+        cases[field] = (task_id, revision, operation_id, receipt)
+
+    db_path = Path(conn.execute("PRAGMA database_list").fetchone()[2])
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("DROP TRIGGER olympus_release_receipt_update_guard")
+        for field, (task_id, _revision, operation_id, receipt) in cases.items():
+            forged = copy.deepcopy(receipt)
+            if field == "principal":
+                board_id = kb._connection_board_identity(conn)
+                dispatcher = "forged-dispatcher"
+                forged[field] = {
+                    "kind": "kanban_service_dispatcher",
+                    "principal_type": "service",
+                    "principal_id": (
+                        f"kanban-service-dispatcher:{board_id}:{dispatcher}"
+                    ),
+                    "principal_source": (
+                        f"kanban-dispatcher:{board_id}:{dispatcher}"
+                    ),
+                    "board_id": board_id,
+                    "dispatcher_instance_id": dispatcher,
+                }
+            else:
+                forged[field] = f"forged-{field}"
+            encoded, digest = kb._canonical_json_record(forged)
+            raw.execute(
+                "UPDATE kanban_olympus_release_receipts "
+                "SET receipt=?, receipt_sha256=? WHERE operation_id=?",
+                (encoded, digest, operation_id),
+            )
+        raw.commit()
+    finally:
+        raw.close()
+    kb._install_olympus_write_guard(conn)
+
+    for field, (task_id, revision, operation_id, _receipt) in cases.items():
+        with pytest.raises(kb.OlympusContextError) as caught:
+            kb.attest_olympus_release_receipt(
+                conn,
+                task_id=task_id,
+                subject_revision=revision,
+                operation_id=operation_id,
+                olympus_auth=_auth(conn, context),
+            )
+        expected = (
+            "olympus_release_replay_principal_conflict"
+            if field == "principal"
+            else "olympus_release_receipt_invalid"
+        )
+        assert caught.value.reason == expected
+
+
+def test_release_receipt_attestation_rejects_event_tamper_and_state_rollback(conn):
+    context = _context()
+    cases = {}
+    for failure in ("event", "rollback"):
+        task_id = _create(
+            conn,
+            context,
+            initial_status="blocked",
+            operation_id=f"attest:{failure}:create",
+        )
+        revision = kb.get_task(conn, task_id).record_revision
+        kb.release_olympus_task(
+            conn,
+            task_id,
+            subject_revision=revision,
+            olympus_auth=_auth(
+                conn, context, operation_id=f"attest:{failure}:release"
+            ),
+        )
+        cases[failure] = (
+            task_id,
+            revision,
+            kb.olympus_release_operation_id(
+                task_id, revision, f"attest:{failure}:release"
+            ),
+        )
+
+    with kb.write_txn(conn):
+        conn.execute("DROP TRIGGER olympus_events_update_guard")
+        conn.execute("DROP TRIGGER olympus_tasks_update_guard")
+        conn.execute(
+            "UPDATE task_events SET payload='{}' "
+            "WHERE task_id=? AND kind='unblocked'",
+            (cases["event"][0],),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='todo' WHERE id=?",
+            (cases["rollback"][0],),
+        )
+    kb._install_olympus_write_guard(conn)
+
+    for failure, expected in (
+        ("event", "olympus_release_event_invalid"),
+        ("rollback", "olympus_release_attestation_state_rollback"),
+    ):
+        task_id, revision, operation_id = cases[failure]
+        with pytest.raises(kb.OlympusContextError) as caught:
+            kb.attest_olympus_release_receipt(
+                conn,
+                task_id=task_id,
+                subject_revision=revision,
+                operation_id=operation_id,
+                olympus_auth=_auth(conn, context),
+            )
+        assert caught.value.reason == expected
+
+
 def test_release_receipt_insert_is_bound_to_verified_identity_fields(conn):
     context = _context()
     task_id = _create(
