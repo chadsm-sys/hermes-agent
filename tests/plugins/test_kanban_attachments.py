@@ -125,8 +125,11 @@ def test_add_attachment_appends_event(kanban_home):
     conn = kb.connect()
     try:
         task_id = _make_task(conn)
+        out, stored = kb.open_attachment_for_write(task_id, "a.txt")
+        with out:
+            out.write(b"abc")
         kb.add_attachment(
-            conn, task_id, filename="a.txt", stored_path="/tmp/a.txt", size=3
+            conn, task_id, filename="a.txt", stored_path=str(stored), size=3
         )
         kinds = [e.kind for e in kb.list_events(conn, task_id)]
         assert "attached" in kinds

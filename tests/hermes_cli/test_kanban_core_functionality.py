@@ -530,6 +530,7 @@ def test_notify_sub_crud(kanban_home):
         # Duplicate add is a no-op.
         kb.add_notify_sub(
             conn, task_id=tid, platform="telegram", chat_id="123",
+            user_id="u1", notifier_profile="default",
         )
         assert len(kb.list_notify_subs(conn, tid)) == 1
         # Distinct thread is a new row.
@@ -4111,8 +4112,7 @@ def test_reclaim_task_resets_running_to_ready(kanban_home, monkeypatch):
         assert len(reclaim_evs) == 1
         assert reclaim_evs[0].get("manual") is True
         assert reclaim_evs[0].get("reason") == "test reason"
-        assert reclaim_evs[0].get("termination_attempted") is True
-        assert reclaim_evs[0].get("terminated") is True
+        assert reclaim_evs[0].get("termination_after_commit") is True
         assert killed == [signal.SIGTERM]
     finally:
         conn.close()
