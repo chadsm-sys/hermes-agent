@@ -2153,8 +2153,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
     _startup_restore_in_progress: bool = False
 
-    def __init__(self, config: Optional[GatewayConfig] = None):
+    def __init__(
+        self,
+        config: Optional[GatewayConfig] = None,
+        *,
+        olympus_authority_verifier=None,
+    ):
         global _gateway_runner_ref
+        if (
+            olympus_authority_verifier is not None
+            and not callable(olympus_authority_verifier)
+        ):
+            raise TypeError("olympus_authority_verifier must be callable")
         self.config = config or load_gateway_config()
         self.adapters: Dict[Platform, BasePlatformAdapter] = {}
         self._warn_if_docker_media_delivery_is_risky()
@@ -2268,6 +2278,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Key: session_key, Value: parsed reasoning config dict.
         self._session_reasoning_overrides: Dict[str, Dict[str, Any]] = {}
         self._kanban_notifier_profile = self._active_profile_name()
+        # Canonical Olympus authority is injected only by the process
+        # composition root.  It is deliberately not loaded from config,
+        # environment variables, dashboard payloads, or tool arguments.
+        # A gateway without this callable can continue ordinary Kanban work,
+        # but every governed mutation fails closed.
+        self._kanban_olympus_authority_verifier = olympus_authority_verifier
+        self._kanban_dispatcher_instance_id = (
+            f"gateway-{os.getpid()}-{time.monotonic_ns()}"
+        )
         # Teams meeting pipeline runtime (bound later when msgraph_webhook adapter exists).
         self._teams_pipeline_runtime = None
         self._teams_pipeline_runtime_error: Optional[str] = None
@@ -3827,6 +3846,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 session_key,
             )
             return True  # handled (silently dropped); do not fall through
+
+        # Selected Telegram input is durable Kanban intake, never a
+        # conversational interruption. Persist it before drain/busy handling.
+        routed = await self._route_olympus_telegram_intake(event)
+        if routed is not None:
+            adapter = self.adapters.get(event.source.platform)
+            if adapter:
+                reply_anchor = self._reply_anchor_for_event(event)
+                await adapter._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=routed,
+                    reply_to=reply_anchor,
+                    metadata=self._thread_metadata_for_source(
+                        event.source, reply_anchor
+                    ),
+                )
+            return True
 
         # --- Draining case (gateway restarting/stopping) ---
         if self._draining:
@@ -6922,6 +6958,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # the confirm doesn't block normal usage indefinitely.  The user
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
+
+        # A normal Telegram message in a selected Olympus lane becomes a
+        # durable submission before any running-agent priority/interrupt path.
+        _olympus_routed = await self._route_olympus_telegram_intake(event)
+        if _olympus_routed is not None:
+            return _olympus_routed
 
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
@@ -16301,7 +16343,13 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
+async def start_gateway(
+    config: Optional[GatewayConfig] = None,
+    replace: bool = False,
+    verbosity: Optional[int] = 0,
+    *,
+    olympus_authority_verifier=None,
+) -> bool:
     """
     Start the gateway and run until interrupted.
     
@@ -16481,7 +16529,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(config)
+    runner_kwargs = {}
+    if olympus_authority_verifier is not None:
+        runner_kwargs["olympus_authority_verifier"] = olympus_authority_verifier
+    runner = GatewayRunner(config, **runner_kwargs)
     
     # Track whether an unexpected signal initiated the shutdown. When an
     # unexpected SIGTERM kills the gateway, we exit non-zero so service

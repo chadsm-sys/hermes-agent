@@ -8,6 +8,7 @@ REST surface without spinning up the whole dashboard.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -112,6 +113,284 @@ def test_create_task_appears_on_board(client):
     assert ready["tasks"][0]["id"] == task_id
     assert "acme" in data["tenants"]
     assert "researcher" in data["assignees"]
+
+
+def test_generic_dashboard_cannot_inject_or_replace_olympus_context(client):
+    context = {"schema_version": 2, "forged": "caller assertion"}
+    injected = client.post(
+        "/api/plugins/kanban/tasks",
+        json={
+            "title": "governed API task",
+            "assignee": "coding",
+            "olympus_context": context,
+        },
+    )
+    assert injected.status_code == 422
+    created = client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "ordinary API task", "assignee": "coding"},
+    )
+    assert created.status_code == 200, created.text
+    task = created.json()["task"]
+    assert task["olympus_context"] is None
+    updated = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"olympus_context": context},
+    )
+    assert updated.status_code == 422, updated.text
+    detail = client.get(f"/api/plugins/kanban/tasks/{task['id']}")
+    assert detail.status_code == 200
+    assert detail.json()["task"]["olympus_context"] is None
+
+
+def test_generic_dashboard_mutation_matrix_denies_governed_state_without_change(
+    client, with_home_channels,
+):
+    """Every generic operator write path fails closed on canonical state."""
+    conn = kb.connect()
+    try:
+        now = int(time.time())
+        context = {
+            "schema_version": 2,
+            "goal_id": "g-dashboard",
+            "program_id": "p-dashboard",
+            "milestone_id": "ms-dashboard",
+            "mission_id": "m-dashboard",
+            "workstream_id": "ws-dashboard",
+            "authority": {
+                "authority_id": "authority-dashboard",
+                "status": "ACTIVE",
+                "scope": ["m-dashboard"],
+                "capabilities": sorted(
+                    set(kb.KANBAN_TASK_ACTION_CAPABILITIES.values())
+                ),
+                "revision": 1,
+                "source": "mission-control:test",
+                "expires_at": now + 3600,
+            },
+            "lease": {
+                "lease_id": "lease-dashboard",
+                "mission_id": "m-dashboard",
+                "agent_id": "coding",
+                "holder": "coding",
+                "repository": "chadsm-sys/hermes-agent",
+                "branch": "test/dashboard-denial",
+                "worktree": "/test/dashboard-denial",
+                "revision": 1,
+                "source": "acp:test",
+                "status": "ACTIVE",
+                "expires_at": now + 1800,
+            },
+            "risk": "high",
+            "agent_id": "coding",
+            "review_status": "pending",
+            "evidence_refs": ["evidence://dashboard-denial"],
+        }
+
+        def allow(request):
+            issued = time.time()
+            target = request["target"]
+            return {
+                "schema_version": kb.AUTHORITY_VERIFICATION_SCHEMA,
+                "verification_id": (
+                    f"verification:{request['request_id'].split(':', 1)[1]}"
+                ),
+                "decision": "ALLOW",
+                "current": True,
+                "verified_at": issued - 1,
+                "valid_until": min(
+                    issued + 60,
+                    target["authority"]["expires_at"],
+                    target["lease"]["expires_at"],
+                ),
+                "verified_principal": json.loads(json.dumps(request["principal"])),
+                "verified_actor": request["actor"],
+                "request_id": request["request_id"],
+                "request": json.loads(json.dumps(request)),
+                "target_verification": {
+                    "authority_current": True,
+                    "containment_target": False,
+                    "subject": json.loads(json.dumps(target)),
+                },
+                "authorization_root_verification": None,
+            }
+
+        def auth(operation_id: str):
+            board_id = kb._connection_board_identity(conn)
+            dispatcher = "dashboard-denial"
+            return kb.OlympusMutationAuth(
+                verifier=allow,
+                principal_type="service",
+                principal_id=(
+                    f"kanban-service-dispatcher:{board_id}:{dispatcher}"
+                ),
+                principal_source=f"kanban-dispatcher:{board_id}:{dispatcher}",
+                actor="coding",
+                operation_id=operation_id,
+            )
+
+        ready_id = kb.create_olympus_task(
+            conn,
+            title="governed-ready",
+            assignee="coding",
+            olympus_context=context,
+            olympus_auth=auth("dashboard:create:ready"),
+        )
+        running_id = kb.create_olympus_task(
+            conn,
+            title="governed-running",
+            assignee="coding",
+            olympus_context=context,
+            olympus_auth=auth("dashboard:create:running"),
+        )
+        running_run = kb.reserve_worker_run(
+            conn,
+            running_id,
+            claimer=kb._claimer_id(),
+            olympus_auth=auth("dashboard:claim:running"),
+        )
+        assert running_run is not None
+        triage_id = kb.create_olympus_task(
+            conn,
+            title="governed-triage",
+            assignee="coding",
+            triage=True,
+            olympus_context=context,
+            olympus_auth=auth("dashboard:create:triage"),
+        )
+        kb.link_tasks(
+            conn,
+            ready_id,
+            triage_id,
+            olympus_auth=auth("dashboard:seed:link"),
+        )
+        attachment_file, attachment_path = kb.open_attachment_for_write(
+            ready_id, "governed-proof.txt",
+        )
+        with attachment_file:
+            attachment_file.write(b"governed-proof")
+        attachment_id = kb.add_attachment(
+            conn,
+            ready_id,
+            filename="governed-proof.txt",
+            stored_path=str(attachment_path),
+            content_type="text/plain",
+            size=len(b"governed-proof"),
+            uploaded_by="canonical-dashboard-test",
+            olympus_auth=auth("dashboard:seed:attachment"),
+        )
+        assert kb.add_notify_sub(
+            conn,
+            task_id=ready_id,
+            platform="telegram",
+            chat_id="1234567",
+            thread_id="42",
+            notifier_profile="default",
+            olympus_auth=auth("dashboard:seed:subscription"),
+        )
+
+        def manifest():
+            tables = (
+                "tasks", "task_runs", "task_events", "task_comments",
+                "task_attachments", "task_links", "kanban_notify_subs",
+                "kanban_effect_journal",
+            )
+            return {
+                table: [tuple(row) for row in conn.execute(
+                    f'SELECT * FROM "{table}" ORDER BY rowid'
+                )]
+                for table in tables
+            }
+
+        before = manifest()
+    finally:
+        conn.close()
+
+    denied = [
+        client.patch(
+            f"/api/plugins/kanban/tasks/{ready_id}", json={"status": "blocked"},
+        ),
+        client.patch(
+            f"/api/plugins/kanban/tasks/{ready_id}", json={"title": "forged"},
+        ),
+        client.patch(
+            f"/api/plugins/kanban/tasks/{ready_id}", json={"assignee": "foreign"},
+        ),
+        client.delete(f"/api/plugins/kanban/tasks/{ready_id}"),
+        client.post(
+            f"/api/plugins/kanban/tasks/{ready_id}/comments",
+            json={"body": "forged comment", "author": "dashboard"},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{ready_id}/attachments",
+            files={"file": ("forged.txt", b"forged", "text/plain")},
+        ),
+        client.delete(
+            f"/api/plugins/kanban/attachments/{attachment_id}"
+        ),
+        client.post(
+            "/api/plugins/kanban/links",
+            json={"parent_id": triage_id, "child_id": running_id},
+        ),
+        client.delete(
+            "/api/plugins/kanban/links",
+            params={"parent_id": ready_id, "child_id": triage_id},
+        ),
+        client.post(
+            f"/api/plugins/kanban/runs/{running_run.id}/terminate",
+            json={"reason": "forged termination"},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{running_id}/reclaim",
+            json={"reason": "forged reclaim"},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{running_id}/reassign",
+            json={"profile": "foreign", "reclaim_first": True},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{triage_id}/specify", json={},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{triage_id}/decompose", json={},
+        ),
+        client.post(
+            f"/api/plugins/kanban/tasks/{ready_id}/home-subscribe/telegram"
+        ),
+        client.delete(
+            f"/api/plugins/kanban/tasks/{ready_id}/home-subscribe/telegram"
+        ),
+        client.post("/api/plugins/kanban/dispatch?dry_run=false&max=8"),
+    ]
+    assert all(response.status_code == 403 for response in denied)
+    bulk = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={
+            "ids": [ready_id, running_id],
+            "status": "blocked",
+            "assignee": "foreign",
+            "reclaim_first": True,
+        },
+    )
+    assert bulk.status_code == 200
+    assert all(not result["ok"] for result in bulk.json()["results"])
+
+    conn = kb.connect()
+    try:
+        after = {
+            table: [tuple(row) for row in conn.execute(
+                f'SELECT * FROM "{table}" ORDER BY rowid'
+            )]
+            for table in before
+        }
+        assert after == before
+        assert [attachment.id for attachment in kb.list_attachments(conn, ready_id)] \
+            == [attachment_id]
+        assert attachment_path.exists()
+        assert len(kb.list_notify_subs(conn, ready_id)) == 1
+        assert kb.parent_ids(conn, triage_id) == [ready_id]
+    finally:
+        conn.close()
 
 
 def test_scheduled_tasks_have_their_own_column_not_todo(client):
@@ -1634,8 +1913,8 @@ def test_home_subscribe_is_idempotent(client, with_home_channels):
         conn.close()
 
 
-def test_home_subscribe_backfills_owner_on_legacy_row(client, with_home_channels):
-    """Re-subscribing should backfill notifier ownership on ownerless rows."""
+def test_home_subscribe_reports_owner_conflict_on_legacy_row(client, with_home_channels):
+    """A unique destination is never silently rebound to another owner."""
     from hermes_cli import kanban_db as kb
     t = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
 
@@ -1652,7 +1931,8 @@ def test_home_subscribe_backfills_owner_on_legacy_row(client, with_home_channels
         conn.close()
 
     r = client.post(f"/api/plugins/kanban/tasks/{t['id']}/home-subscribe/telegram")
-    assert r.status_code == 200
+    assert r.status_code == 409
+    assert "already bound" in r.json()["detail"]
 
     conn = kb.connect()
     try:
@@ -1661,7 +1941,7 @@ def test_home_subscribe_backfills_owner_on_legacy_row(client, with_home_channels
         conn.close()
 
     assert len(subs) == 1
-    assert subs[0]["notifier_profile"] == "default"
+    assert subs[0]["notifier_profile"] is None
 
 
 def test_home_subscribe_unknown_platform_returns_404(client, with_home_channels):

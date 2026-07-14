@@ -43,3 +43,12 @@ def test_watcher_loops_are_coroutines():
     # The two long-running watchers are async loops.
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_notifier_watcher)
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+
+
+def test_dispatcher_reconciles_durable_restart_state_before_dispatch():
+    source = inspect.getsource(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+    reconcile_at = source.index("_kb.reconcile_restart_state(")
+    execute_at = source.index("_kb.process_pending_worker_termination_effects(")
+    telegram_at = source.index("_kb.reconcile_olympus_telegram_controls(")
+    dispatch_at = source.index("return _kb.dispatch_once(")
+    assert reconcile_at < execute_at < telegram_at < dispatch_at
