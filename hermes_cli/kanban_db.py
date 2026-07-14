@@ -6651,7 +6651,11 @@ def write_txn(conn: sqlite3.Connection):
     """
     managed_connection = isinstance(conn, _KanbanConnection)
     depth = int(getattr(conn, "_olympus_managed_txn_depth", 0))
-    if conn.in_transaction:
+    # ``sqlite3.Connection`` exposes ``in_transaction``.  Boundary-focused
+    # test doubles and compatible DB-API wrappers may not; absence means no
+    # caller-owned transaction has been reported, so start the normal guarded
+    # transaction below.
+    if bool(getattr(conn, "in_transaction", False)):
         if depth <= 0:
             if not managed_connection:
                 # Migration utilities historically accept a plain stdlib
