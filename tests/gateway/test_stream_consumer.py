@@ -1687,6 +1687,97 @@ class TestBufferOnlyMode:
         # The key assertion: this doesn't break.
         assert adapter.send.call_count >= 1
 
+    @pytest.mark.asyncio
+    async def test_buffer_threshold_counts_only_text_since_last_update(self):
+        """Crossing the total threshold must not make every token an edit."""
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg1")
+        )
+
+        cfg = StreamConsumerConfig(
+            edit_interval=3600,
+            buffer_threshold=5,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat1", config=cfg)
+        task = asyncio.create_task(consumer.run())
+
+        consumer.on_delta("hello")
+        for _ in range(100):
+            if adapter.send.call_count == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert adapter.send.call_count == 1
+
+        # Only one new character arrived after the successful first update.
+        # The old total-length comparison edited immediately because the full
+        # buffer was already over the five-character threshold.
+        consumer.on_delta("!")
+        await asyncio.sleep(0.1)
+        assert adapter.edit_message.call_count == 0
+
+        # Five newly buffered characters should trigger the next update.
+        consumer.on_delta("1234")
+        for _ in range(100):
+            if adapter.edit_message.call_count == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert adapter.edit_message.call_count == 1
+
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_buffer_threshold_does_not_bypass_flood_backoff(self):
+        """New text must respect adaptive timing after flood control."""
+        adapter = MagicMock()
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.REQUIRES_EDIT_FINALIZE = False
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg1")
+        )
+        adapter.edit_message = AsyncMock(
+            return_value=SimpleNamespace(success=False, error="flood_control:2")
+        )
+
+        cfg = StreamConsumerConfig(
+            edit_interval=1.0,
+            buffer_threshold=1,
+            cursor="",
+        )
+        consumer = GatewayStreamConsumer(adapter, "chat1", config=cfg)
+        task = asyncio.create_task(consumer.run())
+
+        consumer.on_delta("a")
+        for _ in range(100):
+            if adapter.send.call_count == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert adapter.send.call_count == 1
+
+        consumer.on_delta("b")
+        for _ in range(100):
+            if adapter.edit_message.call_count == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert adapter.edit_message.call_count == 1
+        assert consumer._flood_strikes == 1
+
+        # The first flood strike doubles the interval to two seconds. The
+        # threshold is already met, but it must not force an immediate retry.
+        consumer.on_delta("c")
+        await asyncio.sleep(0.1)
+        assert adapter.edit_message.call_count == 1
+
+        consumer.finish()
+        await asyncio.wait_for(task, timeout=1.0)
+
 
 # ── Cursor stripping on fallback (#7183) ────────────────────────────────────
 
