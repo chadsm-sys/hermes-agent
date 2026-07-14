@@ -583,10 +583,11 @@ NOTIFICATION_EFFECT_TRANSITION_SCHEMA = (
 NOTIFIER_MUTATION_WRITE_SCHEMA = "kanban-notifier-mutation-write/1"
 WORKER_REGISTRATION_WRITE_SCHEMA = "kanban-worker-registration-write/1"
 CREATE_RECEIPT_WRITE_SCHEMA = "kanban-create-receipt-write/1"
-RELEASE_RECEIPT_WRITE_SCHEMA = "kanban-release-receipt-write/1"
+RELEASE_RECEIPT_WRITE_SCHEMA = "kanban-release-receipt-write/2"
 RELEASE_RECEIPT_ATTESTATION_SCHEMA = (
     "olympus-task-release-receipt-attestation/1"
 )
+RELEASE_AUTHORITY_PROOF_SCHEMA = "olympus-task-release-authority-proof/1"
 _OLYMPUS_RELEASE_RECEIPT_KEYS = frozenset({
     "schema_version", "operation_id", "task_id", "previous_status", "status",
     "previous_revision", "record_revision", "verification_id", "request_id",
@@ -597,6 +598,15 @@ _OLYMPUS_RELEASE_RECEIPT_KEYS = frozenset({
 _OLYMPUS_RELEASE_ATTESTATION_KEYS = frozenset({
     "schema_version", "operation_id", "task_id", "subject_revision",
     "receipt_sha256", "receipt",
+})
+_OLYMPUS_RELEASE_AUTHORITY_PROOF_KEYS = frozenset({
+    "schema_version", "operation_id", "task_id", "subject_revision",
+    "request", "verification",
+})
+_OLYMPUS_RELEASE_WRITE_KEYS = frozenset({
+    "schema_version", "operation_id", "task_id", "subject_revision",
+    "record_revision", "verification_id", "request_id", "receipt",
+    "receipt_sha256", "proof", "proof_sha256", "created_at",
 })
 _OLYMPUS_RELEASE_ATTESTABLE_STATUSES = frozenset({
     "ready", "running", "review", "done", "archived",
@@ -3823,6 +3833,19 @@ CREATE TABLE IF NOT EXISTS kanban_olympus_release_receipts (
     UNIQUE(task_id, subject_revision)
 );
 
+-- Immutable release-time authority evidence. The receipt wire stays v1 while
+-- this sidecar preserves the exact accepted v3 request and verification needed
+-- to attest history after the live authority or lease later expires/revokes.
+CREATE TABLE IF NOT EXISTS kanban_olympus_release_authority_proofs (
+    operation_id      TEXT PRIMARY KEY,
+    task_id           TEXT NOT NULL,
+    subject_revision  INTEGER NOT NULL,
+    proof             TEXT NOT NULL,
+    proof_sha256      TEXT NOT NULL,
+    created_at        INTEGER NOT NULL,
+    UNIQUE(task_id, subject_revision)
+);
+
 -- Durable completion markers for migrations whose columns and data backfills
 -- must be treated as one crash-recoverable unit.
 CREATE TABLE IF NOT EXISTS kanban_schema_migrations (
@@ -4829,22 +4852,85 @@ def _install_olympus_write_guard(conn: sqlite3.Connection) -> None:
                 and decoded.get("request_id") == request_id
                 and isinstance(created_at, int)
                 and created_at >= 0
-                and binding == {
-                    "schema_version": RELEASE_RECEIPT_WRITE_SCHEMA,
-                    "operation_id": operation_id,
-                    "task_id": task_id,
-                    "subject_revision": int(subject_revision),
-                    "record_revision": int(record_revision),
-                    "verification_id": verification_id,
-                    "request_id": request_id,
-                    "receipt": receipt,
-                    "receipt_sha256": receipt_sha256,
-                    "created_at": created_at,
-                }
+                and isinstance(binding, dict)
+                and set(binding) == _OLYMPUS_RELEASE_WRITE_KEYS
+                and binding["schema_version"] == RELEASE_RECEIPT_WRITE_SCHEMA
+                and binding["operation_id"] == operation_id
+                and binding["task_id"] == task_id
+                and binding["subject_revision"] == int(subject_revision)
+                and binding["record_revision"] == int(record_revision)
+                and binding["verification_id"] == verification_id
+                and binding["request_id"] == request_id
+                and binding["receipt"] == receipt
+                and binding["receipt_sha256"] == receipt_sha256
+                and binding["created_at"] == created_at
             )
         except (TypeError, ValueError):
             return 0
         return int(exact)
+
+    def _release_authority_proof_insert_allowed(
+        operation_id: Any, task_id: Any, subject_revision: Any,
+        proof: Any, proof_sha256: Any, created_at: Any,
+    ) -> int:
+        issued = _permit(task_id)
+        decoded = _canonical_receipt_payload(proof, proof_sha256)
+        binding = _permit_write_binding(issued)
+        try:
+            request = decoded.get("request") if decoded is not None else None
+            verification = (
+                decoded.get("verification") if decoded is not None else None
+            )
+            accepted = validate_authority_verification(
+                request, verification, now=verification["verified_at"],
+            )
+            canonical_verification = accepted.get("verification")
+            canonical_request = (
+                canonical_verification.get("request")
+                if isinstance(canonical_verification, dict) else None
+            )
+            return int(
+                issued is not None
+                and issued[2:4] == (
+                    "release_blocked_task", OLYMPUS_CAPABILITY_RELEASE,
+                )
+                and issued[0] == int(subject_revision)
+                and str(operation_id) == issued[1]
+                and decoded is not None
+                and set(decoded) == _OLYMPUS_RELEASE_AUTHORITY_PROOF_KEYS
+                and decoded.get("schema_version") == RELEASE_AUTHORITY_PROOF_SCHEMA
+                and decoded.get("operation_id") == operation_id
+                and decoded.get("task_id") == task_id
+                and decoded.get("subject_revision") == int(subject_revision)
+                and accepted.get("valid") is True
+                and request == canonical_request
+                and verification == canonical_verification
+                and request.get("authorization_root") is None
+                and request.get("action") == "release_blocked_task"
+                and request.get("capability") == OLYMPUS_CAPABILITY_RELEASE
+                and request.get("operation_id") == operation_id
+                and request.get("target", {}).get("subject_id") == task_id
+                and request.get("target", {}).get("subject_revision")
+                    == int(subject_revision)
+                and request.get("target", {}).get("subject_status") == "blocked"
+                and verification.get("verification_id") == issued[6]
+                and isinstance(created_at, int)
+                and created_at >= 0
+                and isinstance(binding, dict)
+                and set(binding) == _OLYMPUS_RELEASE_WRITE_KEYS
+                and binding["schema_version"] == RELEASE_RECEIPT_WRITE_SCHEMA
+                and binding["operation_id"] == operation_id
+                and binding["task_id"] == task_id
+                and binding["subject_revision"] == int(subject_revision)
+                and binding["verification_id"]
+                    == verification["verification_id"]
+                and binding["request_id"] == request["request_id"]
+                and binding["proof"] == proof
+                and binding["proof_sha256"] == proof_sha256
+                and binding["created_at"] == created_at
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return 0
 
     def _notifier_effect_matches(
         issued: Any, *, task_id: Any, event_id: Any,
@@ -5076,6 +5162,10 @@ def _install_olympus_write_guard(conn: sqlite3.Connection) -> None:
         "olympus_release_receipt_insert_allowed", 9,
         _release_receipt_insert_allowed,
     )
+    conn.create_function(
+        "olympus_release_authority_proof_insert_allowed", 6,
+        _release_authority_proof_insert_allowed,
+    )
     conn.create_function("olympus_effect_insert_allowed", 19, _effect_insert_allowed)
     conn.create_function("olympus_effect_update_allowed", 14, _effect_update_allowed)
     conn.create_function(
@@ -5116,6 +5206,9 @@ def _install_olympus_write_guard(conn: sqlite3.Connection) -> None:
         DROP TRIGGER IF EXISTS olympus_release_receipt_insert_guard;
         DROP TRIGGER IF EXISTS olympus_release_receipt_update_guard;
         DROP TRIGGER IF EXISTS olympus_release_receipt_delete_guard;
+        DROP TRIGGER IF EXISTS olympus_release_proof_insert_guard;
+        DROP TRIGGER IF EXISTS olympus_release_proof_update_guard;
+        DROP TRIGGER IF EXISTS olympus_release_proof_delete_guard;
         DROP TRIGGER IF EXISTS olympus_runs_insert_guard;
         DROP TRIGGER IF EXISTS olympus_runs_update_guard;
         DROP TRIGGER IF EXISTS olympus_runs_delete_guard;
@@ -5327,6 +5420,20 @@ def _install_olympus_write_guard(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER olympus_release_receipt_delete_guard
         BEFORE DELETE ON kanban_olympus_release_receipts
         BEGIN SELECT RAISE(ABORT, 'olympus_release_receipt_immutable'); END;
+
+        CREATE TRIGGER olympus_release_proof_insert_guard
+        BEFORE INSERT ON kanban_olympus_release_authority_proofs
+        WHEN olympus_release_authority_proof_insert_allowed(
+            NEW.operation_id,NEW.task_id,NEW.subject_revision,
+            NEW.proof,NEW.proof_sha256,NEW.created_at
+        ) != 1
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_proof_authority_required'); END;
+        CREATE TRIGGER olympus_release_proof_update_guard
+        BEFORE UPDATE ON kanban_olympus_release_authority_proofs
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_proof_immutable'); END;
+        CREATE TRIGGER olympus_release_proof_delete_guard
+        BEFORE DELETE ON kanban_olympus_release_authority_proofs
+        BEGIN SELECT RAISE(ABORT, 'olympus_release_proof_immutable'); END;
 
         CREATE TRIGGER olympus_runs_insert_guard BEFORE INSERT ON task_runs
         WHEN EXISTS (SELECT 1 FROM tasks WHERE id=NEW.task_id AND olympus_context IS NOT NULL)
@@ -6185,6 +6292,22 @@ def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
         raise
     except Exception:
         pass  # I/O errors during check are non-fatal; let normal ops continue
+
+
+@contextlib.contextmanager
+def _read_snapshot(conn: sqlite3.Connection):
+    """Hold one SQLite read snapshot without acquiring mutation authority."""
+    if conn.in_transaction:
+        yield conn
+        return
+    conn.execute("BEGIN")
+    try:
+        yield conn
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 @contextlib.contextmanager
@@ -8137,7 +8260,63 @@ def get_olympus_release_receipt(
     return _decode_olympus_release_receipt(row)
 
 
+def _decode_olympus_release_authority_proof(
+    row: sqlite3.Row,
+) -> dict[str, Any]:
+    encoded = str(row["proof"])
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    if digest != row["proof_sha256"]:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            "release authority proof checksum does not match",
+        )
+    try:
+        proof = json.loads(encoded)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            "release authority proof is not valid JSON",
+        ) from exc
+    canonical, _ = _canonical_json_record(proof)
+    if (
+        canonical != encoded
+        or set(proof) != _OLYMPUS_RELEASE_AUTHORITY_PROOF_KEYS
+        or proof.get("schema_version") != RELEASE_AUTHORITY_PROOF_SCHEMA
+        or proof.get("operation_id") != row["operation_id"]
+        or proof.get("task_id") != row["task_id"]
+        or proof.get("subject_revision") != int(row["subject_revision"])
+        or not isinstance(proof.get("request"), dict)
+        or not isinstance(proof.get("verification"), dict)
+        or proof["verification"].get("verified_at") is None
+        or int(row["created_at"]) < 0
+    ):
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            "release authority proof is not exact canonical evidence",
+        )
+    return proof
+
+
 def attest_olympus_release_receipt(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    subject_revision: int,
+    operation_id: str,
+    olympus_auth: OlympusMutationAuth,
+) -> dict[str, Any]:
+    """Attest one immutable release from a single database snapshot."""
+    with _read_snapshot(conn):
+        return _attest_olympus_release_receipt_snapshot(
+            conn,
+            task_id=task_id,
+            subject_revision=subject_revision,
+            operation_id=operation_id,
+            olympus_auth=olympus_auth,
+        )
+
+
+def _attest_olympus_release_receipt_snapshot(
     conn: sqlite3.Connection,
     *,
     task_id: str,
@@ -8147,13 +8326,12 @@ def attest_olympus_release_receipt(
 ) -> dict[str, Any]:
     """Return deterministic, freshly verified evidence for one release.
 
-    The stored v1 receipt remains the immutable historical fact.  Attestation
-    re-reads and checksum-verifies that exact row, proves its canonical
-    service-dispatcher and governance identities, binds it to the durable
-    ``unblocked`` event, and performs a fresh read-only authority inspection.
-    Later legal task progress therefore does not erase release evidence, while
-    a rolled-back, foreign, stale, or ambiguously replayed aggregate fails
-    closed.  No process-local mutation permit is installed by this function.
+    The v1 receipt and its release-time v3 request/verification sidecar are the
+    immutable historical fact. Attestation validates that accepted release
+    proof at its original acceptance time, then binds it to the receipt,
+    durable ``unblocked`` event, caller principal, and monotonic live aggregate.
+    Later expiry or revocation cannot erase history or authorize a new write.
+    No process-local mutation permit is installed by this function.
     """
     if (
         not isinstance(task_id, str)
@@ -8192,6 +8370,72 @@ def attest_olympus_release_receipt(
     receipt = _decode_olympus_release_receipt(row)
     receipt_sha256 = str(row["receipt_sha256"])
 
+    proof_row = conn.execute(
+        "SELECT * FROM kanban_olympus_release_authority_proofs "
+        "WHERE operation_id = ? OR (task_id = ? AND subject_revision = ?)",
+        (operation_id, task_id, subject_revision),
+    ).fetchone()
+    if proof_row is None:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_missing",
+            "release attestation requires immutable release-time authority proof",
+        )
+    if (
+        proof_row["operation_id"] != operation_id
+        or proof_row["task_id"] != task_id
+        or int(proof_row["subject_revision"]) != subject_revision
+    ):
+        raise OlympusContextError(
+            "olympus_release_authority_proof_conflict",
+            "release authority proof belongs to another task or revision",
+        )
+    proof = _decode_olympus_release_authority_proof(proof_row)
+    request = proof["request"]
+    verification = proof["verification"]
+    try:
+        verified_at = verification["verified_at"]
+        accepted = validate_authority_verification(
+            request, verification, now=verified_at,
+        )
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            "release-time authority proof is malformed",
+        ) from exc
+    if not accepted["valid"]:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            f"release-time authority proof is invalid: {accepted['reason']}",
+        )
+    request = accepted["verification"]["request"]
+    verification = accepted["verification"]
+    target = request["target"]
+    exact_proof = (
+        proof["request"] == request
+        and proof["verification"] == verification
+        and proof["operation_id"] == operation_id
+        and proof["task_id"] == task_id
+        and proof["subject_revision"] == subject_revision
+        and request["authorization_root"] is None
+        and request["action"] == "release_blocked_task"
+        and request["capability"] == OLYMPUS_CAPABILITY_RELEASE
+        and request["operation_id"] == operation_id
+        and request["request_id"] == receipt["request_id"]
+        and verification["verification_id"] == receipt["verification_id"]
+        and verification["request_id"] == receipt["request_id"]
+        and target["subject_id"] == task_id
+        and target["subject_revision"] == subject_revision
+        and target["subject_status"] == "blocked"
+        and int(proof_row["created_at"]) == int(row["created_at"])
+        and int(verification["verified_at"]) <= int(row["created_at"])
+        and int(row["created_at"]) <= int(verification["valid_until"])
+    )
+    if not exact_proof:
+        raise OlympusContextError(
+            "olympus_release_authority_proof_invalid",
+            "release-time proof is not exact for this receipt and operation",
+        )
+
     current_row = conn.execute(
         "SELECT id, assignee, status, record_revision, olympus_context "
         "FROM tasks WHERE id = ?",
@@ -8226,19 +8470,6 @@ def attest_olympus_release_receipt(
             "live task is not a monotonic post-release aggregate",
         )
 
-    raw_context: Any = current_row["olympus_context"]
-    if isinstance(raw_context, str):
-        try:
-            raw_context = json.loads(raw_context)
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise OlympusContextError(
-                "olympus_context_invalid",
-                "stored Olympus context is not valid JSON",
-            ) from exc
-    context = _require_current_olympus_context(
-        raw_context, assignee=str(current_row["assignee"] or "")
-    )
-    assert context is not None
     board_id = _connection_board_identity(conn)
     expected_suffix = (
         f":release_blocked_task:{task_id}:r{subject_revision}:"
@@ -8248,22 +8479,23 @@ def attest_olympus_release_receipt(
         canonical_principal = _normalize_kanban_principal(
             receipt.get("principal"),
             action="release_blocked_task",
-            target=_olympus_subject(
-                context,
-                subject_id=task_id,
-                subject_revision=subject_revision,
-                subject_status="blocked",
-                assignee=str(current_row["assignee"] or ""),
-            ),
-            now=time.time(),
+            target=target,
+            now=verified_at,
+        )
+        caller_principal = _normalize_kanban_principal(
+            _olympus_principal_binding(olympus_auth, board_id=board_id),
+            action="release_blocked_task",
+            target=target,
+            now=verified_at,
         )
     except (AuthorityContractError, TypeError, ValueError) as exc:
         raise OlympusContextError(
             "olympus_release_receipt_invalid",
             f"release receipt principal is not canonical: {exc}",
         ) from exc
-    authority = context["authority"]
-    lease = context["lease"]
+    authority = target["authority"]
+    lease = target["lease"]
+    caller_actor = str(olympus_auth.actor or receipt.get("actor") or "")
     exact_receipt = (
         receipt.get("operation_id") == operation_id
         and operation_id.endswith(expected_suffix)
@@ -8282,6 +8514,8 @@ def attest_olympus_release_receipt(
         and isinstance(receipt.get("actor"), str)
         and receipt["actor"] == lease["holder"]
         and canonical_principal == receipt.get("principal")
+        and request["principal"] == receipt.get("principal")
+        and request["actor"] == receipt.get("actor")
         and canonical_principal["kind"] == "kanban_service_dispatcher"
         and canonical_principal["board_id"] == board_id
         and receipt.get("authority_id") == authority["authority_id"]
@@ -8300,6 +8534,14 @@ def attest_olympus_release_receipt(
         raise OlympusContextError(
             "olympus_release_receipt_invalid",
             "release receipt is not the exact canonical task, authority, and lease evidence",
+        )
+    if (
+        caller_principal != receipt["principal"]
+        or caller_actor != receipt["actor"]
+    ):
+        raise OlympusContextError(
+            "olympus_release_replay_principal_conflict",
+            "attestation caller does not match the durable release identity",
         )
 
     matching_events = []
@@ -8329,31 +8571,6 @@ def attest_olympus_release_receipt(
         raise OlympusContextError(
             "olympus_release_event_invalid",
             "release receipt lacks one exact durable unblocked event",
-        )
-
-    actor = str(olympus_auth.actor or current_row["assignee"] or "")
-    authorization = require_olympus_authority_verification(
-        context,
-        subject_id=task_id,
-        subject_revision=current_revision,
-        assignee=str(current_row["assignee"] or ""),
-        action="inspect_governed_status",
-        capability=OLYMPUS_CAPABILITY_INSPECT,
-        actor=actor,
-        operation_id=(
-            f"{operation_id}:attest_release_receipt:r{current_revision}"
-        ),
-        principal=olympus_auth,
-        expected_status=current_status,
-        board_id=board_id,
-    )
-    if (
-        authorization["request"]["principal"] != receipt["principal"]
-        or authorization["request"]["actor"] != receipt["actor"]
-    ):
-        raise OlympusContextError(
-            "olympus_release_replay_principal_conflict",
-            "fresh attestation principal does not match the durable release identity",
         )
 
     attestation = {
@@ -8408,23 +8625,21 @@ def _verify_olympus_release_replay(
     authorization = require_olympus_authority_verification(
         raw_context,
         subject_id=task_id,
-        subject_revision=int(row["record_revision"]),
+        subject_revision=int(receipt["previous_revision"]),
         assignee=str(row["assignee"] or ""),
-        action="inspect_governed_status",
-        capability=OLYMPUS_CAPABILITY_INSPECT,
+        action="release_blocked_task",
+        capability=OLYMPUS_CAPABILITY_RELEASE,
         actor=actor,
-        operation_id=(
-            f"{receipt['operation_id']}:verify_receipt_replay:"
-            f"r{int(row['record_revision'])}"
-        ),
+        operation_id=str(receipt["operation_id"]),
         principal=olympus_auth,
-        expected_status=str(row["status"]),
+        expected_status="blocked",
         board_id=_connection_board_identity(conn),
     )
     context = authorization["context"]
     exact_identity = (
         authorization["request"]["principal"] == receipt["principal"]
         and authorization["request"]["actor"] == receipt["actor"]
+        and authorization["request"]["request_id"] == receipt["request_id"]
         and context["authority"]["authority_id"] == receipt["authority_id"]
         and context["authority"]["revision"] == receipt["authority_revision"]
         and context["authority"]["source"] == receipt["authority_source"]
@@ -8561,6 +8776,15 @@ def release_olympus_task(
                 "created_at": created_at,
             }
             encoded_receipt, receipt_sha256 = _canonical_json_record(receipt)
+            proof = {
+                "schema_version": RELEASE_AUTHORITY_PROOF_SCHEMA,
+                "operation_id": operation_id,
+                "task_id": task_id,
+                "subject_revision": subject_revision,
+                "request": authorization["request"],
+                "verification": authorization["verification"],
+            }
+            encoded_proof, proof_sha256 = _canonical_json_record(proof)
             _bind_issued_permit_write(
                 conn,
                 task_id,
@@ -8574,6 +8798,8 @@ def release_olympus_task(
                     "request_id": receipt["request_id"],
                     "receipt": encoded_receipt,
                     "receipt_sha256": receipt_sha256,
+                    "proof": encoded_proof,
+                    "proof_sha256": proof_sha256,
                     "created_at": created_at,
                 },
             )
@@ -8586,6 +8812,15 @@ def release_olympus_task(
                     operation_id, task_id, subject_revision, new_revision,
                     receipt["verification_id"], receipt["request_id"],
                     encoded_receipt, receipt_sha256, created_at,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO kanban_olympus_release_authority_proofs "
+                "(operation_id,task_id,subject_revision,proof,proof_sha256,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (
+                    operation_id, task_id, subject_revision,
+                    encoded_proof, proof_sha256, created_at,
                 ),
             )
             return receipt
