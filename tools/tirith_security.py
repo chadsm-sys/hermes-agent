@@ -10,8 +10,9 @@ JSON stdout enriches findings/summary but never overrides the verdict.
 Operational failures (spawn error, timeout, unknown exit code) respect
 the fail_open config setting. Programming errors propagate.
 
-Auto-install: if tirith is not found on PATH or at the configured path,
-it is automatically downloaded from GitHub releases to $HERMES_HOME/bin/tirith.
+Optional auto-install: if explicitly enabled and tirith is not found on PATH or
+at the configured path, it is downloaded from GitHub releases to
+$HERMES_HOME/bin/tirith. Automatic network installation is disabled by default.
 The download always verifies SHA-256 checksums.  When cosign is available on
 PATH, provenance verification (GitHub Actions workflow signature) is also
 performed.  If cosign is not installed, the download proceeds with SHA-256
@@ -32,6 +33,8 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 from hermes_constants import get_hermes_home
@@ -43,6 +46,24 @@ _REPO = "sheeki03/tirith"
 # Cosign provenance verification — pinned to the specific release workflow
 _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/release\\.yml@refs/tags/v"
 _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
+
+# Auto-install supply-chain pin. Upgrades require a reviewed commit updating
+# the exact version, release asset URLs, and SHA-256 values together.
+_TIRITH_VERSION = "0.3.3"
+_TIRITH_RELEASE_REPOSITORY_ID = "1147679251"
+_TIRITH_RELEASE_BASE = (
+    f"https://github.com/{_REPO}/releases/download/v{_TIRITH_VERSION}"
+)
+_TIRITH_PINNED_ASSETS = {
+    "aarch64-apple-darwin":
+        "720ed4637d16fed908c2d268fd1da854632a15d59ce74c3d78903c5a92ccbc1c",
+    "x86_64-apple-darwin":
+        "e100c3ac66f6a73e1ea0b24ae969f7059b4618f4917a21e9358d9f85b08cb67f",
+    "x86_64-unknown-linux-gnu":
+        "3a9fb4840cfcc06df2e95b4dab8669ea0d0a324c470104d178e44213c8b3fb62",
+    "aarch64-unknown-linux-gnu":
+        "38bf56136206bf100323285c5dd098fb7150eeaad2d08445451567b53fd76ef8",
+}
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -72,6 +93,7 @@ def _load_security_config() -> dict:
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
+        "tirith_auto_install": False,
     }
     try:
         from hermes_cli.config import load_config
@@ -84,6 +106,9 @@ def _load_security_config() -> dict:
         "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", defaults["tirith_path"])),
         "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", defaults["tirith_timeout"])),
         "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", defaults["tirith_fail_open"])),
+        # Network installation is a non-secret operator policy, so it is
+        # configuration-only rather than environment-controlled.
+        "tirith_auto_install": bool(cfg.get("tirith_auto_install", defaults["tirith_auto_install"])),
     }
 
 
@@ -96,6 +121,35 @@ def _load_security_config() -> dict:
 _resolved_path: str | None | bool = None
 _INSTALL_FAILED = False  # sentinel: distinct from "not yet tried"
 _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_FAILED
+
+# Circuit breaker: after _CRASH_LIMIT consecutive spawn/execution failures,
+# disable tirith for the rest of the process to prevent agent hangs (#41400).
+# Reset on successful execution (see _record_tirith_crash / check_command_security).
+#
+# Thread safety: _crash_count and _circuit_open are module-level globals
+# mutated without a lock. check_command_security can be called from
+# concurrent agent threads (gateway multi-session). The race is benign —
+# at worst two threads both increment past _CRASH_LIMIT and both set
+# _circuit_open = True, opening the breaker one call early. No data
+# corruption or security bypass is possible. This intentionally matches
+# the lock-free style of error counters in mcp_tool.py rather than the
+# locked _warn_once pattern, because the worst case is harmless.
+_CRASH_LIMIT = 3
+_crash_count: int = 0
+_circuit_open: bool = False
+
+
+def _record_tirith_crash() -> None:
+    """Increment the crash counter and open the circuit breaker if needed."""
+    global _crash_count, _circuit_open
+    _crash_count += 1
+    if _crash_count >= _CRASH_LIMIT:
+        _circuit_open = True
+        logger.warning(
+            "tirith circuit breaker opened after %d consecutive failures; "
+            "disabling for the rest of the process",
+            _crash_count,
+        )
 
 # Background install thread coordination
 _install_lock = threading.Lock()
@@ -251,13 +305,73 @@ def is_platform_supported() -> bool:
     return _detect_target() is not None
 
 
-def _download_file(url: str, dest: str, timeout: int = 10):
-    """Download a URL to a local file."""
+def _pinned_asset_for_target(target: str) -> dict | None:
+    """Return immutable release metadata for a supported target."""
+    sha256 = _TIRITH_PINNED_ASSETS.get(target)
+    if sha256 is None:
+        return None
+    name = f"tirith-{target}.tar.gz"
+    return {
+        "version": _TIRITH_VERSION,
+        "name": name,
+        "url": f"{_TIRITH_RELEASE_BASE}/{name}",
+        "sha256": sha256,
+    }
+
+
+class _PinnedReleaseRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow only GitHub's asset-host redirect for the pinned repository."""
+
+    def __init__(self, expected_asset: str):
+        super().__init__()
+        self.expected_asset = expected_asset
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        query = urllib.parse.parse_qs(parsed.query)
+        dispositions = query.get("response-content-disposition", [])
+        dispositions += query.get("rscd", [])
+        filenames = {
+            part.split("=", 1)[1].strip().strip('"')
+            for disposition in dispositions
+            for part in disposition.split(";")
+            if part.strip().lower().startswith("filename=")
+        }
+        expected_prefix = (
+            f"/github-production-release-asset/{_TIRITH_RELEASE_REPOSITORY_ID}/"
+        )
+        valid = (
+            req.full_url.startswith(f"{_TIRITH_RELEASE_BASE}/")
+            and parsed.scheme == "https"
+            and parsed.hostname == "release-assets.githubusercontent.com"
+            and parsed.path.startswith(expected_prefix)
+            and filenames == {self.expected_asset}
+        )
+        if not valid:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "unexpected redirect for pinned Tirith asset",
+                headers, fp,
+            )
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and parsed.hostname != urllib.parse.urlparse(req.full_url).hostname:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _download_file(url: str, dest: str, timeout: int = 10,
+                   expected_asset: str | None = None):
+    """Download one exact pinned release asset, rejecting redirect drift."""
+    if not url.startswith(f"{_TIRITH_RELEASE_BASE}/") or "/releases/latest/" in url:
+        raise ValueError("Tirith download must use the immutable pinned Tirith release")
+    asset = expected_asset or os.path.basename(urllib.parse.urlparse(url).path)
+    if url != f"{_TIRITH_RELEASE_BASE}/{asset}":
+        raise ValueError("Tirith download URL does not match the pinned release asset")
     req = urllib.request.Request(url)
     token = os.getenv("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"token {token}")
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+    opener = urllib.request.build_opener(_PinnedReleaseRedirectHandler(asset))
+    with opener.open(req, timeout=timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
 
 
@@ -327,6 +441,33 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
     return True
 
 
+def _verify_pinned_checksum(archive_path: str, expected_sha256: str) -> bool:
+    """Verify an archive against the SHA-256 committed with the release pin."""
+    sha = hashlib.sha256()
+    try:
+        with open(archive_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha.update(chunk)
+    except OSError:
+        return False
+    return sha.hexdigest() == expected_sha256.lower()
+
+
+def _verify_tirith_version(binary_path: str, expected_version: str) -> bool:
+    """Fail closed unless the verified artifact reports the pinned version."""
+    try:
+        result = subprocess.run(
+            [binary_path, "--version"], capture_output=True, text=True,
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    return result.returncode == 0 and output in {
+        f"tirith {expected_version}", f"tirith v{expected_version}",
+    }
+
+
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
     """Extract the tirith binary from a release archive into dest_dir."""
     for member in tar.getmembers():
@@ -364,26 +505,33 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
     log = logger.warning if log_failures else logger.debug
 
     target = _detect_target()
-    if not target:
+    asset = _pinned_asset_for_target(target) if target else None
+    if asset is None:
         logger.info("tirith auto-install: unsupported platform %s/%s",
-                     platform.system(), platform.machine())
+                    platform.system(), platform.machine())
         return None, "unsupported_platform"
 
-    archive_name = f"tirith-{target}.tar.gz"
-    base_url = f"https://github.com/{_REPO}/releases/latest/download"
+    archive_name = asset["name"]
+    base_url = _TIRITH_RELEASE_BASE
 
-    tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
+    except OSError as exc:
+        log("tirith install failed: cannot create temp dir: %s", exc)
+        return None, "no_space"
     try:
         archive_path = os.path.join(tmpdir, archive_name)
         checksums_path = os.path.join(tmpdir, "checksums.txt")
         sig_path = os.path.join(tmpdir, "checksums.txt.sig")
         cert_path = os.path.join(tmpdir, "checksums.txt.pem")
 
-        logger.info("tirith not found — downloading latest release for %s...", target)
+        logger.info("tirith not found — downloading pinned v%s release for %s...",
+                    asset["version"], target)
 
         try:
-            _download_file(f"{base_url}/{archive_name}", archive_path)
-            _download_file(f"{base_url}/checksums.txt", checksums_path)
+            _download_file(asset["url"], archive_path, expected_asset=archive_name)
+            _download_file(f"{base_url}/checksums.txt", checksums_path,
+                           expected_asset="checksums.txt")
         except Exception as exc:
             log("tirith download failed: %s", exc)
             return None, "download_failed"
@@ -396,8 +544,10 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         cosign_verified = False
         if shutil.which("cosign"):
             try:
-                _download_file(f"{base_url}/checksums.txt.sig", sig_path)
-                _download_file(f"{base_url}/checksums.txt.pem", cert_path)
+                _download_file(f"{base_url}/checksums.txt.sig", sig_path,
+                               expected_asset="checksums.txt.sig")
+                _download_file(f"{base_url}/checksums.txt.pem", cert_path,
+                               expected_asset="checksums.txt.pem")
             except Exception as exc:
                 logger.info("cosign artifacts unavailable (%s), proceeding with SHA-256 only", exc)
             else:
@@ -417,13 +567,19 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             logger.info("cosign not on PATH — installing tirith with SHA-256 verification only "
                         "(install cosign for full supply chain verification)")
 
-        if not _verify_checksum(archive_path, checksums_path, archive_name):
+        if not _verify_pinned_checksum(archive_path, asset["sha256"]):
+            log("tirith pinned archive checksum verification failed")
             return None, "checksum_failed"
 
         with tarfile.open(archive_path, "r:gz") as tar:
             src, reason = _extract_tirith_binary(tar, tmpdir, log)
             if src is None:
                 return None, reason
+
+        os.chmod(src, os.stat(src).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        if not _verify_tirith_version(src, asset["version"]):
+            log("tirith install aborted: expected pinned version %s", asset["version"])
+            return None, "version_mismatch"
 
         dest = os.path.join(_hermes_bin_dir(), "tirith")
         try:
@@ -456,7 +612,11 @@ def _is_explicit_path(configured_path: str) -> bool:
     return configured_path != "tirith"
 
 
-def _resolve_tirith_path(configured_path: str) -> str:
+def _resolve_tirith_path(
+    configured_path: str,
+    *,
+    allow_auto_install: bool = False,
+) -> str:
     """Resolve the tirith binary path, auto-installing if necessary.
 
     If the user explicitly set a path (anything other than the bare "tirith"
@@ -466,7 +626,8 @@ def _resolve_tirith_path(configured_path: str) -> str:
     For the default "tirith":
     1. PATH lookup via shutil.which
     2. $HERMES_HOME/bin/tirith (previously auto-installed)
-    3. Auto-install from GitHub releases → $HERMES_HOME/bin/tirith
+    3. If explicitly allowed, auto-install from GitHub releases
+       → $HERMES_HOME/bin/tirith
 
     Failed installs are cached for the process lifetime (and persisted to
     disk for 24h) to avoid repeated network attempts.
@@ -522,11 +683,23 @@ def _resolve_tirith_path(configured_path: str) -> str:
         _clear_install_failed()
         return hermes_bin
 
+    if not allow_auto_install:
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "auto_install_disabled"
+        return expanded
+
     # Local checks failed.  If a previous install attempt already failed,
     # skip the network retry — UNLESS the failure was "cosign_missing" and
     # cosign is now available (retryable cause resolved in-process).
     if install_failed:
-        if _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
+        if _install_failure_reason == "auto_install_disabled":
+            # The operator may have enabled auto-install after the first local
+            # lookup. Honor that explicit transition without requiring a
+            # process restart.
+            _resolved_path = None
+            _install_failure_reason = ""
+            install_failed = False
+        elif _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
             # Retryable cause resolved — clear sentinel and fall through to retry
             _resolved_path = None
             _install_failure_reason = ""
@@ -656,9 +829,19 @@ def ensure_installed(*, log_failures: bool = True):
         _clear_install_failed()
         return hermes_bin
 
+    # Never initiate a network download unless the operator explicitly opted
+    # in. Existing PATH/configured binaries continue to work unchanged.
+    if not cfg.get("tirith_auto_install", False):
+        _resolved_path = _INSTALL_FAILED
+        _install_failure_reason = "auto_install_disabled"
+        return None
+
     # If previously failed in-memory, check if the cause is now resolved
     if _resolved_path is _INSTALL_FAILED:
-        if _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
+        if _install_failure_reason == "auto_install_disabled":
+            _resolved_path = None
+            _install_failure_reason = ""
+        elif _install_failure_reason == "cosign_missing" and shutil.which("cosign"):
             _resolved_path = None
             _install_failure_reason = ""
             _clear_install_failed()
@@ -704,10 +887,20 @@ def check_command_security(command: str) -> dict:
     Returns:
         {"action": "allow"|"warn"|"block", "findings": [...], "summary": str}
     """
+    global _crash_count, _circuit_open
+
     cfg = _load_security_config()
 
     if not cfg["tirith_enabled"]:
         return {"action": "allow", "findings": [], "summary": ""}
+
+    # Circuit breaker: if tirith has crashed _CRASH_LIMIT times in a row,
+    # stop trying for the rest of the process.  Without this, a corrupted
+    # or missing binary causes every tool call to hit the same spawn failure
+    # → fail-open → agent retry loop, hanging the user for 20+ minutes
+    # (issue #41400).
+    if _circuit_open:
+        return {"action": "allow", "findings": [], "summary": "tirith disabled (circuit breaker)"}
 
     # Unsupported platform (Windows etc.) — tirith has no binary here and
     # never will. Skip the resolver entirely so we don't even try to spawn.
@@ -715,7 +908,10 @@ def check_command_security(command: str) -> dict:
     if not is_platform_supported():
         return {"action": "allow", "findings": [], "summary": ""}
 
-    tirith_path = _resolve_tirith_path(cfg["tirith_path"])
+    tirith_path = _resolve_tirith_path(
+        cfg["tirith_path"],
+        allow_auto_install=cfg.get("tirith_auto_install", False),
+    )
     timeout = cfg["tirith_timeout"]
     fail_open = cfg["tirith_fail_open"]
 
@@ -746,6 +942,7 @@ def check_command_security(command: str) -> dict:
         # install marked failed for the day).
         spawn_key = f"tirith_spawn_failed:{type(exc).__name__}:{getattr(exc, 'errno', '')}"
         _warn_once(spawn_key, "tirith spawn failed: %s", exc)
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith unavailable: {exc}"}
         return {"action": "block", "findings": [], "summary": f"tirith spawn failed (fail-closed): {exc}"}
@@ -755,6 +952,7 @@ def check_command_security(command: str) -> dict:
             "tirith timed out after %ds",
             timeout,
         )
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith timed out ({timeout}s)"}
         return {"action": "block", "findings": [], "summary": "tirith timed out (fail-closed)"}
@@ -763,13 +961,17 @@ def check_command_security(command: str) -> dict:
     exit_code = result.returncode
     if exit_code == 0:
         action = "allow"
+        # Successful execution — reset circuit breaker
+        _crash_count = 0
     elif exit_code == 1:
         action = "block"
     elif exit_code == 2:
         action = "warn"
     else:
-        # Unknown exit code — respect fail_open
+        # Unknown exit code (includes signal-killed processes like -11/SIGSEGV)
+        # — respect fail_open
         logger.warning("tirith returned unexpected exit code %d", exit_code)
+        _record_tirith_crash()
         if fail_open:
             return {"action": "allow", "findings": [], "summary": f"tirith exit code {exit_code} (fail-open)"}
         return {"action": "block", "findings": [], "summary": f"tirith exit code {exit_code} (fail-closed)"}

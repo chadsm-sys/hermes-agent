@@ -272,8 +272,9 @@ whatsapp:
   unauthorized_dm_behavior: ignore
 ```
 
-- `pair` is the default. Unauthorized DMs get a pairing code reply.
+- `pair` is the default for chat-style DM platforms. Unauthorized DMs get a pairing code reply.
 - `ignore` silently drops unauthorized DMs.
+- Email defaults to `ignore` unless `platforms.email.unauthorized_dm_behavior: pair` is set, because inboxes can contain unrelated unread mail.
 - Platform sections override the global default, so you can keep pairing on Telegram while keeping WhatsApp silent.
 
 **Security features** (based on OWASP + NIST SP 800-63-4 guidance):
@@ -544,7 +545,7 @@ Hermes integrates [tirith](https://github.com/sheeki03/tirith) for content-level
 - Pipe-to-interpreter patterns (`curl | bash`, `wget | sh`)
 - Terminal injection attacks
 
-Tirith auto-installs from GitHub releases on first use with SHA-256 checksum verification (and cosign provenance verification if cosign is available).
+Hermes uses an existing Tirith binary from `tirith_path` or `PATH`. Network installation from GitHub releases is disabled by default; operators may explicitly enable it with `tirith_auto_install`. Downloads use SHA-256 checksum verification (and cosign provenance verification if cosign is available).
 
 ```yaml
 # In ~/.hermes/config.yaml
@@ -553,11 +554,23 @@ security:
   tirith_path: "tirith"      # Path to tirith binary (default: PATH lookup)
   tirith_timeout: 5          # Subprocess timeout in seconds
   tirith_fail_open: true     # Allow execution when tirith is unavailable (default: true)
+  tirith_auto_install: false # Explicitly allow GitHub release download (default: false)
 ```
 
 When `tirith_fail_open` is `true` (default), commands proceed if tirith is not installed or times out. Set to `false` in high-security environments to block commands when tirith is unavailable.
 
 Tirith ships prebuilt binaries for Linux (x86_64 / aarch64) and macOS (x86_64 / arm64). On platforms with no prebuilt binary (Windows, etc.), tirith is silently skipped — pattern-matching guards still run, and the CLI does not surface an "unavailable" banner. To use tirith on Windows, run Hermes under WSL.
+
+#### Upgrading the pinned Tirith installer release
+
+Hermes auto-install is intentionally pinned in `tools/tirith_security.py`; it never resolves `releases/latest`. A Tirith upgrade requires an explicit reviewed commit:
+
+1. Select one immutable Tirith tag and confirm all four supported assets exist: macOS `arm64`/`x86_64` and Linux `arm64`/`x86_64`.
+2. Update `_TIRITH_VERSION` and every SHA-256 in `_TIRITH_PINNED_ASSETS` from independently downloaded assets.
+3. If GitHub's repository release-asset ID changes, update `_TIRITH_RELEASE_REPOSITORY_ID` after verifying the redirect belongs to `sheeki03/tirith`.
+4. Run `uv run pytest tests/tools/test_tirith_security.py -q` and the full test suite. Review the commit diff before merge.
+
+Do not add a `latest` fallback. Missing assets, unsupported targets, checksum/version mismatches, and unexpected redirects must continue to fail closed.
 
 Tirith's verdict integrates with the approval flow: safe commands pass through, while both suspicious and blocked commands trigger user approval with the full tirith findings (severity, title, description, safer alternatives). Users can approve or deny — the default choice is deny to keep unattended scenarios secure.
 

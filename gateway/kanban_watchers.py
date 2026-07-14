@@ -16,11 +16,97 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
+
+from agent.i18n import t
 
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
+
+
+def _resolve_auto_decompose_settings(
+    load_config: Callable[[], Any],
+) -> "tuple[bool, int]":
+    """Resolve the live (enabled, per_tick) auto-decompose settings.
+
+    Read fresh from config on every dispatcher tick (#49638) so that flipping
+    ``kanban.auto_decompose: false`` to STOP runaway fan-out takes effect on the
+    next tick instead of requiring a gateway restart. Auto-decompose is a
+    safety toggle — a user who sees it create and launch tasks they didn't
+    intend reaches for this flag to halt it, and a stale boot-captured value
+    silently ignoring that change is the bug reported in #49638.
+
+    Fails **safe**: if the config read raises, return ``(False, 3)`` — a
+    transient read error must never re-enable a feature the user turned off,
+    nor fall back to the burst-prone default-on behaviour. ``per_tick`` is
+    clamped to ``>= 1``.
+    """
+    try:
+        cfg = load_config()
+    except Exception:
+        return False, 3
+    kcfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    enabled = bool(kcfg.get("auto_decompose", True))
+    try:
+        per_tick = int(kcfg.get("auto_decompose_per_tick", 3) or 3)
+    except (TypeError, ValueError):
+        per_tick = 3
+    if per_tick < 1:
+        per_tick = 1
+    return enabled, per_tick
+
+
+def _acquire_singleton_lock(lock_path) -> "tuple[Optional[object], str]":
+    """Take an exclusive, non-blocking advisory lock for the sole dispatcher.
+
+    Only one gateway process machine-wide may run the embedded kanban
+    dispatcher: concurrent dispatchers double the reclaim frequency (each
+    runs its own ``release_stale_claims`` → promote → dispatch loop), double
+    claim-attempt events in the event log, and — with ``wal_autocheckpoint=0`` —
+    concurrent manual WAL checkpoints can corrupt index pages. The
+    ``dispatch_in_gateway`` config flag is the primary control; this lock is the
+    backstop that survives config drift and same-profile restart races.
+
+    Delegates to :func:`gateway.status._try_acquire_file_lock` (``fcntl`` on
+    POSIX, ``msvcrt`` on Windows) so the guard is cross-platform.
+
+    Returns ``(handle, "held")`` on success — the caller keeps the file handle
+    for the process lifetime and **must** release it via
+    :func:`_release_singleton_lock` when done. ``(None, "contended")`` when
+    another process holds the lock (caller must NOT dispatch). ``(None,
+    "unavailable")`` when locking cannot be performed (non-POSIX filesystem
+    without flock, or the status.py helpers are unimportable) — caller falls
+    back to config-only control.
+    """
+    try:
+        from gateway.status import _try_acquire_file_lock  # deferred; same package
+    except ImportError:
+        return None, "unavailable"
+    try:
+        Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+        handle = open(str(lock_path), "a+", encoding="utf-8")
+    except OSError:
+        return None, "unavailable"
+    if not _try_acquire_file_lock(handle):
+        handle.close()
+        return None, "contended"
+    return handle, "held"
+
+
+def _release_singleton_lock(handle) -> None:
+    """Release a dispatcher singleton lock acquired via :func:`_acquire_singleton_lock`."""
+    if handle is None:
+        return
+    try:
+        from gateway.status import _release_file_lock
+        _release_file_lock(handle)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
 
 
 class GatewayKanbanWatchersMixin:
@@ -76,7 +162,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
             return
 
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
+        # "status" covers dashboard drag-drop and `_set_status_direct()`
+        # writes — surface those transitions to subscribers too.
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -89,15 +177,6 @@ class GatewayKanbanWatchersMixin:
         # task is genuinely done lets the cursor (advanced atomically by
         # claim_unseen_events_for_sub) handle dedup, and any retry-loop
         # event reaches the user.
-        # Per-subscription send-failure counter. Adapter.send raising
-        # means the chat is dead (deleted, bot kicked, etc.) — after N
-        # consecutive send failures the sub is dropped so we don't spin
-        # against a dead chat every 5 seconds forever.
-        MAX_SEND_FAILURES = 3
-        sub_fail_counts: dict[tuple, int] = getattr(
-            self, "_kanban_sub_fail_counts", {}
-        )
-        self._kanban_sub_fail_counts = sub_fail_counts
         notifier_profile = getattr(self, "_kanban_notifier_profile", None)
         if not notifier_profile:
             notifier_profile = self._active_profile_name()
@@ -166,11 +245,13 @@ class GatewayKanbanWatchersMixin:
                             for sub in subs:
                                 owner_profile = sub.get("notifier_profile") or None
                                 if owner_profile and owner_profile != notifier_profile:
-                                    logger.debug(
-                                        "kanban notifier: subscription for %s owned by profile %s; current profile %s skipping",
-                                        sub.get("task_id"), owner_profile, notifier_profile,
-                                    )
-                                    continue
+                                    _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
+                                    if not _owner_adapters:
+                                        logger.debug(
+                                            "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
+                                            sub.get("task_id"), owner_profile, notifier_profile,
+                                        )
+                                        continue
                                 platform = (sub.get("platform") or "").lower()
                                 if platform not in active_platforms:
                                     logger.debug(
@@ -178,7 +259,7 @@ class GatewayKanbanWatchersMixin:
                                         sub.get("task_id"), platform or "<missing>",
                                     )
                                     continue
-                                old_cursor, cursor, events = _kb.claim_unseen_events_for_sub(
+                                cursor, events = _kb.unseen_events_for_sub(
                                     conn,
                                     task_id=sub["task_id"],
                                     platform=sub["platform"],
@@ -188,6 +269,7 @@ class GatewayKanbanWatchersMixin:
                                 )
                                 if not events:
                                     continue
+                                old_cursor = int(sub.get("last_event_id") or 0)
                                 task = _kb.get_task(conn, sub["task_id"])
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
@@ -214,27 +296,34 @@ class GatewayKanbanWatchersMixin:
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
-                        # Unknown platform string; skip and advance cursor so
-                        # we don't replay forever.
-                        await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
-                        )
-                        continue
-                    adapter = self.adapters.get(plat)
-                    if adapter is None:
-                        logger.debug(
-                            "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
+                        # There is no canonical delivery identity for an
+                        # unknown adapter. Leave the cursor unchanged and fail
+                        # closed instead of fabricating a successful effect.
+                        logger.warning(
+                            "kanban notifier: unknown platform %r for %s; "
+                            "delivery suppressed",
                             platform_str, sub["task_id"],
                         )
-                        await asyncio.to_thread(
-                            self._kanban_rewind,
-                            sub,
-                            d["cursor"],
-                            d.get("old_cursor", 0),
-                            board_slug,
+                        continue
+                    sub_profile = sub.get("notifier_profile") or ""
+                    # Route via the SAME chokepoint the authorization path uses
+                    # (gateway/authz_mixin.py::_authorization_adapter): a stamped
+                    # profile with its own adapter-registry entry must be served
+                    # by THAT profile's same-platform adapter and must NOT silently
+                    # fall back to the default profile's adapter — otherwise a
+                    # secondary profile's task notification is delivered by the
+                    # wrong bot (the cross-profile mis-delivery this whole change
+                    # exists to fix). The helper returns None only when the profile
+                    # (or default) genuinely has no adapter for the platform.
+                    adapter = self._authorization_adapter(plat, sub_profile or None)
+                    if adapter is None:
+                        logger.debug(
+                            "kanban notifier: adapter %s disconnected before delivery for %s; cursor unchanged",
+                            platform_str, sub["task_id"],
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
+                    board_tag = f"[{board_slug}] " if board_slug else ""
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -261,25 +350,25 @@ class GatewayKanbanWatchersMixin:
                                 r = lines[0][:160] if lines else task.result[:160]
                                 handoff = f"\n{r}"
                             msg = (
-                                f"✔ {tag}Kanban {sub['task_id']} done"
+                                f"✔ {board_tag}{tag}Kanban {sub['task_id']} done"
                                 f" — {title}{handoff}"
                             )
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
                                 reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
+                            msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
                                 err = f"\n{str(ev.payload['error'])[:200]}"
                             msg = (
-                                f"✖ {tag}Kanban {sub['task_id']} gave up "
+                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} gave up "
                                 f"after repeated spawn failures{err}"
                             )
                         elif kind == "crashed":
                             msg = (
-                                f"✖ {tag}Kanban {sub['task_id']} worker crashed "
+                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} worker crashed "
                                 f"(pid gone); dispatcher will retry"
                             )
                         elif kind == "timed_out":
@@ -287,87 +376,163 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("limit_seconds"):
                                 limit = int(ev.payload["limit_seconds"])
                             msg = (
-                                f"⏱ {tag}Kanban {sub['task_id']} timed out "
+                                f"⏱ {board_tag}{tag}Kanban {sub['task_id']} timed out "
                                 f"(max_runtime={limit}s); will retry"
                             )
+                        elif kind == "status":
+                            new_status = ""
+                            if ev.payload and ev.payload.get("status"):
+                                new_status = str(ev.payload["status"])
+                            msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
                         else:
+                            # archived / unblocked are claimed by TERMINAL_KINDS
+                            # (so the cursor advances past them and they can't
+                            # wedge a later completed/blocked event behind an
+                            # unclaimed row) but are intentionally SILENT: an
+                            # archive needs no user ping, and unblocked is an
+                            # internal transition. They are also excluded from
+                            # _WAKE_KINDS below, so they never wake the creator.
                             continue
                         metadata: dict[str, Any] = {}
                         if sub.get("thread_id"):
                             metadata["thread_id"] = sub["thread_id"]
-                        sub_key = (
-                            sub["task_id"], sub["platform"],
-                            sub["chat_id"], sub.get("thread_id") or "",
+                        effect_key = (
+                            f"notify:{board_slug}:{sub['task_id']}:"
+                            f"{sub['platform']}:{sub['chat_id']}:"
+                            f"{sub.get('thread_id') or ''}:{ev.id}:text"
                         )
                         try:
-                            await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
+                            effect_id, effect_state = await asyncio.to_thread(
+                                self._kanban_prepare_notification_effect,
+                                sub,
+                                event_id=int(ev.id),
+                                effect_key=effect_key,
+                                message=msg,
+                                board=board_slug,
                             )
-                            logger.debug(
-                                "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
-                            )
-                            # After delivering the text notification, surface
-                            # any artifact paths the worker referenced in
-                            # ``kanban_complete(summary=..., artifacts=[...])``
-                            # (or the legacy ``result`` field) as native
-                            # uploads. ``extract_local_files`` finds bare
-                            # absolute paths in the summary;
-                            # ``send_document`` / ``send_image_file`` uploads
-                            # them. Only fires on the ``completed`` event so
-                            # we never spam attachments on retries.
-                            if kind == "completed":
-                                try:
-                                    await self._deliver_kanban_artifacts(
-                                        adapter=adapter,
-                                        chat_id=sub["chat_id"],
-                                        metadata=metadata,
-                                        event_payload=getattr(ev, "payload", None),
-                                        task=task,
-                                    )
-                                except Exception as art_exc:
-                                    logger.debug(
-                                        "kanban notifier: artifact delivery for %s failed: %s",
-                                        sub["task_id"], art_exc,
-                                    )
-                            # Reset the failure counter on success.
-                            sub_fail_counts.pop(sub_key, None)
                         except Exception as exc:
-                            fails = sub_fail_counts.get(sub_key, 0) + 1
-                            sub_fail_counts[sub_key] = fails
                             logger.warning(
-                                "kanban notifier: send failed for %s on %s "
-                                "(attempt %d/%d): %s",
-                                sub["task_id"], platform_str, fails,
-                                MAX_SEND_FAILURES, exc,
+                                "kanban notifier: authority/effect reservation "
+                                "failed closed for %s event %s: %s",
+                                sub["task_id"], ev.id, exc,
                             )
-                            if fails >= MAX_SEND_FAILURES:
-                                logger.warning(
-                                    "kanban notifier: dropping subscription "
-                                    "%s on %s after %d consecutive send failures",
-                                    sub["task_id"], platform_str, fails,
-                                )
-                                await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
-                                sub_fail_counts.pop(sub_key, None)
-                            else:
-                                await asyncio.to_thread(
-                                    self._kanban_rewind,
-                                    sub,
-                                    d["cursor"],
-                                    d.get("old_cursor", 0),
-                                    board_slug,
-                                )
-                            # Rewind the pre-send claim on transient failure so
-                            # a later tick can retry. After too many failures,
-                            # dropping the subscription is the terminal action.
                             break
-                    else:
-                        # All events delivered; advance cursor. The cursor
-                        # is the dedup mechanism — it prevents re-delivery
-                        # of the same event on subsequent ticks.
+                        if effect_state not in {"applying", "applied"}:
+                            if effect_state in {"unknown", "not_sent"}:
+                                await asyncio.to_thread(
+                                    self._kanban_advance,
+                                    sub,
+                                    int(ev.id),
+                                    board_slug,
+                                    effect_key=effect_key,
+                                    effect_state=effect_state,
+                                )
+                                continue
+                            logger.warning(
+                                "kanban notifier: effect %s remained in unsafe "
+                                "state %s; send suppressed",
+                                effect_key, effect_state,
+                            )
+                            break
+                        if effect_state == "applying":
+                            try:
+                                await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
+                                )
+                                logger.debug(
+                                    "kanban notifier: delivered %s event for %s to %s/%s on board %s",
+                                    kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "kanban notifier: delivery outcome ambiguous for "
+                                    "%s on %s; automatic retry suppressed: %s",
+                                    sub["task_id"], platform_str, exc,
+                                )
+                                try:
+                                    effect_state = await asyncio.to_thread(
+                                        self._kanban_finish_notification_effect,
+                                        sub,
+                                        event_id=int(ev.id),
+                                        effect_id=effect_id,
+                                        effect_key=effect_key,
+                                        success=False,
+                                        error=str(exc),
+                                        board=board_slug,
+                                    )
+                                    await asyncio.to_thread(
+                                        self._kanban_advance,
+                                        sub,
+                                        int(ev.id),
+                                        board_slug,
+                                        effect_key=effect_key,
+                                        effect_state=effect_state,
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "kanban notifier: failed to settle ambiguous effect %s",
+                                        effect_key,
+                                    )
+                                break
+                            effect_state = await asyncio.to_thread(
+                                self._kanban_finish_notification_effect,
+                                sub,
+                                event_id=int(ev.id),
+                                effect_id=effect_id,
+                                effect_key=effect_key,
+                                success=True,
+                                error=None,
+                                board=board_slug,
+                            )
+                        if effect_state != "applied":
+                            logger.warning(
+                                "kanban notifier: text effect %s did not settle applied; "
+                                "cursor held at event %s",
+                                effect_key,
+                                ev.id,
+                            )
+                            break
+                        cursor_effect_key = effect_key
+                        cursor_effect_state = effect_state
+                        if kind == "completed":
+                            try:
+                                artifact_effect = await self._deliver_kanban_artifacts(
+                                    sub=sub,
+                                    event_id=int(ev.id),
+                                    adapter=adapter,
+                                    chat_id=sub["chat_id"],
+                                    metadata=metadata,
+                                    event_payload=getattr(ev, "payload", None),
+                                    task=task,
+                                    board=board_slug,
+                                )
+                            except Exception as art_exc:
+                                logger.warning(
+                                    "kanban notifier: artifact effect failed closed for "
+                                    "%s event %s: %s",
+                                    sub["task_id"], ev.id, art_exc,
+                                )
+                                break
+                            if artifact_effect is not None:
+                                cursor_effect_key, cursor_effect_state = artifact_effect
+                                if cursor_effect_state != "applied":
+                                    logger.warning(
+                                        "kanban notifier: artifact effect %s remained %s; "
+                                        "cursor held at event %s",
+                                        cursor_effect_key, cursor_effect_state, ev.id,
+                                    )
+                                    break
                         await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
+                            self._kanban_advance,
+                            sub,
+                            int(ev.id),
+                            board_slug,
+                            effect_key=cursor_effect_key,
+                            effect_state=cursor_effect_state,
                         )
+                    else:
+                        # Every event was independently journaled, settled,
+                        # and cursor-advanced after the side effect.
                         # Unsubscribe only when the task has reached a truly
                         # final status (done / archived). For blocked /
                         # gave_up / crashed / timed_out the subscription is
@@ -376,9 +541,86 @@ class GatewayKanbanWatchersMixin:
                         # same state. See the longer comment on TERMINAL_KINDS
                         # above for the failure mode this prevents.
                         task_terminal = task and task.status in {"done", "archived"}
+                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
+                        _wake_kinds = {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
+                        if _wake_kinds:
+                            try:
+                                _session_key = getattr(task, "session_id", None) or ""
+                                if _session_key:
+                                    _title = (task.title if task else sub["task_id"])[:120]
+                                    _assignee = task.assignee if task else ""
+                                    _parts = []
+                                    if "completed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.completed"))
+                                    if "gave_up" in _wake_kinds: _parts.append(t("gateway.kanban.wake.gave_up"))
+                                    if "crashed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.crashed"))
+                                    if "timed_out" in _wake_kinds: _parts.append(t("gateway.kanban.wake.timed_out"))
+                                    if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
+                                    _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
+                                    _synth = t(
+                                        "gateway.kanban.wake.message",
+                                        task_id=sub["task_id"],
+                                        status=_status,
+                                        title=_title,
+                                        assignee=_assignee,
+                                        board=board_slug,
+                                    )
+                                    from gateway.session import SessionSource
+                                    from gateway.platforms.base import MessageEvent, MessageType
+                                    # KNOWN LIMITATION (tracked follow-up): the
+                                    # subscription row does not persist the
+                                    # creator's chat_type, and it is not carried
+                                    # on the session-context bridge, so we cannot
+                                    # faithfully reconstruct the creator's real
+                                    # session key here. build_session_key() keys
+                                    # DMs (":dm:<chat_id>") on a wholly different
+                                    # shape from group/thread, so any hardcoded
+                                    # value mis-routes some creators. "group" is
+                                    # the least-surprising default for the
+                                    # dashboard/group flows this wake primarily
+                                    # serves; DM-originated creators are handled
+                                    # by the follow-up that stamps + persists
+                                    # chat_type end-to-end. handle_message()
+                                    # get_or_create_session's the target, so a
+                                    # mismatch degrades to "wake lands in a fresh
+                                    # group session" — never an exception.
+                                    _source = SessionSource(
+                                        platform=plat,
+                                        chat_id=sub["chat_id"],
+                                        chat_type="group",
+                                        thread_id=sub.get("thread_id") or None,
+                                        user_id=sub.get("user_id"),
+                                        profile=sub_profile or None,
+                                    )
+                                    _synth_event = MessageEvent(
+                                        text=_synth,
+                                        message_type=MessageType.TEXT,
+                                        source=_source,
+                                        internal=True,
+                                    )
+                                    await adapter.handle_message(_synth_event)
+                                    logger.info(
+                                        "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
+                                        sub["task_id"], platform_str, sub["chat_id"], sub_profile or "default", _wake_kinds,
+                                    )
+                            except Exception as _wk_err:
+                                # Best-effort: the notification itself already
+                                # delivered and the cursor has advanced, so a
+                                # broken wake path must not wedge the tick — but
+                                # log at WARNING with a traceback rather than
+                                # DEBUG so a persistently-failing wake is visible
+                                # in normal logs instead of silently no-op'ing.
+                                logger.warning(
+                                    "kanban notifier: wakeup injection failed for %s: %s",
+                                    sub["task_id"], _wk_err, exc_info=True,
+                                )
                         if task_terminal:
                             await asyncio.to_thread(
-                                self._kanban_unsub, sub, board_slug,
+                                self._kanban_unsub,
+                                sub,
+                                board_slug,
+                                source_event_id=int(ev.id),
+                                effect_key=effect_key,
+                                effect_state=effect_state,
                             )
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
@@ -388,8 +630,149 @@ class GatewayKanbanWatchersMixin:
                     return
                 await asyncio.sleep(1)
 
+    def _kanban_notifier_auth(
+        self,
+        conn,
+        sub: dict,
+        *,
+        source_event_id: int,
+        effect_key: str,
+        effect_state: str,
+        action: str,
+    ):
+        """Derive a notifier principal only from live gateway/DB state."""
+        from hermes_cli import kanban_db as _kb
+
+        task = _kb.get_task(conn, sub["task_id"])
+        if task is None or task.olympus_context is None:
+            return None
+        verifier = getattr(self, "_kanban_olympus_authority_verifier", None)
+        gateway_identity = _kb.read_process_identity(os.getpid())
+        if not callable(verifier) or gateway_identity is None:
+            raise _kb.OlympusContextError(
+                "olympus_authority_verification_unavailable",
+                "canonical notifier verifier or gateway identity is unavailable",
+            )
+        return _kb.olympus_notifier_auth(
+            conn,
+            verifier=verifier,
+            task_id=sub["task_id"],
+            platform=sub["platform"],
+            chat_id=sub["chat_id"],
+            thread_id=sub.get("thread_id") or "",
+            source_event_id=int(source_event_id),
+            effect_id=effect_key,
+            effect_state=effect_state,
+            gateway_process_identity=gateway_identity,
+            action=action,
+        )
+
+    def _kanban_prepare_notification_effect(
+        self,
+        sub: dict,
+        *,
+        event_id: int,
+        effect_key: str,
+        message: Optional[str] = None,
+        effect_kind: str = "notify_text",
+        part: str = "text",
+        payload: Optional[dict[str, Any]] = None,
+        board: Optional[str] = None,
+    ) -> tuple[int, str]:
+        """Reserve/claim one durable at-most-once notification effect."""
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect(board=board)
+        try:
+            reserve_auth = self._kanban_notifier_auth(
+                conn, sub, source_event_id=event_id, effect_key=effect_key,
+                effect_state="unreserved", action="reserve_notification_effect",
+            )
+            effect_id = _kb.reserve_notification_effect(
+                conn,
+                task_id=sub["task_id"],
+                effect_kind=effect_kind,
+                operation_id=effect_key,
+                event_id=int(event_id),
+                destination_key=(
+                    f"{sub['platform']}:{sub['chat_id']}:"
+                    f"{sub.get('thread_id') or ''}"
+                ),
+                part=part,
+                payload=(payload if payload is not None else {"message": message}),
+                source_identity=(
+                    None if reserve_auth is not None else {
+                        "gateway_pid": os.getpid(),
+                        "notifier_profile": getattr(
+                            self, "_kanban_notifier_profile", None
+                        ),
+                    }
+                ),
+                olympus_auth=reserve_auth,
+            )
+            row = conn.execute(
+                "SELECT state FROM kanban_effect_journal WHERE id = ?",
+                (effect_id,),
+            ).fetchone()
+            state = str(row["state"])
+            if state == "applying":
+                recovery_auth = self._kanban_notifier_auth(
+                    conn, sub, source_event_id=event_id,
+                    effect_key=effect_key, effect_state="applying",
+                    action="finish_notification_effect",
+                )
+                state = _kb.finish_notification_effect(
+                    conn, effect_id, success=False, may_have_sent=True,
+                    error="gateway restart left delivery outcome ambiguous",
+                    olympus_auth=recovery_auth,
+                )
+            if state == "pending":
+                claim_auth = self._kanban_notifier_auth(
+                    conn, sub, source_event_id=event_id,
+                    effect_key=effect_key, effect_state="pending",
+                    action="claim_notification_effect",
+                )
+                claimed = _kb.claim_notification_effect(
+                    conn, effect_id, olympus_auth=claim_auth,
+                )
+                state = "applying" if claimed is not None else state
+            return effect_id, state
+        finally:
+            conn.close()
+
+    def _kanban_finish_notification_effect(
+        self,
+        sub: dict,
+        *,
+        event_id: int,
+        effect_id: int,
+        effect_key: str,
+        success: bool,
+        error: Optional[str],
+        board: Optional[str] = None,
+    ) -> str:
+        from hermes_cli import kanban_db as _kb
+
+        conn = _kb.connect(board=board)
+        try:
+            auth = self._kanban_notifier_auth(
+                conn, sub, source_event_id=event_id, effect_key=effect_key,
+                effect_state="applying", action="finish_notification_effect",
+            )
+            return _kb.finish_notification_effect(
+                conn,
+                effect_id,
+                success=success,
+                may_have_sent=not success,
+                error=error,
+                olympus_auth=auth,
+            )
+        finally:
+            conn.close()
+
     def _kanban_advance(
         self, sub: dict, cursor: int, board: Optional[str] = None,
+        *, effect_key: Optional[str] = None, effect_state: Optional[str] = None,
     ) -> None:
         """Sync helper: advance a subscription's cursor. Runs in to_thread.
 
@@ -399,6 +782,19 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
+            auth = None
+            task = _kb.get_task(conn, sub["task_id"])
+            if task is not None and task.olympus_context is not None:
+                if not effect_key or not effect_state:
+                    raise _kb.OlympusContextError(
+                        "olympus_notifier_effect_missing",
+                        "governed cursor advance requires a settled effect",
+                    )
+                auth = self._kanban_notifier_auth(
+                    conn, sub, source_event_id=int(cursor),
+                    effect_key=effect_key, effect_state=effect_state,
+                    action="advance_notification_cursor",
+                )
             _kb.advance_notify_cursor(
                 conn,
                 task_id=sub["task_id"],
@@ -406,20 +802,43 @@ class GatewayKanbanWatchersMixin:
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
                 new_cursor=cursor,
+                olympus_auth=auth,
             )
         finally:
             conn.close()
 
-    def _kanban_unsub(self, sub: dict, board: Optional[str] = None) -> None:
+    def _kanban_unsub(
+        self,
+        sub: dict,
+        board: Optional[str] = None,
+        *,
+        source_event_id: Optional[int] = None,
+        effect_key: Optional[str] = None,
+        effect_state: Optional[str] = None,
+    ) -> None:
         from hermes_cli import kanban_db as _kb
         conn = _kb.connect(board=board)
         try:
+            auth = None
+            task = _kb.get_task(conn, sub["task_id"])
+            if task is not None and task.olympus_context is not None:
+                if source_event_id is None or not effect_key or not effect_state:
+                    raise _kb.OlympusContextError(
+                        "olympus_notifier_effect_missing",
+                        "governed unsubscribe requires a settled effect",
+                    )
+                auth = self._kanban_notifier_auth(
+                    conn, sub, source_event_id=source_event_id,
+                    effect_key=effect_key, effect_state=effect_state,
+                    action="remove_notification_subscription",
+                )
             _kb.remove_notify_sub(
                 conn,
                 task_id=sub["task_id"],
                 platform=sub["platform"],
                 chat_id=sub["chat_id"],
                 thread_id=sub.get("thread_id") or "",
+                olympus_auth=auth,
             )
         finally:
             conn.close()
@@ -450,13 +869,16 @@ class GatewayKanbanWatchersMixin:
     async def _deliver_kanban_artifacts(
         self,
         *,
+        sub: dict,
+        event_id: int,
         adapter,
         chat_id: str,
         metadata: dict,
         event_payload: Optional[dict],
         task,
-    ) -> None:
-        """Upload artifact files referenced by a completed kanban task.
+        board: Optional[str] = None,
+    ) -> Optional[tuple[str, str]]:
+        """Journal and upload one exact artifact bundle at most once.
 
         Workers passing ``kanban_complete(artifacts=[...])`` ship absolute
         file paths through the completion event so downstream humans get
@@ -468,11 +890,13 @@ class GatewayKanbanWatchersMixin:
           2. ``event_payload['summary']`` (truncated first line)
           3. ``task.result`` (legacy fallback)
 
-        Files are deduplicated, missing files are silently skipped (the
-        path may have been mentioned for reference only), and delivery
-        errors are logged but do not break the notifier loop.
+        Files are deduplicated and missing files are skipped. The complete
+        filtered bundle has its own ``notify_artifact`` effect. Any upload
+        error settles that effect as ambiguous and propagates so the event
+        cursor cannot advance on the text effect alone.
         """
         from pathlib import Path as _Path
+        from gateway.platforms.base import BasePlatformAdapter
 
         candidates: list[str] = []
         seen: set[str] = set()
@@ -499,49 +923,61 @@ class GatewayKanbanWatchersMixin:
             # 2. Paths embedded in the payload summary.
             summary = event_payload.get("summary")
             if isinstance(summary, str) and summary:
-                paths, _ = adapter.extract_local_files(summary)
+                paths, _ = BasePlatformAdapter.extract_local_files(summary)
                 for p in paths:
                     _add(p)
 
         # 3. Legacy: paths embedded in task.result.
         if task is not None and getattr(task, "result", None):
             result_text = str(task.result)
-            paths, _ = adapter.extract_local_files(result_text)
+            paths, _ = BasePlatformAdapter.extract_local_files(result_text)
             for p in paths:
                 _add(p)
 
         if not candidates:
-            return
+            return None
 
-        from gateway.platforms.base import BasePlatformAdapter
         candidates = BasePlatformAdapter.filter_local_delivery_paths(candidates)
         if not candidates:
-            return
+            return None
 
         _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
         _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}
 
-        from urllib.parse import quote as _quote
-
-        # Partition images so they ride a single send_multiple_images call
-        # on platforms that support batch image uploads (Signal/Slack RPCs).
-        image_paths = [p for p in candidates if _Path(p).suffix.lower() in _IMAGE_EXTS]
-        other_paths = [p for p in candidates if _Path(p).suffix.lower() not in _IMAGE_EXTS]
-
-        if image_paths:
-            try:
-                batch = [(f"file://{_quote(p)}", "") for p in image_paths]
+        board_slug = board or "default"
+        effect_key = (
+            f"notify:{board_slug}:{sub['task_id']}:"
+            f"{sub['platform']}:{sub['chat_id']}:"
+            f"{sub.get('thread_id') or ''}:{int(event_id)}:artifact"
+        )
+        effect_id, state = await asyncio.to_thread(
+            self._kanban_prepare_notification_effect,
+            sub,
+            event_id=int(event_id),
+            effect_key=effect_key,
+            effect_kind="notify_artifact",
+            part="artifacts",
+            payload={"paths": candidates},
+            board=board,
+        )
+        if state != "applying":
+            return effect_key, state
+        try:
+            image_paths = [
+                path for path in candidates
+                if _Path(path).suffix.lower() in _IMAGE_EXTS
+            ]
+            if image_paths:
+                from urllib.parse import quote as _quote
                 await adapter.send_multiple_images(
-                    chat_id=chat_id, images=batch, metadata=metadata,
+                    chat_id=chat_id,
+                    images=[(f"file://{_quote(path)}", "") for path in image_paths],
+                    metadata=metadata,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "kanban notifier: image batch upload failed: %s", exc,
-                )
-
-        for path in other_paths:
-            ext = _Path(path).suffix.lower()
-            try:
+            for path in candidates:
+                ext = _Path(path).suffix.lower()
+                if ext in _IMAGE_EXTS:
+                    continue
                 if ext in _VIDEO_EXTS:
                     await adapter.send_video(
                         chat_id=chat_id, video_path=path, metadata=metadata,
@@ -550,11 +986,29 @@ class GatewayKanbanWatchersMixin:
                     await adapter.send_document(
                         chat_id=chat_id, file_path=path, metadata=metadata,
                     )
-            except Exception as exc:
-                logger.warning(
-                    "kanban notifier: artifact upload (%s) failed: %s",
-                    path, exc,
-                )
+        except Exception as exc:
+            await asyncio.to_thread(
+                self._kanban_finish_notification_effect,
+                sub,
+                event_id=int(event_id),
+                effect_id=effect_id,
+                effect_key=effect_key,
+                success=False,
+                error=str(exc),
+                board=board,
+            )
+            raise
+        state = await asyncio.to_thread(
+            self._kanban_finish_notification_effect,
+            sub,
+            event_id=int(event_id),
+            effect_id=effect_id,
+            effect_key=effect_key,
+            success=True,
+            error=None,
+            board=board,
+        )
+        return effect_key, state
 
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
@@ -605,6 +1059,31 @@ class GatewayKanbanWatchersMixin:
         except Exception:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return
+
+        # Single-dispatcher backstop. dispatch_in_gateway defaults to true, so a
+        # new profile gateway (or a same-profile restart race) can silently
+        # start a second dispatcher; concurrent dispatchers double reclaim
+        # frequency, double claim-attempt events, and — with
+        # wal_autocheckpoint=0 — concurrent manual WAL checkpoints can corrupt
+        # index pages. The lock lives at the machine-global kanban root
+        # (shared across profiles by design), so it serialises ALL gateways.
+        self._kanban_dispatcher_lock_handle = None
+        _lock_path = _kb.kanban_home() / "kanban" / ".dispatcher.lock"
+        _lock_handle, _lock_state = _acquire_singleton_lock(_lock_path)
+        if _lock_state == "contended":
+            logger.info(
+                "kanban dispatcher: another gateway already holds the dispatcher "
+                "lock (%s); this gateway will NOT dispatch.", _lock_path,
+            )
+            return
+        if _lock_state == "held":
+            self._kanban_dispatcher_lock_handle = _lock_handle  # hold for process lifetime
+            logger.info("kanban dispatcher: holding singleton dispatcher lock (%s)", _lock_path)
+        else:
+            logger.warning(
+                "kanban dispatcher: advisory lock unavailable at %s; proceeding "
+                "on config control alone.", _lock_path,
+            )
 
         try:
             interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
@@ -738,6 +1217,26 @@ class GatewayKanbanWatchersMixin:
             str, tuple[tuple[str, int | None, int | None], float]
         ] = {}
 
+        def _olympus_auth_for_board(conn):
+            """Build the exact service principal from composition-root state."""
+            verifier = getattr(
+                self, "_kanban_olympus_authority_verifier", None
+            )
+            if not callable(verifier):
+                return None
+            board_id = _kb._connection_board_identity(conn)
+            dispatcher = str(self._kanban_dispatcher_instance_id)
+            return _kb.OlympusMutationAuth(
+                verifier=verifier,
+                principal_type="service",
+                principal_id=(
+                    f"kanban-service-dispatcher:{board_id}:{dispatcher}"
+                ),
+                principal_source=(
+                    f"kanban-dispatcher:{board_id}:{dispatcher}"
+                ),
+            )
+
         def _board_db_fingerprint(slug: str) -> tuple[str, int | None, int | None]:
             path = _kb.kanban_db_path(slug)
             try:
@@ -803,6 +1302,18 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
+                olympus_auth = _olympus_auth_for_board(conn)
+                reconciled = _kb.reconcile_restart_state(
+                    conn, olympus_auth=olympus_auth,
+                )
+                if reconciled["effects"] or reconciled["worker_runs"]:
+                    logger.warning(
+                        "kanban dispatcher [%s]: restart reconciliation "
+                        "effects=%d worker_runs=%d",
+                        slug,
+                        reconciled["effects"],
+                        reconciled["worker_runs"],
+                    )
                 return _kb.dispatch_once(
                     conn,
                     board=slug,
@@ -812,6 +1323,10 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    olympus_auth=olympus_auth,
+                    dispatcher_instance_id=str(
+                        self._kanban_dispatcher_instance_id
+                    ),
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -908,17 +1423,20 @@ class GatewayKanbanWatchersMixin:
         # ``kanban.auto_decompose_per_tick`` (default 3) so a bulk-load
         # of triage tasks doesn't burst-spend the aux LLM in one tick;
         # remainder defers to subsequent ticks.
-        auto_decompose_enabled = bool(kanban_cfg.get("auto_decompose", True))
-        try:
-            auto_decompose_per_tick = int(
-                kanban_cfg.get("auto_decompose_per_tick", 3) or 3
-            )
-        except (TypeError, ValueError):
-            auto_decompose_per_tick = 3
-        if auto_decompose_per_tick < 1:
-            auto_decompose_per_tick = 1
+        #
+        # The flag is re-read from config EVERY tick (#49638) rather than
+        # captured once at boot. Auto-decompose is a safety toggle: a user who
+        # sees it fan out and run tasks they didn't intend reaches for
+        # ``kanban.auto_decompose: false`` to STOP it — and that must take
+        # effect on the next tick, not require a gateway restart. (Reported:
+        # auto-decompose created and launched destructive tasks while the user
+        # was still typing the task description, and the flag "couldn't be
+        # disabled" because the gateway had captured its boot-time value.)
+        def _read_auto_decompose_settings() -> tuple[bool, int]:
+            """Re-resolve (enabled, per_tick) from current config each tick."""
+            return _resolve_auto_decompose_settings(_load_config)
 
-        def _auto_decompose_tick() -> int:
+        def _auto_decompose_tick(auto_decompose_per_tick: int) -> int:
             """Run the auto-decomposer for up to N triage tasks across all
             boards. Returns the number of triage tasks that were
             successfully decomposed or specified this tick.
@@ -1013,8 +1531,12 @@ class GatewayKanbanWatchersMixin:
                 logger.exception("kanban dispatcher: zombie reaper failed")
 
             try:
-                if auto_decompose_enabled:
-                    await asyncio.to_thread(_auto_decompose_tick)
+                # Re-read the auto-decompose toggle live each tick so a user
+                # flipping kanban.auto_decompose=false to STOP runaway fan-out
+                # takes effect on the next tick, not on gateway restart (#49638).
+                _ad_enabled, _ad_per_tick = _read_auto_decompose_settings()
+                if _ad_enabled:
+                    await asyncio.to_thread(_auto_decompose_tick, _ad_per_tick)
                 results = await asyncio.to_thread(_tick_once)
                 any_spawned = False
                 for slug, res in (results or []):
@@ -1052,6 +1574,8 @@ class GatewayKanbanWatchersMixin:
                         last_warn_at = now
             except asyncio.CancelledError:
                 logger.debug("kanban dispatcher: cancelled")
+                _release_singleton_lock(self._kanban_dispatcher_lock_handle)
+                self._kanban_dispatcher_lock_handle = None
                 raise
             except Exception:
                 logger.exception("kanban dispatcher: unexpected watcher error")
@@ -1062,3 +1586,6 @@ class GatewayKanbanWatchersMixin:
             while slept < interval and self._running:
                 await asyncio.sleep(min(1.0, interval - slept))
                 slept += 1.0
+
+        _release_singleton_lock(self._kanban_dispatcher_lock_handle)
+        self._kanban_dispatcher_lock_handle = None
