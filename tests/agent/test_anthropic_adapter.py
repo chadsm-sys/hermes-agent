@@ -507,6 +507,19 @@ class TestResolveAnthropicToken:
 
 
 class TestRefreshOauthToken:
+    @pytest.fixture(autouse=True)
+    def isolate_credential_sources(self, tmp_path, monkeypatch):
+        """Keep refresh tests from consulting the operator's credential stores."""
+        monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+        monkeypatch.setattr(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            lambda: None,
+        )
+
     def test_returns_none_without_refresh_token(self):
         creds = {"accessToken": "expired", "refreshToken": "", "expiresAt": 0}
         assert _refresh_oauth_token(creds) is None
