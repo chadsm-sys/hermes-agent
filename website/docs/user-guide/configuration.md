@@ -1833,6 +1833,7 @@ security:
   tirith_path: "tirith"          # Path to tirith binary (default: "tirith" in $PATH)
   tirith_timeout: 5              # Seconds to wait for tirith scan before timing out
   tirith_fail_open: true         # Allow command execution if tirith is unavailable
+  tirith_auto_install: false     # Explicitly allow GitHub release download
   website_blocklist:             # See Website Blocklist section below
     enabled: false
     domains: []
@@ -1844,6 +1845,7 @@ security:
 - `tirith_path` — path to the tirith binary. Set this if tirith is installed in a non-standard location.
 - `tirith_timeout` — maximum seconds to wait for a tirith scan. Commands proceed if the scan times out.
 - `tirith_fail_open` — when `true` (default), commands are allowed to execute if tirith is unavailable or fails. Set to `false` to block commands when tirith cannot verify them.
+- `tirith_auto_install` — when `true`, explicitly permits downloading Tirith from GitHub releases if no local binary is available. Defaults to `false`.
 
 ## Website Blocklist
 
