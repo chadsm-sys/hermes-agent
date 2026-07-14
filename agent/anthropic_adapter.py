@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
+from agent.secret_scope import get_secret as _get_secret
 from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, normalize_proxy_env_vars
@@ -946,7 +947,7 @@ def _explicit_claude_config_dir() -> Optional[Path]:
     symlink component. Invalid configured paths raise rather than degrading to
     the default account.
     """
-    raw = os.getenv("CLAUDE_CONFIG_DIR", "").strip()
+    raw = (_get_secret("CLAUDE_CONFIG_DIR", "") or "").strip()
     if not raw:
         return None
     selected = Path(raw).expanduser()
@@ -1353,8 +1354,8 @@ def resolve_anthropic_token() -> Optional[str]:
 
     Returns the token string or None.
     """
-    token = os.getenv("ANTHROPIC_TOKEN", "").strip()
-    cc_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    token = (_get_secret("ANTHROPIC_TOKEN", "") or "").strip()
+    cc_token = (_get_secret("CLAUDE_CODE_OAUTH_TOKEN", "") or "").strip()
 
     try:
         explicit_config_dir = _explicit_claude_config_dir()
@@ -1417,7 +1418,7 @@ def resolve_anthropic_token() -> Optional[str]:
 
     # 5. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
     # This remains as a compatibility fallback for pre-migration Hermes configs.
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    api_key = (_get_secret("ANTHROPIC_API_KEY", "") or "").strip()
     if api_key:
         return api_key
 
@@ -1460,7 +1461,7 @@ def run_oauth_setup_token() -> Optional[str]:
 
     # Check env vars that may have been set
     for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_TOKEN"):
-        val = os.getenv(env_var, "").strip()
+        val = (_get_secret(env_var, "") or "").strip()
         if val:
             return val
 

@@ -9,6 +9,8 @@ import importlib
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -470,6 +472,109 @@ def test_config_isolation_across_accounts(isolated_anthropic, monkeypatch):
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(account_a))
     assert harness.adapter.resolve_anthropic_token() == "synthetic-account-a"
+
+
+def test_profile_scope_overrides_process_env_for_selected_account(
+    isolated_anthropic, monkeypatch
+):
+    harness = isolated_anthropic
+    scoped_account = harness.home / "accounts" / "scoped"
+    process_account = harness.home / "accounts" / "process"
+    _write_record(scoped_account, "synthetic-scoped-account")
+    _write_record(process_account, "synthetic-process-account")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(process_account))
+
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+
+    token = set_secret_scope({"CLAUDE_CONFIG_DIR": str(scoped_account)})
+    try:
+        assert harness.adapter.resolve_anthropic_token() == "synthetic-scoped-account"
+    finally:
+        reset_secret_scope(token)
+
+
+def test_profile_scope_controls_explicit_token_precedence(
+    isolated_anthropic, monkeypatch
+):
+    harness = isolated_anthropic
+    scoped_account = harness.home / "accounts" / "scoped"
+    process_account = harness.home / "accounts" / "process"
+    _write_record(scoped_account, "synthetic-scoped-account")
+    _write_record(process_account, "synthetic-process-account")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(process_account))
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "synthetic-process-token")
+
+    from agent.secret_scope import reset_secret_scope, set_secret_scope
+
+    token = set_secret_scope(
+        {
+            "CLAUDE_CONFIG_DIR": str(scoped_account),
+            "ANTHROPIC_TOKEN": "synthetic-scoped-token",
+        }
+    )
+    try:
+        assert harness.adapter.resolve_anthropic_token() == "synthetic-scoped-token"
+    finally:
+        reset_secret_scope(token)
+
+
+def test_multiplex_authority_transition_never_replays_process_credentials(
+    isolated_anthropic, monkeypatch
+):
+    harness = isolated_anthropic
+    scoped_account = harness.home / "accounts" / "scoped"
+    _write_record(scoped_account, "synthetic-scoped-account")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(harness.home / "process-account"))
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "synthetic-process-token")
+
+    from agent import secret_scope
+
+    secret_scope.set_multiplex_active(True)
+    token = secret_scope.set_secret_scope({"CLAUDE_CONFIG_DIR": str(scoped_account)})
+    try:
+        assert harness.adapter.resolve_anthropic_token() == "synthetic-scoped-account"
+    finally:
+        secret_scope.reset_secret_scope(token)
+
+    try:
+        with pytest.raises(secret_scope.UnscopedSecretError):
+            harness.adapter.resolve_anthropic_token()
+    finally:
+        secret_scope.set_multiplex_active(False)
+
+
+def test_concurrent_profile_scopes_do_not_cross_contaminate_selected_accounts(
+    isolated_anthropic, monkeypatch
+):
+    harness = isolated_anthropic
+    accounts = []
+    for index in range(8):
+        account = harness.home / "accounts" / str(index)
+        _write_record(account, f"synthetic-account-{index}")
+        accounts.append(account)
+    monkeypatch.setenv("ANTHROPIC_TOKEN", "synthetic-process-token")
+    barrier = Barrier(len(accounts))
+
+    from agent import secret_scope
+
+    def resolve_for(index):
+        token = secret_scope.set_secret_scope(
+            {"CLAUDE_CONFIG_DIR": str(accounts[index])}
+        )
+        try:
+            barrier.wait(timeout=5)
+            return harness.adapter.resolve_anthropic_token()
+        finally:
+            secret_scope.reset_secret_scope(token)
+
+    secret_scope.set_multiplex_active(True)
+    try:
+        with ThreadPoolExecutor(max_workers=len(accounts)) as executor:
+            results = list(executor.map(resolve_for, range(len(accounts))))
+    finally:
+        secret_scope.set_multiplex_active(False)
+
+    assert results == [f"synthetic-account-{index}" for index in range(len(accounts))]
 
 
 def test_failure_diagnostics_do_not_expose_synthetic_secrets(
