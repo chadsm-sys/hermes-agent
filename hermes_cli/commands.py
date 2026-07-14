@@ -99,8 +99,13 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[session|always]"),
     CommandDef("deny", "Deny a pending dangerous command", "Session",
                gateway_only=True),
-    CommandDef("background", "Run a prompt in the background", "Session",
-               aliases=("bg", "btw"), args_hint="<prompt>"),
+    CommandDef(
+        "background",
+        "Submit durable Telegram work or run an explicit ephemeral background prompt",
+        "Session",
+        aliases=("bg", "btw"),
+        args_hint="[--ephemeral] <prompt>",
+    ),
     CommandDef("agents", "Show active agents and running tasks", "Session",
                aliases=("tasks",)),
     CommandDef("journey", "Open the learning journey timeline",
@@ -210,6 +215,22 @@ COMMAND_REGISTRY: list[CommandDef] = [
                             "archive", "tail", "dispatch", "stats", "notify-subscribe",
                             "notify-list", "notify-unsubscribe", "log", "runs",
                             "heartbeat", "assignees", "context", "specify", "gc")),
+    CommandDef(
+        "olympus",
+        "Select governed Kanban intake or control an explicitly targeted task",
+        "Tools & Skills",
+        gateway_only=True,
+        args_hint="[status|select|clear|pause|resume|interrupt|cancel]",
+        subcommands=(
+            "status",
+            "select",
+            "clear",
+            "pause",
+            "resume",
+            "interrupt",
+            "cancel",
+        ),
+    ),
     CommandDef("reload", "Reload .env variables into the running session", "Tools & Skills",
                cli_only=True),
     CommandDef("reload-mcp", "Reload MCP servers from config", "Tools & Skills",
@@ -373,6 +394,7 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "deny",
         "help",
         "new",
+        "olympus",
         "profile",
         "queue",
         "restart",
@@ -1163,7 +1185,12 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #   - moa: high-cost slash mode, available through /hermes moa to avoid
 #     displacing existing native Slack slash commands at the 50-command cap.
 #   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "moa", "debug"})
+#   - olympus: Telegram-only durable mission intake in its first certified lane;
+#     Slack keeps the catch-all `/hermes olympus ...` route without consuming a
+#     native command slot.
+_SLACK_VIA_HERMES_ONLY = frozenset(
+    {"credits", "billing", "moa", "debug", "olympus"}
+)
 
 
 def _sanitize_slack_name(raw: str) -> str:

@@ -828,7 +828,7 @@ def test_process_fenced_manual_reclaim_stages_executes_and_settles(conn, monkeyp
     ).fetchone()
     assert settled["state"] == "applied"
     assert settled["worker_start_token"] == identity.start_token
-    assert kb.get_run(conn, run.id).process_state == "terminal"
+    assert kb.get_run(conn, run.id).process_state == "termination_sent"
 
 
 def test_process_fence_never_signals_reused_pid(conn, monkeypatch):
@@ -955,7 +955,7 @@ def test_worker_effect_crash_boundaries_reopen_and_reconcile_without_replay(
         ).fetchone()[0]
         assert process_state == (
             "termination_pending" if crash_stage == "after_stage"
-            else "terminal" if crash_stage == "after_settle"
+            else "termination_sent" if crash_stage == "after_settle"
             else "identity_unverified"
         )
     assert len(signals) == expected_signals

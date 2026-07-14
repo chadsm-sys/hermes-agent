@@ -98,7 +98,9 @@ class TestHandleBackgroundCommand:
             return mock_task
 
         with patch("gateway.run.asyncio.create_task", side_effect=capture_task):
-            event = _make_event(text="/background Summarize the top HN stories")
+            event = _make_event(
+                text="/background --ephemeral Summarize the top HN stories"
+            )
             result = await runner._handle_background_command(event)
 
         assert "🔄" in result
@@ -126,7 +128,7 @@ class TestHandleBackgroundCommand:
             thread_id="20197",
         )
         event = MessageEvent(
-            text="/background summarize",
+            text="/background --ephemeral summarize",
             source=source,
             message_id="463",
             reply_to_message_id="462",
@@ -146,7 +148,7 @@ class TestHandleBackgroundCommand:
         long_prompt = "A" * 100
 
         with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
-            event = _make_event(text=f"/background {long_prompt}")
+            event = _make_event(text=f"/background --ephemeral {long_prompt}")
             result = await runner._handle_background_command(event)
 
         assert "..." in result
@@ -161,7 +163,7 @@ class TestHandleBackgroundCommand:
 
         with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
             for i in range(5):
-                event = _make_event(text=f"/background task {i}")
+                event = _make_event(text=f"/background --ephemeral task {i}")
                 result = await runner._handle_background_command(event)
                 # Extract task ID from result (format: "Task ID: bg_HHMMSS_hex")
                 for line in result.split("\n"):
@@ -178,7 +180,11 @@ class TestHandleBackgroundCommand:
             runner = _make_runner()
             with patch("gateway.run.asyncio.create_task", side_effect=lambda c, **kw: (c.close(), MagicMock())[1]):
                 event = _make_event(
-                    text="/background test task",
+                    text=(
+                        "/background --ephemeral test task"
+                        if platform == Platform.TELEGRAM
+                        else "/background test task"
+                    ),
                     platform=platform,
                 )
                 result = await runner._handle_background_command(event)
@@ -338,13 +344,21 @@ class TestRunBackgroundTask:
             await runner._run_background_task("make stuff", source, "bg_test")
 
             mock_adapter.send_voice.assert_called_once()
-            assert mock_adapter.send_voice.call_args.kwargs["audio_path"] == _ogg
+            assert _os.path.samefile(
+                mock_adapter.send_voice.call_args.kwargs["audio_path"], _ogg
+            )
             mock_adapter.send_video.assert_called_once()
-            assert mock_adapter.send_video.call_args.kwargs["video_path"] == _mp4
+            assert _os.path.samefile(
+                mock_adapter.send_video.call_args.kwargs["video_path"], _mp4
+            )
             mock_adapter.send_image_file.assert_called_once()
-            assert mock_adapter.send_image_file.call_args.kwargs["image_path"] == _png
+            assert _os.path.samefile(
+                mock_adapter.send_image_file.call_args.kwargs["image_path"], _png
+            )
             mock_adapter.send_document.assert_called_once()
-            assert mock_adapter.send_document.call_args.kwargs["file_path"] == _pdf
+            assert _os.path.samefile(
+                mock_adapter.send_document.call_args.kwargs["file_path"], _pdf
+            )
         finally:
             import shutil as _shutil
             _shutil.rmtree(_tmpdir, ignore_errors=True)
