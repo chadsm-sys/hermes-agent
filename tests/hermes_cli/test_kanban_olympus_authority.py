@@ -113,7 +113,10 @@ def _allow_at(request: dict, now: float) -> dict:
 
 
 def _allow(request: dict) -> dict:
-    return _allow_at(request, time.time())
+    # Production freezes the request validation clock to integer seconds.
+    # Match that boundary so a verifier call crossing into the next second
+    # cannot report verified_at a fraction later than the frozen request time.
+    return _allow_at(request, float(int(time.time())))
 
 
 def _auth(
