@@ -16506,10 +16506,10 @@ async def start_gateway(
         if _stderr_level < logging.getLogger().level:
             logging.getLogger().setLevel(_stderr_level)
 
-    runner = GatewayRunner(
-        config,
-        olympus_authority_verifier=olympus_authority_verifier,
-    )
+    runner_kwargs = {}
+    if olympus_authority_verifier is not None:
+        runner_kwargs["olympus_authority_verifier"] = olympus_authority_verifier
+    runner = GatewayRunner(config, **runner_kwargs)
     
     # Track whether an unexpected signal initiated the shutdown. When an
     # unexpected SIGTERM kills the gateway, we exit non-zero so service

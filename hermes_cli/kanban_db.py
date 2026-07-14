@@ -14500,7 +14500,7 @@ def dispatch_once(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, olympus_context FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -14576,7 +14576,23 @@ def dispatch_once(
                 # 'assigned' event so the board state matches what just happened.
                 if not dry_run:
                     try:
-                        with write_txn(conn):
+                        if row["olympus_context"] is None:
+                            with write_txn(conn):
+                                conn.execute(
+                                    "UPDATE tasks SET assignee = ? WHERE id = ? "
+                                    "AND (assignee IS NULL OR assignee = '')",
+                                    (_default_assignee, row["id"]),
+                                )
+                                _append_event(
+                                    conn,
+                                    row["id"],
+                                    "assigned",
+                                    {
+                                        "assignee": _default_assignee,
+                                        "source": "kanban.default_assignee",
+                                    },
+                                )
+                        else:
                             assign_task(
                                 conn,
                                 row["id"],
