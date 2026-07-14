@@ -2481,6 +2481,7 @@ DEFAULT_CONFIG = {
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
+        "tirith_auto_install": False,
         "website_blocklist": {
             "enabled": False,
             "domains": [],
@@ -6698,6 +6699,7 @@ _SECURITY_COMMENT = """
 #   tirith_path: "tirith"
 #   tirith_timeout: 5
 #   tirith_fail_open: true
+#   tirith_auto_install: false  # Explicit opt-in to GitHub release download
 """
 
 _FALLBACK_COMMENT = """
