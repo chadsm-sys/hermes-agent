@@ -33,6 +33,8 @@ import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 from hermes_constants import get_hermes_home
@@ -44,6 +46,24 @@ _REPO = "sheeki03/tirith"
 # Cosign provenance verification — pinned to the specific release workflow
 _COSIGN_IDENTITY_REGEXP = f"^https://github.com/{_REPO}/\\.github/workflows/release\\.yml@refs/tags/v"
 _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
+
+# Auto-install supply-chain pin. Upgrades require a reviewed commit updating
+# the exact version, release asset URLs, and SHA-256 values together.
+_TIRITH_VERSION = "0.3.3"
+_TIRITH_RELEASE_REPOSITORY_ID = "1147679251"
+_TIRITH_RELEASE_BASE = (
+    f"https://github.com/{_REPO}/releases/download/v{_TIRITH_VERSION}"
+)
+_TIRITH_PINNED_ASSETS = {
+    "aarch64-apple-darwin":
+        "720ed4637d16fed908c2d268fd1da854632a15d59ce74c3d78903c5a92ccbc1c",
+    "x86_64-apple-darwin":
+        "e100c3ac66f6a73e1ea0b24ae969f7059b4618f4917a21e9358d9f85b08cb67f",
+    "x86_64-unknown-linux-gnu":
+        "3a9fb4840cfcc06df2e95b4dab8669ea0d0a324c470104d178e44213c8b3fb62",
+    "aarch64-unknown-linux-gnu":
+        "38bf56136206bf100323285c5dd098fb7150eeaad2d08445451567b53fd76ef8",
+}
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -285,13 +305,73 @@ def is_platform_supported() -> bool:
     return _detect_target() is not None
 
 
-def _download_file(url: str, dest: str, timeout: int = 10):
-    """Download a URL to a local file."""
+def _pinned_asset_for_target(target: str) -> dict | None:
+    """Return immutable release metadata for a supported target."""
+    sha256 = _TIRITH_PINNED_ASSETS.get(target)
+    if sha256 is None:
+        return None
+    name = f"tirith-{target}.tar.gz"
+    return {
+        "version": _TIRITH_VERSION,
+        "name": name,
+        "url": f"{_TIRITH_RELEASE_BASE}/{name}",
+        "sha256": sha256,
+    }
+
+
+class _PinnedReleaseRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow only GitHub's asset-host redirect for the pinned repository."""
+
+    def __init__(self, expected_asset: str):
+        super().__init__()
+        self.expected_asset = expected_asset
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        query = urllib.parse.parse_qs(parsed.query)
+        dispositions = query.get("response-content-disposition", [])
+        dispositions += query.get("rscd", [])
+        filenames = {
+            part.split("=", 1)[1].strip().strip('"')
+            for disposition in dispositions
+            for part in disposition.split(";")
+            if part.strip().lower().startswith("filename=")
+        }
+        expected_prefix = (
+            f"/github-production-release-asset/{_TIRITH_RELEASE_REPOSITORY_ID}/"
+        )
+        valid = (
+            req.full_url.startswith(f"{_TIRITH_RELEASE_BASE}/")
+            and parsed.scheme == "https"
+            and parsed.hostname == "release-assets.githubusercontent.com"
+            and parsed.path.startswith(expected_prefix)
+            and filenames == {self.expected_asset}
+        )
+        if not valid:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "unexpected redirect for pinned Tirith asset",
+                headers, fp,
+            )
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and parsed.hostname != urllib.parse.urlparse(req.full_url).hostname:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _download_file(url: str, dest: str, timeout: int = 10,
+                   expected_asset: str | None = None):
+    """Download one exact pinned release asset, rejecting redirect drift."""
+    if not url.startswith(f"{_TIRITH_RELEASE_BASE}/") or "/releases/latest/" in url:
+        raise ValueError("Tirith download must use the immutable pinned Tirith release")
+    asset = expected_asset or os.path.basename(urllib.parse.urlparse(url).path)
+    if url != f"{_TIRITH_RELEASE_BASE}/{asset}":
+        raise ValueError("Tirith download URL does not match the pinned release asset")
     req = urllib.request.Request(url)
     token = os.getenv("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"token {token}")
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
+    opener = urllib.request.build_opener(_PinnedReleaseRedirectHandler(asset))
+    with opener.open(req, timeout=timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
 
 
@@ -361,6 +441,33 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
     return True
 
 
+def _verify_pinned_checksum(archive_path: str, expected_sha256: str) -> bool:
+    """Verify an archive against the SHA-256 committed with the release pin."""
+    sha = hashlib.sha256()
+    try:
+        with open(archive_path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                sha.update(chunk)
+    except OSError:
+        return False
+    return sha.hexdigest() == expected_sha256.lower()
+
+
+def _verify_tirith_version(binary_path: str, expected_version: str) -> bool:
+    """Fail closed unless the verified artifact reports the pinned version."""
+    try:
+        result = subprocess.run(
+            [binary_path, "--version"], capture_output=True, text=True,
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    return result.returncode == 0 and output in {
+        f"tirith {expected_version}", f"tirith v{expected_version}",
+    }
+
+
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
     """Extract the tirith binary from a release archive into dest_dir."""
     for member in tar.getmembers():
@@ -398,13 +505,14 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
     log = logger.warning if log_failures else logger.debug
 
     target = _detect_target()
-    if not target:
+    asset = _pinned_asset_for_target(target) if target else None
+    if asset is None:
         logger.info("tirith auto-install: unsupported platform %s/%s",
-                     platform.system(), platform.machine())
+                    platform.system(), platform.machine())
         return None, "unsupported_platform"
 
-    archive_name = f"tirith-{target}.tar.gz"
-    base_url = f"https://github.com/{_REPO}/releases/latest/download"
+    archive_name = asset["name"]
+    base_url = _TIRITH_RELEASE_BASE
 
     try:
         tmpdir = tempfile.mkdtemp(prefix="tirith-install-")
@@ -417,11 +525,13 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         sig_path = os.path.join(tmpdir, "checksums.txt.sig")
         cert_path = os.path.join(tmpdir, "checksums.txt.pem")
 
-        logger.info("tirith not found — downloading latest release for %s...", target)
+        logger.info("tirith not found — downloading pinned v%s release for %s...",
+                    asset["version"], target)
 
         try:
-            _download_file(f"{base_url}/{archive_name}", archive_path)
-            _download_file(f"{base_url}/checksums.txt", checksums_path)
+            _download_file(asset["url"], archive_path, expected_asset=archive_name)
+            _download_file(f"{base_url}/checksums.txt", checksums_path,
+                           expected_asset="checksums.txt")
         except Exception as exc:
             log("tirith download failed: %s", exc)
             return None, "download_failed"
@@ -434,8 +544,10 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         cosign_verified = False
         if shutil.which("cosign"):
             try:
-                _download_file(f"{base_url}/checksums.txt.sig", sig_path)
-                _download_file(f"{base_url}/checksums.txt.pem", cert_path)
+                _download_file(f"{base_url}/checksums.txt.sig", sig_path,
+                               expected_asset="checksums.txt.sig")
+                _download_file(f"{base_url}/checksums.txt.pem", cert_path,
+                               expected_asset="checksums.txt.pem")
             except Exception as exc:
                 logger.info("cosign artifacts unavailable (%s), proceeding with SHA-256 only", exc)
             else:
@@ -455,13 +567,19 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             logger.info("cosign not on PATH — installing tirith with SHA-256 verification only "
                         "(install cosign for full supply chain verification)")
 
-        if not _verify_checksum(archive_path, checksums_path, archive_name):
+        if not _verify_pinned_checksum(archive_path, asset["sha256"]):
+            log("tirith pinned archive checksum verification failed")
             return None, "checksum_failed"
 
         with tarfile.open(archive_path, "r:gz") as tar:
             src, reason = _extract_tirith_binary(tar, tmpdir, log)
             if src is None:
                 return None, reason
+
+        os.chmod(src, os.stat(src).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        if not _verify_tirith_version(src, asset["version"]):
+            log("tirith install aborted: expected pinned version %s", asset["version"])
+            return None, "version_mismatch"
 
         dest = os.path.join(_hermes_bin_dir(), "tirith")
         try:
