@@ -109,6 +109,35 @@ class TestEngine:
         assert result.captured[0].opportunity.title == "Inbox opportunity"
         assert "bad.json" in result.errors
 
+    def test_declared_confidence_survives_inbox_capture_score_and_reload(
+        self, engine, tmp_path
+    ):
+        inbox = tmp_path / "inbox"
+        inbox.mkdir()
+        (inbox / "declared.json").write_text(
+            json.dumps(
+                {
+                    "title": "Declared confidence opportunity",
+                    "source_type": "idea",
+                    "confidence": 0.77,
+                    "expected_revenue_usd": 10_000,
+                }
+            )
+        )
+
+        captured = engine.capture_inbox(inbox).captured[0].opportunity
+        assert captured.confidence == pytest.approx(0.77)
+
+        scored = engine.score(captured.opportunity_id)
+        assert scored.confidence == pytest.approx(0.77)
+        assert scored.score.confidence_component == pytest.approx(0.77)
+
+        reloaded = OpportunityStore(tmp_path / "store.json").get(
+            captured.opportunity_id
+        )
+        assert reloaded.confidence == pytest.approx(0.77)
+        assert reloaded.score.confidence_component == pytest.approx(0.77)
+
     def test_top_and_report(self, engine):
         big_id = engine.capture(RECORD).opportunity.opportunity_id
         small_id = engine.capture(

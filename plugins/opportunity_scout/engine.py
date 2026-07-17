@@ -99,6 +99,7 @@ class OpportunityScoutEngine:
                         "chad_hours_weekly": opportunity.chad_hours_weekly,
                         "ai_hours_upfront": opportunity.ai_hours_upfront,
                         "ai_hours_weekly": opportunity.ai_hours_weekly,
+                        "confidence": opportunity.confidence,
                     },
                     on_duplicate=on_duplicate,
                 )
