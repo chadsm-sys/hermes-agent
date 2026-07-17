@@ -1,0 +1,39 @@
+Olympus Audit Remediation Verification — Hash Attestation
+Recorded UTC: 2026-07-17T22:15:39Z
+
+COMMIT AND ANCESTRY IDENTITIES
+51bb38871a8159da18ab8c3df603e6be6cbd4798  common remediation base
+b6754d795f354d4af5300cbcf264b0d7928a8651  R-A1 loss-record commit (not an ancestor)
+39a580769de94668d6c681b50468001080296916  R-A2 Evidence Vault commit (rerun base and ancestor)
+
+R-A1 RECORD IDENTITY
+0bb494552e9abff10bda1ba4e871aa63188beb63596db4145997f3b446bbc751  review/schema-v2-independent-review-20260717/LOST-REVIEW-RECORD.md at b6754d795
+
+EVIDENCE VAULT CONTROL FILES
+26dacba1e49cc4557b3f71348203ad6facc17d0041d4711bcacec6e8c2632b51  evidence/EVIDENCE-MANIFEST.sha256
+fcc2514f15474ed7af47dd4d845d79cff62190925ccf4e32ff1feadbab5c510e  evidence/EVIDENCE-INVENTORY.md
+c97361cb9f49f9ad77abca67aec17a5672562ca97daadb8aa44e2d3ad11488b8  evidence/EVIDENCE-PROVENANCE.md
+92a8a093c9c132bb00712873d676c1c2c4dfc9066fb5ff819f39f7b973a4d033  evidence/EVIDENCE-GAPS.md
+
+AUDIT RERUN DELIVERABLES
+acb6eb6a79a296b37d103079b017347aab882deae753a2f2614f52e129036dce  OLYMPUS-AUDIT-RERUN.md
+59acc8972885c6d65385a36252012c43ba4d6c6c2e6f0865fba8636bc0bbdf2a  UPDATED-CERTIFICATION-STATUS-MATRIX.md
+92534bf7da55c765c38e08a7272cec25165d5913a32965a076fbdc306968b261  REMAINING-REMEDIATIONS.md
+b4949022fceffd4fc0b0056db68bcaf4b88442691b3174faa4603c02b5e4e840  RESOLVED-FINDINGS.md
+
+VERIFICATION RESULTS
+Evidence Vault top-level manifest: PASS (139/139)
+Inventory size/hash/source identity: PASS (135/135)
+Preserved historical manifest entries: PASS (109/109)
+Duplicate SHA-256 values: PASS (0)
+Orphan vault files: PASS (0)
+R-A2 ancestry: PASS
+R-A1 ancestry: FAIL (sibling of R-A2; exact record independently retrievable)
+Fixture manifest root: PASS
+  383a500279c5095cec655cb270ec553b9a0d10780cd611d8d4053e987e15bcff
+
+HASH CHAIN BOUNDARY
+This attestation binds the immutable R-A2 Evidence Vault and the four audit-rerun
+Markdown deliverables above. It does not claim that the lost original Schema V2
+review exists, that R2 evidence is present in the vault, or that production
+authority has been granted. This file intentionally does not hash itself.
