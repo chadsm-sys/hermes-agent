@@ -122,6 +122,14 @@ def test_failure_day_is_fail():
     assert result["executive_summary"]["critical_issues"] == 1
 
 
+def test_explicit_warn_cannot_mask_derived_fail():
+    data = snapshot()
+    data["overall_health"] = "WARN"
+    data["fleet_health"][0]["status"] = "FAIL"
+
+    assert build_report(data)["overall_health"] == "FAIL"
+
+
 def test_no_work_overnight_is_explicit():
     assert "No verified overnight completions." in render_markdown(
         report("no_work_overnight")

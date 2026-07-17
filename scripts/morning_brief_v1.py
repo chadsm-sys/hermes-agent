@@ -274,11 +274,14 @@ def build_report(snapshot: dict[str, Any]) -> dict[str, Any]:
         if integrity_count or any(row["status"] in {"WARN", "UNKNOWN"} for row in fleet)
         else "PASS"
     )
-    overall = explicit
-    if explicit == "PASS" and derived != "PASS":
-        overall = "WARN" if derived == "WARN" else "FAIL"
+    if "FAIL" in {explicit, derived}:
+        overall = "FAIL"
     elif explicit == "UNKNOWN":
         overall = derived if derived != "PASS" else "UNKNOWN"
+    elif "WARN" in {explicit, derived}:
+        overall = "WARN"
+    else:
+        overall = "PASS"
 
     return {
         "schema_version": 1,
