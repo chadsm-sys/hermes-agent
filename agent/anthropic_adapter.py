@@ -933,18 +933,37 @@ def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     return None
 
 
+def _explicit_claude_config_dir() -> Optional[Path]:
+    """Return CLAUDE_CONFIG_DIR as a Path when the caller pins a Claude account.
+
+    Claude Code supports account isolation through CLAUDE_CONFIG_DIR.  Hermes
+    should honor the same convention so multi-account Claude wrappers can route
+    Anthropic OAuth requests to a specific account instead of the default
+    ~/.claude account or the global macOS Keychain entry.
+    """
+    raw = os.getenv("CLAUDE_CONFIG_DIR", "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
-    """Read Claude Code OAuth credentials from ~/.claude/.credentials.json.
+    """Read Claude Code OAuth credentials from the selected config directory.
+
+    If CLAUDE_CONFIG_DIR is set, read only that account's .credentials.json.
+    Otherwise fall back to ~/.claude/.credentials.json.
 
     Returns dict with {accessToken, refreshToken?, expiresAt?, source} or None.
     """
-    cred_path = Path.home() / ".claude" / ".credentials.json"
+    config_dir = _explicit_claude_config_dir()
+    cred_path = (config_dir if config_dir else Path.home() / ".claude") / ".credentials.json"
     if not cred_path.exists():
+        logger.debug("Claude Code credentials file does not exist: %s", cred_path)
         return None
     try:
         data = json.loads(cred_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, IOError) as e:
-        logger.debug("Failed to read ~/.claude/.credentials.json: %s", e)
+        logger.debug("Failed to read Claude Code credentials file %s: %s", cred_path, e)
         return None
 
     oauth_data = data.get("claudeAiOauth")
@@ -957,18 +976,20 @@ def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
         "accessToken": access_token,
         "refreshToken": oauth_data.get("refreshToken", ""),
         "expiresAt": oauth_data.get("expiresAt", 0),
-        "source": "claude_code_credentials_file",
+        "source": "claude_config_dir_credentials_file" if config_dir else "claude_code_credentials_file",
     }
 
 
 def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
     """Read refreshable Claude Code OAuth credentials.
 
-    Reads from two possible sources and reconciles them:
-      1. macOS Keychain (Darwin only) — "Claude Code-credentials" entry
-      2. ~/.claude/.credentials.json file
+    Reads from these sources and reconciles them:
+      1. CLAUDE_CONFIG_DIR/.credentials.json when CLAUDE_CONFIG_DIR is set
+         (strict account pinning; skip global Keychain/default account)
+      2. macOS Keychain (Darwin only) — "Claude Code-credentials" entry
+      3. ~/.claude/.credentials.json file
 
-    Selection rules when both are present:
+    Selection rules when the default Keychain/file sources are both present:
       - If exactly one is non-expired, prefer that one. (Handles the case
         where Claude Code refreshes one source but not the other — observed
         in the wild on Claude Code 2.1.x.)
@@ -977,11 +998,14 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
 
     This intentionally excludes ~/.claude.json primaryApiKey. Opencode's
     subscription flow is OAuth/setup-token based with refreshable credentials,
-    and native direct Anthropic provider usage should follow that path rather
-    than auto-detecting Claude's first-party managed key.
+    and native direct Anthropic provider usage should follow that path
+    rather than auto-detecting Claude's first-party managed key.
 
     Returns dict with {accessToken, refreshToken?, expiresAt?, source} or None.
     """
+    if _explicit_claude_config_dir():
+        return _read_claude_code_credentials_from_file()
+
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
 
@@ -1284,13 +1308,19 @@ def resolve_anthropic_token() -> Optional[str]:
     Priority:
       1. ANTHROPIC_TOKEN env var (OAuth/setup token saved by Hermes)
       2. CLAUDE_CODE_OAUTH_TOKEN env var
-      3. Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json)
-         — with automatic refresh if expired and a refresh token is available
+      3. Claude Code credentials (CLAUDE_CONFIG_DIR when set, otherwise
+         ~/.claude.json or ~/.claude/.credentials.json) — with automatic
+         refresh if expired and a refresh token is available
       4. Anthropic credential_pool OAuth entry (~/.hermes/auth.json)
       5. ANTHROPIC_API_KEY env var (regular API key, or legacy fallback)
 
+    When CLAUDE_CONFIG_DIR is set, the selected Claude account is strict:
+    Hermes will not silently fall back to the default account, credential_pool,
+    or ANTHROPIC_API_KEY if that account's OAuth credentials are unusable.
+
     Returns the token string or None.
     """
+    explicit_config_dir = _explicit_claude_config_dir()
     creds = read_claude_code_credentials()
 
     # 1. Hermes-managed OAuth/setup token env var
@@ -1313,6 +1343,13 @@ def resolve_anthropic_token() -> Optional[str]:
     resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
     if resolved_claude_token:
         return resolved_claude_token
+
+    if explicit_config_dir:
+        logger.warning(
+            "CLAUDE_CONFIG_DIR is set to %s but no usable Claude Code OAuth token was resolved; refusing API-key fallback",
+            explicit_config_dir,
+        )
+        return None
 
     # 4. Hermes credential_pool OAuth entry.
     resolved_pool_token = _resolve_anthropic_pool_token()

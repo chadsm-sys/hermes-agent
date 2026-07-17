@@ -315,6 +315,37 @@ class TestReadClaudeCodeCredentials:
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
         assert read_claude_code_credentials() is None
 
+    def test_explicit_config_dir_isolated_from_home_and_keychain(self, tmp_path, monkeypatch):
+        explicit_dir = tmp_path / "selected-claude-account"
+        explicit_dir.mkdir()
+        (explicit_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "selected-account-token",
+                "refreshToken": "selected-account-refresh",
+                "expiresAt": int(time.time() * 1000) + 3600_000,
+            }
+        }))
+        default_dir = tmp_path / ".claude"
+        default_dir.mkdir()
+        (default_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "default-account-token",
+                "expiresAt": int(time.time() * 1000) + 3600_000,
+            }
+        }))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(explicit_dir))
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+
+        with patch(
+            "agent.anthropic_adapter._read_claude_code_credentials_from_keychain",
+            side_effect=AssertionError("explicit account must not query global keychain"),
+        ):
+            creds = read_claude_code_credentials()
+
+        assert creds is not None
+        assert creds["accessToken"] == "selected-account-token"
+        assert creds["source"] == "claude_config_dir_credentials_file"
+
 
 class TestIsClaudeCodeTokenValid:
     def test_valid_token(self):
@@ -367,6 +398,21 @@ class TestResolveAnthropicToken:
         monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
         monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
         assert resolve_anthropic_token() is None
+
+    def test_explicit_config_dir_refuses_pool_and_api_key_fallback(self, monkeypatch, tmp_path):
+        explicit_dir = tmp_path / "selected-claude-account"
+        explicit_dir.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(explicit_dir))
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-must-not-be-used")
+        monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+
+        with patch(
+            "agent.anthropic_adapter._resolve_anthropic_pool_token",
+            side_effect=AssertionError("explicit account must not query credential pool"),
+        ):
+            assert resolve_anthropic_token() is None
 
     def test_falls_back_to_claude_code_oauth_token(self, monkeypatch, tmp_path):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
