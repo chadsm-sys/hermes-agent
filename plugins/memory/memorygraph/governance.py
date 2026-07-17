@@ -102,15 +102,40 @@ class GovernanceEngine:
           contradicted — conflicting exclusive values with no clear temporal
                          ordering; both flagged for review
         """
+        with self.store.write_transaction(immediate=True):
+            return self._assert_claim(
+                entity_id,
+                attribute,
+                value,
+                confidence,
+                exclusive,
+                valid_from,
+                evidence,
+            )
+
+    def _assert_claim(
+        self,
+        entity_id: int,
+        attribute: str,
+        value: str,
+        confidence: float,
+        exclusive: bool,
+        valid_from: str,
+        evidence: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         attribute_key = normalize_key(attribute) or "note"
-        existing = self.store.claims_for(entity_id, attribute_key, status="active")
+        active = self.store.claims_for(entity_id, attribute_key, status="active")
+        contradicted = self.store.claims_for(
+            entity_id, attribute_key, status="contradicted"
+        )
+        relevant = [*active, *contradicted]
 
         # 1. Duplicate detection → reinforcement.
         # Exclusive (single-valued) attributes hold short distinguishing
         # values ("Facility A" vs "Facility B") where fuzzy matching would
         # swallow genuine updates — restrict them to exact-key matches.
-        exact_only = exclusive or any(c["exclusive"] for c in existing)
-        dup = self._find_duplicate(existing, value, exact_only=exact_only)
+        exact_only = exclusive or any(c["exclusive"] for c in relevant)
+        dup = self._find_duplicate(active, value, exact_only=exact_only)
         if dup is not None:
             reinforced = self.reinforce(dup["id"])
             if evidence:
@@ -120,21 +145,23 @@ class GovernanceEngine:
             return {"claim": reinforced, "outcome": "reinforced"}
 
         # 2. Contradiction detection (exclusive = single-valued attribute)
-        conflicts = [c for c in existing if c["exclusive"] or exclusive]
+        conflicts = [c for c in relevant if c["exclusive"] or exclusive]
         if conflicts and (exclusive or any(c["exclusive"] for c in conflicts)):
             new_from = normalize_ts(valid_from, self.store.now())
             newer = all(new_from >= c["valid_from"] for c in conflicts)
             if newer:
                 # Time-aware update: new value supersedes older ones.
+                for old in conflicts:
+                    self.store.update_claim(
+                        old["id"], status="superseded",
+                        valid_to=new_from,
+                    )
                 claim = self.store.insert_claim(
                     entity_id, attribute_key, value, confidence,
                     exclusive=True, valid_from=new_from,
                 )
                 for old in conflicts:
-                    self.store.update_claim(
-                        old["id"], status="superseded",
-                        valid_to=new_from, superseded_by=claim["id"],
-                    )
+                    self.store.update_claim(old["id"], superseded_by=claim["id"])
                     self.store.log_event("claim_superseded", "claim", old["id"],
                                          {"by": claim["id"]})
                 if evidence:
@@ -145,12 +172,17 @@ class GovernanceEngine:
                     "conflicts": [old["id"] for old in conflicts],
                 }
             # Ambiguous temporal ordering — flag everything for review.
+            penalty = self.policy.contradiction_penalty
+            for conflict in conflicts:
+                self.store.update_claim(
+                    conflict["id"], status="contradicted",
+                    confidence=_clamp(float(conflict["confidence"]) - penalty),
+                )
             claim = self.store.insert_claim(
                 entity_id, attribute_key, value, confidence,
                 exclusive=True, valid_from=new_from,
             )
-            penalty = self.policy.contradiction_penalty
-            for c in [claim, *conflicts]:
+            for c in [claim]:
                 self.store.update_claim(
                     c["id"], status="contradicted",
                     confidence=_clamp(float(c["confidence"]) - penalty),
@@ -231,24 +263,38 @@ class GovernanceEngine:
 
     def resolve_contradiction(self, winner_id: int) -> Dict[str, Any]:
         """Keep one claim from a contradicted group; supersede the rest."""
-        winner = self.store.get_claim(winner_id)
-        if not winner:
-            return {"error": f"claim {winner_id} not found"}
-        losers = [
-            c for c in self.store.claims_for(
-                winner["entity_id"], winner["attribute"], status="contradicted")
-            if c["id"] != winner_id
-        ]
-        self.store.update_claim(winner_id, status="active")
-        for loser in losers:
-            self.store.update_claim(
-                loser["id"], status="superseded",
-                valid_to=self.store.now(), superseded_by=winner_id,
+        with self.store.write_transaction(immediate=True):
+            winner = self.store.get_claim(winner_id)
+            if not winner:
+                return {"error": f"claim {winner_id} not found"}
+            candidates = self.store.claims_for(
+                winner["entity_id"],
+                winner["attribute"],
+                include_history=True,
             )
-        self.store.log_event("contradiction_resolved", "claim", winner_id,
-                             {"superseded": [loser["id"] for loser in losers]})
-        return {"winner": self.store.get_claim(winner_id),
-                "superseded": [loser["id"] for loser in losers]}
+            losers = [
+                claim
+                for claim in candidates
+                if claim["id"] != winner_id
+                and claim["exclusive"]
+                and claim["status"] in {"active", "contradicted"}
+            ]
+            for loser in losers:
+                self.store.update_claim(
+                    loser["id"], status="superseded",
+                    valid_to=self.store.now(), superseded_by=winner_id,
+                )
+            self.store.update_claim(winner_id, status="active")
+            self.store.log_event(
+                "contradiction_resolved",
+                "claim",
+                winner_id,
+                {"superseded": [loser["id"] for loser in losers]},
+            )
+            return {
+                "winner": self.store.get_claim(winner_id),
+                "superseded": [loser["id"] for loser in losers],
+            }
 
     # -- audits ------------------------------------------------------------------
 

@@ -2,6 +2,8 @@
 evidence, time-aware windows, search, audit log)."""
 
 from datetime import datetime, timedelta, timezone
+import sqlite3
+import threading
 
 import pytest
 
@@ -231,6 +233,43 @@ def test_persistence_across_reopen(tmp_path, clock):
     s2 = GraphStore(path, now=clock)
     assert s2.resolve_entity("persist me") is not None
     s2.close()
+
+
+def test_cross_connection_exclusive_writes_leave_one_active_claim(tmp_path):
+    path = tmp_path / "graph.db"
+    first = GraphStore(str(path))
+    second = GraphStore(str(path))
+    entity = first.upsert_entity("Chad", "person")
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def insert(store, value):
+        barrier.wait()
+        try:
+            store.insert_claim(
+                entity["id"], "employer", value, exclusive=True
+            )
+        except sqlite3.IntegrityError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("created")
+
+    threads = [
+        threading.Thread(target=insert, args=(first, "Facility A")),
+        threading.Thread(target=insert, args=(second, "Facility B")),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    try:
+        assert all(not thread.is_alive() for thread in threads)
+        assert sorted(outcomes) == ["created", "rejected"]
+        assert len(first.claims_for(entity["id"], "employer")) == 1
+        assert first._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        first.close()
+        second.close()
 
 
 def test_normalize_ts_validates_format(store, clock):

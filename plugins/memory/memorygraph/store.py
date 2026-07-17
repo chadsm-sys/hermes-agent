@@ -27,6 +27,7 @@ import json
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -107,6 +108,9 @@ CREATE TABLE IF NOT EXISTS claims (
 CREATE INDEX IF NOT EXISTS idx_claims_entity ON claims (entity_id);
 CREATE INDEX IF NOT EXISTS idx_claims_attr ON claims (entity_id, attribute);
 CREATE INDEX IF NOT EXISTS idx_claims_status ON claims (status);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_claims_active_exclusive
+    ON claims (entity_id, attribute)
+    WHERE status = 'active' AND exclusive = 1;
 
 CREATE TABLE IF NOT EXISTS evidence (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +188,7 @@ class GraphStore:
         self.db_path = str(db_path)
         self._now = now or utcnow_iso
         self._lock = threading.RLock()
+        self._transaction_depth = 0
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -194,6 +199,26 @@ class GraphStore:
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
+
+    @contextmanager
+    def write_transaction(self, immediate: bool = False):
+        """Run nested store writes in one atomic SQLite transaction."""
+        with self._lock:
+            outermost = self._transaction_depth == 0
+            if outermost:
+                self._conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.rollback()
+                raise
+            else:
+                self._transaction_depth -= 1
+                if outermost:
+                    self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
@@ -210,7 +235,7 @@ class GraphStore:
         return row["value"] if row else default
 
     def set_meta(self, key: str, value: str) -> None:
-        with self._lock, self._conn:
+        with self.write_transaction():
             self._conn.execute(
                 "INSERT INTO meta (key, value) VALUES (?, ?) "
                 "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -224,7 +249,7 @@ class GraphStore:
         subject_id: Optional[int] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        with self._lock, self._conn:
+        with self.write_transaction():
             self._conn.execute(
                 "INSERT INTO governance_log (ts, event, subject_kind, subject_id, details) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -280,7 +305,7 @@ class GraphStore:
             raise ValueError("entity name must be non-empty")
         ts = self.now()
         existing = self.resolve_entity(name, entity_type) or self.resolve_entity(name)
-        with self._lock, self._conn:
+        with self.write_transaction():
             if existing:
                 new_summary = summary or existing["summary"]
                 merged = json.loads(existing["attrs"] or "{}")
@@ -311,7 +336,7 @@ class GraphStore:
         key = normalize_key(alias)
         if not key:
             return False
-        with self._lock, self._conn:
+        with self.write_transaction():
             try:
                 self._conn.execute(
                     "INSERT INTO entity_aliases (entity_id, alias, alias_key, created_at) "
@@ -349,7 +374,7 @@ class GraphStore:
         """Add a typed edge. Re-adding an identical open edge reinforces it."""
         ts = self.now()
         rel_key = normalize_key(rel_type)
-        with self._lock, self._conn:
+        with self.write_transaction():
             row = self._conn.execute(
                 "SELECT * FROM relationships WHERE src_id = ? AND dst_id = ? "
                 "AND rel_type = ? AND valid_to IS NULL",
@@ -380,7 +405,7 @@ class GraphStore:
 
     def end_relationship(self, rel_id: int, valid_to: str = "") -> bool:
         """Close a relationship's validity window (time-aware retirement)."""
-        with self._lock, self._conn:
+        with self.write_transaction():
             cur = self._conn.execute(
                 "UPDATE relationships SET valid_to = ?, updated_at = ? "
                 "WHERE id = ? AND valid_to IS NULL",
@@ -429,7 +454,7 @@ class GraphStore:
     ) -> Dict[str, Any]:
         """Insert a raw claim row (governance handled by GovernanceEngine)."""
         ts = self.now()
-        with self._lock, self._conn:
+        with self.write_transaction():
             cur = self._conn.execute(
                 "INSERT INTO claims (entity_id, attribute, value, value_key, confidence, tier, "
                 "status, exclusive, reinforcement_count, created_at, updated_at, "
@@ -460,7 +485,7 @@ class GraphStore:
             return
         cols["updated_at"] = self.now()
         sets = ", ".join(f"{k} = ?" for k in cols)
-        with self._lock, self._conn:
+        with self.write_transaction():
             self._conn.execute(
                 f"UPDATE claims SET {sets} WHERE id = ?",  # noqa: S608 — cols whitelisted
                 (*cols.values(), claim_id),
@@ -512,7 +537,7 @@ class GraphStore:
         quote: str = "",
         session_id: str = "",
     ) -> int:
-        with self._lock, self._conn:
+        with self.write_transaction():
             cur = self._conn.execute(
                 "INSERT INTO evidence (subject_kind, subject_id, kind, ref, quote, session_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",

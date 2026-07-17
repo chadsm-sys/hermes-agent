@@ -166,6 +166,52 @@ def test_resolve_contradiction(engine, store, entity):
     assert engine.find_contradictions() == []
 
 
+def test_new_exclusive_claim_includes_unresolved_contradictions(
+    engine, store, entity
+):
+    engine.assert_claim(
+        entity["id"], "employer", "Facility A", exclusive=True,
+        valid_from="2026-07-02T00:00:00Z",
+    )
+    engine.assert_claim(
+        entity["id"], "employer", "Facility B", exclusive=True,
+        valid_from="2026-07-01T00:00:00Z",
+    )
+
+    result = engine.assert_claim(
+        entity["id"], "employer", "Facility C", exclusive=True,
+        valid_from="2026-07-03T00:00:00Z",
+    )
+
+    assert result["outcome"] == "superseded"
+    assert len(result["conflicts"]) == 2
+    active = store.claims_for(entity["id"], "employer")
+    assert [claim["value"] for claim in active] == ["Facility C"]
+
+
+def test_resolution_supersedes_other_active_exclusive_claim(
+    engine, store, entity
+):
+    engine.assert_claim(
+        entity["id"], "employer", "Facility A", exclusive=True,
+        valid_from="2026-07-02T00:00:00Z",
+    )
+    contradicted = engine.assert_claim(
+        entity["id"], "employer", "Facility B", exclusive=True,
+        valid_from="2026-07-01T00:00:00Z",
+    )
+    legacy_active = store.insert_claim(
+        entity["id"], "employer", "Facility C", exclusive=True,
+        valid_from="2026-07-03T00:00:00Z",
+    )
+
+    result = engine.resolve_contradiction(contradicted["claim"]["id"])
+
+    assert legacy_active["id"] in result["superseded"]
+    active = store.claims_for(entity["id"], "employer")
+    assert [claim["id"] for claim in active] == [contradicted["claim"]["id"]]
+
+
 def test_non_exclusive_claims_coexist(engine, store, entity):
     engine.assert_claim(entity["id"], "hobby", "hockey with Colin")
     r = engine.assert_claim(entity["id"], "hobby", "golf")
