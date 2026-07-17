@@ -140,8 +140,9 @@ class GovernanceEngine:
             reinforced = self.reinforce(dup["id"])
             if evidence:
                 self.store.add_evidence("claim", dup["id"], **evidence)
-            self.store.log_event("claim_reinforced", "claim", dup["id"],
-                                 {"similarity_value": value})
+            self.store.log_event(
+                "claim_reinforced", "claim", dup["id"], {"similarity_value": value}
+            )
             return {"claim": reinforced, "outcome": "reinforced"}
 
         # 2. Contradiction detection (exclusive = single-valued attribute)
@@ -153,17 +154,23 @@ class GovernanceEngine:
                 # Time-aware update: new value supersedes older ones.
                 for old in conflicts:
                     self.store.update_claim(
-                        old["id"], status="superseded",
+                        old["id"],
+                        status="superseded",
                         valid_to=new_from,
                     )
                 claim = self.store.insert_claim(
-                    entity_id, attribute_key, value, confidence,
-                    exclusive=True, valid_from=new_from,
+                    entity_id,
+                    attribute_key,
+                    value,
+                    confidence,
+                    exclusive=True,
+                    valid_from=new_from,
                 )
                 for old in conflicts:
                     self.store.update_claim(old["id"], superseded_by=claim["id"])
-                    self.store.log_event("claim_superseded", "claim", old["id"],
-                                         {"by": claim["id"]})
+                    self.store.log_event(
+                        "claim_superseded", "claim", old["id"], {"by": claim["id"]}
+                    )
                 if evidence:
                     self.store.add_evidence("claim", claim["id"], **evidence)
                 return {
@@ -175,20 +182,30 @@ class GovernanceEngine:
             penalty = self.policy.contradiction_penalty
             for conflict in conflicts:
                 self.store.update_claim(
-                    conflict["id"], status="contradicted",
+                    conflict["id"],
+                    status="contradicted",
                     confidence=_clamp(float(conflict["confidence"]) - penalty),
                 )
             claim = self.store.insert_claim(
-                entity_id, attribute_key, value, confidence,
-                exclusive=True, valid_from=new_from,
+                entity_id,
+                attribute_key,
+                value,
+                confidence,
+                exclusive=True,
+                valid_from=new_from,
             )
             for c in [claim]:
                 self.store.update_claim(
-                    c["id"], status="contradicted",
+                    c["id"],
+                    status="contradicted",
                     confidence=_clamp(float(c["confidence"]) - penalty),
                 )
-                self.store.log_event("claim_contradicted", "claim", c["id"],
-                                     {"group": [claim["id"], *(x["id"] for x in conflicts)]})
+                self.store.log_event(
+                    "claim_contradicted",
+                    "claim",
+                    c["id"],
+                    {"group": [claim["id"], *(x["id"] for x in conflicts)]},
+                )
             if evidence:
                 self.store.add_evidence("claim", claim["id"], **evidence)
             return {
@@ -199,8 +216,12 @@ class GovernanceEngine:
 
         # 3. Plain create
         claim = self.store.insert_claim(
-            entity_id, attribute_key, value, confidence,
-            exclusive=exclusive, valid_from=valid_from,
+            entity_id,
+            attribute_key,
+            value,
+            confidence,
+            exclusive=exclusive,
+            valid_from=valid_from,
         )
         if evidence:
             self.store.add_evidence("claim", claim["id"], **evidence)
@@ -281,8 +302,10 @@ class GovernanceEngine:
             ]
             for loser in losers:
                 self.store.update_claim(
-                    loser["id"], status="superseded",
-                    valid_to=self.store.now(), superseded_by=winner_id,
+                    loser["id"],
+                    status="superseded",
+                    valid_to=self.store.now(),
+                    superseded_by=winner_id,
                 )
             self.store.update_claim(winner_id, status="active")
             self.store.log_event(

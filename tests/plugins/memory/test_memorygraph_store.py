@@ -293,9 +293,7 @@ def test_cross_connection_exclusive_writes_leave_one_active_claim(tmp_path):
     def insert(store, value):
         barrier.wait()
         try:
-            store.insert_claim(
-                entity["id"], "employer", value, exclusive=True
-            )
+            store.insert_claim(entity["id"], "employer", value, exclusive=True)
         except sqlite3.IntegrityError:
             outcomes.append("rejected")
         else:

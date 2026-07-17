@@ -115,14 +115,12 @@ class TestEngine:
         inbox = tmp_path / "inbox"
         inbox.mkdir()
         (inbox / "declared.json").write_text(
-            json.dumps(
-                {
-                    "title": "Declared confidence opportunity",
-                    "source_type": "idea",
-                    "confidence": 0.77,
-                    "expected_revenue_usd": 10_000,
-                }
-            )
+            json.dumps({
+                "title": "Declared confidence opportunity",
+                "source_type": "idea",
+                "confidence": 0.77,
+                "expected_revenue_usd": 10_000,
+            })
         )
 
         captured = engine.capture_inbox(inbox).captured[0].opportunity
