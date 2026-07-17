@@ -167,6 +167,13 @@ class GatewayStreamConsumer:
         self._already_sent = False
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
         self._last_edit_time = 0.0
+        # Number of accumulated source characters present at the last
+        # successful streaming update.  ``buffer_threshold`` is a debounce
+        # for *new* text since that update, not a threshold on the total reply
+        # length.  Comparing the total buffer made every later token trigger
+        # an edit once a response crossed the threshold, which could flood
+        # rate-limited platforms such as Telegram.
+        self._last_stream_flush_length = 0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
         # True when the most recent _send_or_edit split-and-delivered across
         # continuation messages (the adapter adopted a new message id).
@@ -345,6 +352,7 @@ class GatewayStreamConsumer:
         self._message_id = None
         self._message_created_ts = None
         self._accumulated = ""
+        self._last_stream_flush_length = 0
         self._last_sent_text = ""
         self._fallback_final_send = False
         self._fallback_prefix = ""
@@ -635,7 +643,15 @@ class GatewayStreamConsumer:
                         # it's a debounce heuristic ("send updates roughly
                         # every N visible characters"), not a platform-limit
                         # check. _len_fn is reserved for overflow detection.
-                        or len(self._accumulated) >= self.cfg.buffer_threshold
+                        # Once a platform reports flood control, the adaptive
+                        # time interval must take precedence; otherwise the
+                        # threshold shortcut immediately retries and defeats
+                        # the backoff.
+                        or (
+                            self._flood_strikes == 0
+                            and len(self._accumulated) - self._last_stream_flush_length
+                            >= self.cfg.buffer_threshold
+                        )
                     )
 
                 current_update_visible = False
@@ -683,6 +699,7 @@ class GatewayStreamConsumer:
                             if new_id is not None and new_id != reply_to:
                                 chunks_delivered = True
                         self._accumulated = ""
+                        self._last_stream_flush_length = 0
                         self._last_sent_text = ""
                         self._last_edit_time = time.monotonic()
                         if got_done:
@@ -735,6 +752,7 @@ class GatewayStreamConsumer:
                             # continuation without dropping content.
                             break
                         self._accumulated = self._accumulated[split_at:].lstrip("\n")
+                        self._last_stream_flush_length = 0
                         self._message_id = None
                         self._last_sent_text = ""
 
@@ -755,6 +773,8 @@ class GatewayStreamConsumer:
                         # turn-final answer — only got_done marks delivered (#29346).
                         is_turn_final=got_done,
                     )
+                    if current_update_visible:
+                        self._last_stream_flush_length = len(self._accumulated)
                     self._last_edit_time = time.monotonic()
 
                 if got_done:
@@ -1620,6 +1640,7 @@ class GatewayStreamConsumer:
         self._preview_message_ids = set()
         self._message_id = None
         self._accumulated = ""
+        self._last_stream_flush_length = 0
         self._last_sent_text = ""
         self._already_sent = False
         self._final_response_sent = False
