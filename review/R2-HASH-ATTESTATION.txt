@@ -1,0 +1,46 @@
+SCHEMA V2 R2 — FOCUSED RE-REVIEW HASH ATTESTATION
+==================================================
+Review date (UTC):     2026-07-17T19:43:15Z
+Repository:            chadsm-sys/hermes-agent
+Branch:                design/olympus-schema-v2-r2-20260717
+Revision commit:       0a93ee96defe42f60ad1ba16b7bae3dd3b2e1e9e (== remote HEAD, verified)
+Base package HEAD:     b14e887a331241306e5cbfa93b7023bda392b810
+
+INDEPENDENCE DISCLOSURE
+-----------------------
+This re-review was performed in the same working session that authored the R2
+revision. Hash verification is mechanical and objective; the design analysis,
+although conducted adversarially and yielding new findings against the authored
+documents, is a self-review. An organizationally independent reviewer must
+confirm before any gate beyond the offline fixture prototype.
+
+R2 DELIVERABLE VERIFICATION (7/7 PASS)
+--------------------------------------
+sha256sum -c review/schema-v2-r2-file-manifest.sha256:
+  design/digest_domain_specification.md ......... OK
+  design/governance_metadata_schema_v2_r2.md .... OK
+  design/human_adjudication_store.md ............ OK
+  design/provenance_authenticity_plan.md ........ OK
+  design/record_assembly_order.md ............... OK
+  design/schema_diff_v2_to_r2.md ................ OK
+  review/remediation_matrix.md .................. OK
+
+Combined manifest SHA-256 (recomputed):
+  8b6002bfa9b3f4501f959225fef6529f3344a1357807f85caa9b6e9db5a718d1
+Matches the attested value in review/schema-v2-r2-attestation.md: YES.
+
+ORIGINAL REVIEWED PACKAGE IMMUTABILITY (PASS)
+---------------------------------------------
+git diff b14e887a..0a93ee96 over all 15 pre-existing package files (12 reviewed
+artifacts, original manifest, original attestation, whitespace exception record)
+is empty: byte-identical. The revision commit adds exactly 9 files and modifies
+nothing (git diff --name-status shows 9 'A' entries, zero 'M'/'D').
+
+By transitivity with the prior verification session (which reproduced the
+original combined ledger hash 83fb892c...b3ff at commit 67cc8a13), the immutable
+reviewed package chain 67cc8a13 -> b14e887a -> 0a93ee96 is intact.
+
+RESULT
+------
+All integrity gates PASS. Design findings and verdict are recorded in
+review/R2-FOCUSED-INDEPENDENT-REVIEW.md.
