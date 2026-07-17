@@ -1,0 +1,1729 @@
+{
+  "allowed_classifications": [
+    "Olympus correct",
+    "Human correct",
+    "Policy ambiguity",
+    "Missing evidence",
+    "Insufficient information",
+    "Requires governance update"
+  ],
+  "records": [
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-3ae2d7187395b8c9cc52772c",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-b7f267ba4698808bf128820f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-925a0fb48847bb150f93e55a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-e39cfde59835c09a4085ee0e",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-e03e79a5869d1d8a37c0cea6",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-47c8f7f5b333f4154f44a050",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7136194dfe75c564a2b32ac8",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-04ba1d1352bbac0df3144008",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-2ba582ff931d646cde45f10f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-8a663fdd6c18cbb27d02c6a0",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7c9248dbf1fa8c23e1034c87",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-af77a325f8eaac3106ba89e7",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-84a5b0c8ca929e4b7856c71d",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-e716721740704971a0303304",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-632d2614ae89c93f152668dc",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-81d8eaa8490bc190765b2186",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-618dc28afb721674dfd95211",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-804cbfdc6ca28ff576e127c1",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-a6b4d4af63bfb1a82dbeb706",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-38e842cbb84b00d7ac7f8aae",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-9f0646e79d67da2fbd2612f0",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-4d7c2085b622f11001fda46f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-2fe0464e05ce8a48c17eb6b4",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-5ac138c531d3d91f0079e716",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-0121ee435ae14da5ed303af2",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-736e73f8d29cf4a7f0dbd7ce",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-f43586c9ac57c76a4f5cfab5",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ba944f90ecc5b0bcd63c4983",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-010f8e4fed8e16b182f56f16",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-aad225a21dd3fa55d3dbe4d0",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-991867c6a7c02577b6de26e9",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-fb2c2b9b2ff1512991a43597",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-0d67ac55f2cfd33197364c17",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7621c6da310af07e03ee4ed4",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-d23f30c484a9619571d54a21",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-217531995379073da097928a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-6c80ce72602972723126ec34",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-9edbba6476fb63d275f9a785",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ce4a5026e734fde39991d78a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ec1278208de95d23c5f7a334",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-45f3629f50c3bcc08f6d381f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7d01b5aeb1b0464ecfb1813a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-c9185ee533b2f9367c397921",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-714f5c40f7ffde38eb96eefe",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-6312a442c8a94332659bb6cb",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-1b401d1dfe7c6869fde3b6e6",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-c564cd12d106dfcb2f31b1e2",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-556eb81905010614164de9ea",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7a5dec2e73995839a7114db8",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7c5c57e09e5494743046a509",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-102e840f2c59ff7e37deaf97",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-05963d8970d5c0b0cf937a6d",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-acb0e0f0a41e8fb52aaec14a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-969edfec5ea25f838df8f30f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-51f20c31da20adc954878755",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-189fe2ef7dc8255b581d3e9c",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ce615192b98209aefbe12f7d",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-c15d881c6063cee6efa72440",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-cbf78d24b9f7fd010ee88945",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-5e26d58c3b2581b1d2c1eb70",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-8b6b00fe2f9c5428053c1229",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-5bc8e723d6fe948c1909ed09",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-4969f300e40a49bfb1cf74da",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-4c53b5a9f6b9fb908bb0b574",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-1226c5dfef95b2b2d0c670d6",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7b48dd1fda3d46e2123809e0",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-9eb342e61d92d7892806622f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-a4c6b28bced42f5f5c53d389",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-f124c1f2c789d1f017fab772",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-7a57c0f3abac4e767fa35da4",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-92dee05be3d16883eebc4bb4",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-4d47f4566a81b9562ef2a691",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-23adb3fcee7ed961c77673d0",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-cc62fbfb7935157a516c0ecd",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-acd833e429e0593902129363",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-83e94277cdf539edbcb02caa",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-9c9732b4d60dc433bc54484f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-89e4b972affd73227f6a68d3",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-442e8c064d33460dcfde7053",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-b3d494183cbe08844d33910a",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-947175eefb62c635fec43bb1",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ad33a5658ceda82f7d0d30db",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-e8eede1b8f54d9230e889d94",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-898605b0738cfffd401f0343",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-8228fb439e089bb52160838c",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-f633d3b3b2e7b5a1fceb127d",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-fe1de2becdae9ba8e829b705",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-0ff9238c60c8d20ff5b43873",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-471c3657792dba699582f16c",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-106cb4450d18cca4c8cabb47",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-62d81c17c4cd336cccd5e170",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-25c97d2fca05b5d9c16b944e",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-48ec14aa480aa5822f45571c",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-258158084b172adce17e7450",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-4d554881207cd9d8256a5f2f",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-e87ad9974fc0c0a082fe7a16",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-766a9ebf67733490e4e231be",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-ed6a3e636b9650e6bf3ea8a1",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-a7cf804e2a40f75509ef42b9",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    },
+    {
+      "actual_human_action": null,
+      "adjudication": {
+        "recommended_policy_or_implementation_change": null,
+        "regression_test": null,
+        "reproducible": null,
+        "root_cause_analysis": null,
+        "status": "awaiting_human_action"
+      },
+      "agreement": null,
+      "classification": "Insufficient information",
+      "comparison": "unassessed",
+      "event_id": "live-79dd5b466b4f135598bbfd8d",
+      "olympus_recommendation": "CONTINUE_READ_ONLY_OBSERVATION",
+      "reason_for_disagreement": null,
+      "schema_version": "olympus-advisory-comparison/v1"
+    }
+  ],
+  "review_workflow": [
+    "record actual human/operator action",
+    "compare with recommendation",
+    "record disagreement reason",
+    "perform root-cause analysis",
+    "verify reproducibility",
+    "recommend policy or implementation change if justified",
+    "add regression test when appropriate",
+    "obtain separate human authorization before any change"
+  ],
+  "schema_version": "olympus-advisory-disagreement-registry/v1",
+  "summary": {
+    "agreements": 0,
+    "assessed": 0,
+    "awaiting_human_action": 100,
+    "disagreements": 0
+  }
+}

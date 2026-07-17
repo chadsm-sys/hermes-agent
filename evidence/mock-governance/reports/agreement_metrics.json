@@ -1,0 +1,79 @@
+{
+  "agreement_rate": null,
+  "authority_failures": 0,
+  "confidence_calibration": {
+    "brier_score": null,
+    "mean_confidence": 1.0,
+    "status": "UNAVAILABLE_PENDING_HUMAN_LABELS"
+  },
+  "contract_failures": 0,
+  "decision_latency": {
+    "batch_total_ms": 1.922,
+    "mean_ms": 0.01922,
+    "note": "observed build latency; excluded from deterministic recommendation records"
+  },
+  "disagreement_rate": null,
+  "event_count": 100,
+  "evidence_gaps": 0,
+  "false_approval_basis": "structural: advisory vocabulary contains no approval or execution outcome; human labels unavailable",
+  "false_approvals": 0,
+  "false_denials": 0,
+  "human_assessed": 0,
+  "human_unassessed": 100,
+  "policy_conflicts": 0,
+  "recommendation_count": 100,
+  "recommendation_distribution": {
+    "CONTINUE_READ_ONLY_OBSERVATION": 100
+  },
+  "risk_distribution": {
+    "LOW": 100
+  },
+  "rolling_trends": [
+    {
+      "agreement_rate": null,
+      "average_confidence": 1.0,
+      "event_count": 20,
+      "evidence_gaps": 0,
+      "human_assessed": 0,
+      "policy_conflicts": 0,
+      "window": "events-1-20"
+    },
+    {
+      "agreement_rate": null,
+      "average_confidence": 1.0,
+      "event_count": 20,
+      "evidence_gaps": 0,
+      "human_assessed": 0,
+      "policy_conflicts": 0,
+      "window": "events-21-40"
+    },
+    {
+      "agreement_rate": null,
+      "average_confidence": 1.0,
+      "event_count": 20,
+      "evidence_gaps": 0,
+      "human_assessed": 0,
+      "policy_conflicts": 0,
+      "window": "events-41-60"
+    },
+    {
+      "agreement_rate": null,
+      "average_confidence": 1.0,
+      "event_count": 20,
+      "evidence_gaps": 0,
+      "human_assessed": 0,
+      "policy_conflicts": 0,
+      "window": "events-61-80"
+    },
+    {
+      "agreement_rate": null,
+      "average_confidence": 1.0,
+      "event_count": 20,
+      "evidence_gaps": 0,
+      "human_assessed": 0,
+      "policy_conflicts": 0,
+      "window": "events-81-100"
+    }
+  ],
+  "schema_version": "olympus-advisory-agreement-metrics/v1"
+}

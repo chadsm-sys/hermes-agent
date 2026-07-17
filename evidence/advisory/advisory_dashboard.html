@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset='utf-8'><title>Olympus Advisory Mode</title><style>body{font-family:system-ui;max-width:1100px;margin:2rem auto;padding:0 1rem}.pass{color:#087f23}pre{background:#f4f4f4;padding:1rem;overflow:auto}</style></head><body><h1>Olympus Advisory Mode</h1><p><strong class='pass'>ADVISORY_MODE_READY</strong> — recommendation-only; no execution interface.</p><p>Olympus activation: DENIED. Production authority: DENIED. Human quality labels: pending.</p><h2>Rolling metrics</h2><pre>{
+  &quot;agreement_rate&quot;: null,
+  &quot;authority_failures&quot;: 0,
+  &quot;confidence_calibration&quot;: {
+    &quot;brier_score&quot;: null,
+    &quot;mean_confidence&quot;: 1.0,
+    &quot;status&quot;: &quot;UNAVAILABLE_PENDING_HUMAN_LABELS&quot;
+  },
+  &quot;contract_failures&quot;: 0,
+  &quot;decision_latency&quot;: {
+    &quot;batch_total_ms&quot;: 1.922,
+    &quot;mean_ms&quot;: 0.01922,
+    &quot;note&quot;: &quot;observed build latency; excluded from deterministic recommendation records&quot;
+  },
+  &quot;disagreement_rate&quot;: null,
+  &quot;event_count&quot;: 100,
+  &quot;evidence_gaps&quot;: 0,
+  &quot;false_approval_basis&quot;: &quot;structural: advisory vocabulary contains no approval or execution outcome; human labels unavailable&quot;,
+  &quot;false_approvals&quot;: 0,
+  &quot;false_denials&quot;: 0,
+  &quot;human_assessed&quot;: 0,
+  &quot;human_unassessed&quot;: 100,
+  &quot;policy_conflicts&quot;: 0,
+  &quot;recommendation_count&quot;: 100,
+  &quot;recommendation_distribution&quot;: {
+    &quot;CONTINUE_READ_ONLY_OBSERVATION&quot;: 100
+  },
+  &quot;risk_distribution&quot;: {
+    &quot;LOW&quot;: 100
+  },
+  &quot;rolling_trends&quot;: [
+    {
+      &quot;agreement_rate&quot;: null,
+      &quot;average_confidence&quot;: 1.0,
+      &quot;event_count&quot;: 20,
+      &quot;evidence_gaps&quot;: 0,
+      &quot;human_assessed&quot;: 0,
+      &quot;policy_conflicts&quot;: 0,
+      &quot;window&quot;: &quot;events-1-20&quot;
+    },
+    {
+      &quot;agreement_rate&quot;: null,
+      &quot;average_confidence&quot;: 1.0,
+      &quot;event_count&quot;: 20,
+      &quot;evidence_gaps&quot;: 0,
+      &quot;human_assessed&quot;: 0,
+      &quot;policy_conflicts&quot;: 0,
+      &quot;window&quot;: &quot;events-21-40&quot;
+    },
+    {
+      &quot;agreement_rate&quot;: null,
+      &quot;average_confidence&quot;: 1.0,
+      &quot;event_count&quot;: 20,
+      &quot;evidence_gaps&quot;: 0,
+      &quot;human_assessed&quot;: 0,
+      &quot;policy_conflicts&quot;: 0,
+      &quot;window&quot;: &quot;events-41-60&quot;
+    },
+    {
+      &quot;agreement_rate&quot;: null,
+      &quot;average_confidence&quot;: 1.0,
+      &quot;event_count&quot;: 20,
+      &quot;evidence_gaps&quot;: 0,
+      &quot;human_assessed&quot;: 0,
+      &quot;policy_conflicts&quot;: 0,
+      &quot;window&quot;: &quot;events-61-80&quot;
+    },
+    {
+      &quot;agreement_rate&quot;: null,
+      &quot;average_confidence&quot;: 1.0,
+      &quot;event_count&quot;: 20,
+      &quot;evidence_gaps&quot;: 0,
+      &quot;human_assessed&quot;: 0,
+      &quot;policy_conflicts&quot;: 0,
+      &quot;window&quot;: &quot;events-81-100&quot;
+    }
+  ],
+  &quot;schema_version&quot;: &quot;olympus-advisory-agreement-metrics/v1&quot;
+}</pre><h2>Boundary</h2><p>Recommendations are inert records fixed to a mock-only advisory target. No callback or Hermes write path exists.</p></body></html>

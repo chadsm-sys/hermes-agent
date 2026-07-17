@@ -1,0 +1,19 @@
+Olympus Live Read-Only Shadow Gate — full test suite
+Command: python3 -m unittest discover -s tests -v
+Result: PASS
+Tests run: 31
+Failures: 0
+Errors: 0
+Original shadow tests: 14/14 PASS
+False-approval regression tests: 9/9 PASS
+Live-shadow gate tests: 8/8 PASS
+
+Live-shadow coverage:
+- redaction, mock-only targeting, immutable publication
+- overwrite refusal
+- output path escape denial
+- malformed/actionable event schema denial
+- simulation-only evaluation
+- two clean byte-identical replays
+- forbidden import scan
+- no callback or write-handle public API

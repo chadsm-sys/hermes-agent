@@ -1,0 +1,11 @@
+{
+  "byte_identical": true,
+  "corpus_sha256_run_a": "d4822e3de106585ab9f7097a595803143053cfc969cfff16b1139e1e585833fe",
+  "corpus_sha256_run_b": "d4822e3de106585ab9f7097a595803143053cfc969cfff16b1139e1e585833fe",
+  "event_count": 50,
+  "quality_verdict": "BLOCKED",
+  "schema_version": "olympus-decision-quality-replay/v1",
+  "source_advisory_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+  "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+  "status": "PASS"
+}

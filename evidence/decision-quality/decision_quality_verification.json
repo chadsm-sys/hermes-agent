@@ -1,0 +1,72 @@
+{
+  "blocker": {
+    "boundary_decision": "Do not weaken exporter redaction or safety boundaries in this phase.",
+    "code": "INSUFFICIENT_EXPORTED_METADATA",
+    "missing_information": [
+      "Requested governance action/decision class (needed to distinguish observation from denial, policy, authority, and contract cases).",
+      "Policy evaluation result and conflict indicators (needed to identify applicable/conflicting policies and ambiguity).",
+      "Contract resolution status, including unknown/failed contract indicators (needed to judge contract recommendations).",
+      "Evidence sufficiency outcome or typed missing-evidence indicators (needed to assess evidence gaps without viewing payloads).",
+      "Authority requirement versus supplied authority and boundary-result indicator (needed to assess authority disagreements).",
+      "Metadata/schema validation outcome (needed to identify malformed metadata).",
+      "Human operator disposition or independently curated expected outcome (needed for agreement and calibration)."
+    ],
+    "reason": "The certified exporter exposes only redacted message-observation metadata and a fixed read-only observation contract. It cannot support independent judgment of the requested governance scenario classes."
+  },
+  "exporter_hashes": {
+    "exporter/export_schema.json": {
+      "actual": "04bc9dcb053c85b741bb9d5acee34a6e99a67debd570138a44144d32d0a3da8f",
+      "expected": "04bc9dcb053c85b741bb9d5acee34a6e99a67debd570138a44144d32d0a3da8f"
+    },
+    "exporter/live_events.jsonl": {
+      "actual": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+      "expected": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af"
+    },
+    "exporter/read_only_exporter.py": {
+      "actual": "682c07a0ecd285d3ad6b496a3e0582b0bc9d675d00269e649d6d1d159bc6f648",
+      "expected": "682c07a0ecd285d3ad6b496a3e0582b0bc9d675d00269e649d6d1d159bc6f648"
+    }
+  },
+  "quality_gates": {
+    "human_adjudications": 0,
+    "meaningful_human_adjudication_possible": false,
+    "representative_balanced_corpus": false,
+    "required_scenario_classes_observable": 1,
+    "required_scenario_classes_total": 11
+  },
+  "replay": {
+    "byte_identical": true,
+    "corpus_sha256_run_a": "d4822e3de106585ab9f7097a595803143053cfc969cfff16b1139e1e585833fe",
+    "corpus_sha256_run_b": "d4822e3de106585ab9f7097a595803143053cfc969cfff16b1139e1e585833fe",
+    "event_count": 50,
+    "quality_verdict": "BLOCKED",
+    "schema_version": "olympus-decision-quality-replay/v1",
+    "source_advisory_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+    "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+    "status": "PASS"
+  },
+  "safety_checks": {
+    "deterministic_replay_pass": true,
+    "existing_advisory_certification_preserved": true,
+    "existing_live_shadow_certification_preserved": true,
+    "existing_shadow_certification_preserved": true,
+    "no_execution_capability": true,
+    "no_exporter_changes": true,
+    "no_outbound_authority": true,
+    "no_production_mutations": true,
+    "no_write_path_to_hermes": true,
+    "olympus_activation_denied": true,
+    "production_authority_denied": true
+  },
+  "safety_status": "PASS",
+  "schema_version": "olympus-decision-quality-verification/v1",
+  "verdict": "BLOCKED",
+  "verification_evidence": {
+    "decision_quality_8_of_8_pass": true,
+    "exporter_hashes_unchanged": true,
+    "full_suite_49_of_49_pass": true,
+    "prior_manifest_recoverable_from_backup": true,
+    "shadow_verification_11_of_11_pass": true,
+    "two_replays_byte_identical": true
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "byte_identical": true,
+  "canonicalization": "sorted-key compact JSONL; no wall-clock fields in recommendations",
+  "event_count": 100,
+  "prior_live_shadow_replay_status": "PASS",
+  "run_a_recommendation_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+  "run_b_recommendation_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+  "schema_version": "olympus-advisory-replay/v1",
+  "source_live_shadow_manifest_sha256": "7b7dae83d87eb50007156ac26b8f02ab9be323a807fcb1a3841488adddf1488f",
+  "source_stream": "exporter/live_events.jsonl",
+  "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+  "status": "PASS"
+}

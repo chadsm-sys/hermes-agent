@@ -1,0 +1,29 @@
+{
+  "agreement_rate": null,
+  "authority_disagreement_frequency": null,
+  "confidence_calibration": {
+    "brier_score": null,
+    "status": "UNAVAILABLE_NO_VALID_HUMAN_OUTCOMES"
+  },
+  "disagreement_rate": null,
+  "evidence_gap_frequency": null,
+  "human_reviewed": 0,
+  "policy_ambiguity_frequency": null,
+  "recommendation_distribution": {
+    "CONTINUE_READ_ONLY_OBSERVATION": 50
+  },
+  "recurring_failure_patterns": [
+    {
+      "affected_events": 50,
+      "pattern": "semantic_governance_context_absent"
+    },
+    {
+      "affected_events": 50,
+      "pattern": "single_contract_single_recommendation_corpus"
+    }
+  ],
+  "status": "BLOCKED_INSUFFICIENT_EXPORTED_METADATA",
+  "uncertainty_distribution": {
+    "1.0": 50
+  }
+}

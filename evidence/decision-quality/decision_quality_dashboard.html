@@ -1,0 +1,32 @@
+<!doctype html><meta charset='utf-8'><title>Olympus Decision Quality</title>
+<style>body{font:16px system-ui;max-width:1000px;margin:40px auto;padding:0 20px}.blocked{color:#a00;font-weight:800}pre{background:#f4f4f4;padding:16px;overflow:auto}</style>
+<h1>Olympus Decision Quality Certification</h1><p class='blocked'>BLOCKED — insufficient exported metadata for representative human adjudication</p>
+<ul><li>Corpus: 50 unchanged exported events</li><li>Required scenario classes observable: 1/11</li><li>Human-reviewed: 0</li><li>Agreement/disagreement/calibration: unavailable</li><li>Safety/redaction boundary: preserved</li></ul><pre>{
+  &quot;human_reviewed&quot;: 0,
+  &quot;agreement_rate&quot;: null,
+  &quot;disagreement_rate&quot;: null,
+  &quot;confidence_calibration&quot;: {
+    &quot;status&quot;: &quot;UNAVAILABLE_NO_VALID_HUMAN_OUTCOMES&quot;,
+    &quot;brier_score&quot;: null
+  },
+  &quot;evidence_gap_frequency&quot;: null,
+  &quot;policy_ambiguity_frequency&quot;: null,
+  &quot;authority_disagreement_frequency&quot;: null,
+  &quot;recommendation_distribution&quot;: {
+    &quot;CONTINUE_READ_ONLY_OBSERVATION&quot;: 50
+  },
+  &quot;uncertainty_distribution&quot;: {
+    &quot;1.0&quot;: 50
+  },
+  &quot;recurring_failure_patterns&quot;: [
+    {
+      &quot;pattern&quot;: &quot;semantic_governance_context_absent&quot;,
+      &quot;affected_events&quot;: 50
+    },
+    {
+      &quot;pattern&quot;: &quot;single_contract_single_recommendation_corpus&quot;,
+      &quot;affected_events&quot;: 50
+    }
+  ],
+  &quot;status&quot;: &quot;BLOCKED_INSUFFICIENT_EXPORTED_METADATA&quot;
+}</pre>

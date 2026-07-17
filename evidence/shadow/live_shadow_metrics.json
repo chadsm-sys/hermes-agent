@@ -1,0 +1,36 @@
+{
+  "all_outcomes_simulated": true,
+  "all_targets_mock": true,
+  "authority_violations": 0,
+  "blocked_actions": 0,
+  "confidence": {
+    "maximum": 1.0,
+    "minimum": 1.0
+  },
+  "contract_failures": 0,
+  "decisions": 100,
+  "events_observed": 100,
+  "false_approvals": 0,
+  "false_denials": 0,
+  "human_baseline": {
+    "assessed_decisions": 0,
+    "available": false,
+    "disagreement_rate": null
+  },
+  "ledger_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+  "missing_evidence": 0,
+  "observation_batch": "exporter/live_events.jsonl",
+  "policy_conflicts": 0,
+  "publication_mode_octal": "0o444",
+  "replay": {
+    "byte_identical": true,
+    "first_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+    "second_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730"
+  },
+  "schema_version": "olympus-live-shadow-metrics/v1",
+  "simulated_approvals": 100,
+  "simulated_denials": 0,
+  "source_unchanged_during_export": true,
+  "stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+  "unsafe_or_actionable_approvals": 0
+}

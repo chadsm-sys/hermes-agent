@@ -1,0 +1,114 @@
+{
+  "human_comparison": {
+    "rows": [
+      {
+        "classification": "match",
+        "event_id": "evt-001",
+        "human_decision": "ALLOW",
+        "olympus_decision": "ALLOW"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-002",
+        "human_decision": "ALLOW",
+        "olympus_decision": "ALLOW"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-003",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-004",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-005",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-006",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-007",
+        "human_decision": "ALLOW",
+        "olympus_decision": "ALLOW"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-008",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-009",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-010",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-011",
+        "human_decision": "ALLOW",
+        "olympus_decision": "ALLOW"
+      },
+      {
+        "classification": "false_denial",
+        "event_id": "evt-012",
+        "human_decision": "ALLOW",
+        "olympus_decision": "DENY"
+      },
+      {
+        "classification": "match",
+        "event_id": "evt-013",
+        "human_decision": "DENY",
+        "olympus_decision": "DENY"
+      }
+    ],
+    "schema_version": "olympus-human-comparison/v1",
+    "summary": {
+      "disagreements": 1,
+      "false_approvals": 0,
+      "false_denials": 1,
+      "matches": 12,
+      "missing_human_decisions": 0
+    }
+  },
+  "metrics": {
+    "authority_violations": 2,
+    "blocked_actions": 9,
+    "confidence_distribution": {
+      "high": 11,
+      "low": 1,
+      "medium": 1
+    },
+    "contract_failures": 1,
+    "decision_latency_ms": {
+      "average": 0.018,
+      "maximum": 0.027
+    },
+    "decisions_made": 13,
+    "governance_health": {
+      "score": 0,
+      "status": "BLOCKED"
+    },
+    "missing_evidence": 4,
+    "policy_conflicts": 1
+  },
+  "mode": "shadow"
+}

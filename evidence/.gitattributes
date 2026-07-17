@@ -1,0 +1,3 @@
+# Evidence is immutable binary payload for Git purposes. This prevents Git from
+# treating inherited whitespace or non-UTF-8 fixture bytes as editable text.
+** -diff

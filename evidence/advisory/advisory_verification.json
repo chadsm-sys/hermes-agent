@@ -1,0 +1,69 @@
+{
+  "checks": {
+    "advisory_engine_forbidden_imports_absent": true,
+    "advisory_engine_has_no_execution_callback_or_writer": true,
+    "advisory_tests_pass": true,
+    "all_advisory_targets_mock_only": true,
+    "certified_export_stream_immutable": true,
+    "certified_export_stream_unchanged": true,
+    "deterministic_recommendation_generation": true,
+    "existing_live_shadow_certification_pass": true,
+    "existing_shadow_certification_pass": true,
+    "human_comparison_framework_generated": true,
+    "olympus_activation_denied": true,
+    "prior_artifact_manifest_verified_before_advisory_build": true,
+    "production_authority_denied": true,
+    "recommendations_non_executable": true,
+    "zero_approval_or_execution_outcomes": true,
+    "zero_false_approvals_introduced": true
+  },
+  "failed_checks": [],
+  "independent_final_audit": {
+    "checks": {
+      "advisory_engine_public_api_is_pure": true,
+      "advisory_engine_static_safety_pass": true,
+      "advisory_tests_10_of_10_pass": true,
+      "full_suite_41_of_41_pass": true,
+      "human_comparison_calibration_not_fabricated": true,
+      "olympus_activation_denied": true,
+      "prior_live_shadow_checks_all_pass": true,
+      "prior_shadow_acceptance_all_pass": true,
+      "production_authority_denied": true,
+      "recommendation_count_matches_stream": true,
+      "recommendations_all_mock_only": true,
+      "recommendations_all_non_executable": true,
+      "recommendations_have_no_approval_or_execution_outcome": true,
+      "replay_a_matches_published_ledger": true,
+      "source_stream_hash_matches_prior_certification": true,
+      "source_stream_is_immutable": true,
+      "two_clean_replays_byte_identical": true,
+      "zero_false_approvals_introduced": true
+    },
+    "event_count": 100,
+    "findings": [],
+    "recommendation_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+    "status": "PASS"
+  },
+  "prior_manifest": {
+    "failures": [],
+    "sha256_before_advisory_build": "bd3f9637957ff233e40fb942500afed18f242daddd4f2eef7ec6572149489847",
+    "verified": true
+  },
+  "replay": {
+    "byte_identical": true,
+    "canonicalization": "sorted-key compact JSONL; no wall-clock fields in recommendations",
+    "event_count": 100,
+    "prior_live_shadow_replay_status": "PASS",
+    "run_a_recommendation_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+    "run_b_recommendation_ledger_sha256": "177956438fe3c5401eea2f1ed123bd8cfae51e6592c00c5dc75c46c80a1c58ad",
+    "schema_version": "olympus-advisory-replay/v1",
+    "source_live_shadow_manifest_sha256": "7b7dae83d87eb50007156ac26b8f02ab9be323a807fcb1a3841488adddf1488f",
+    "source_stream": "exporter/live_events.jsonl",
+    "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+    "status": "PASS"
+  },
+  "safety_findings": [],
+  "schema_version": "olympus-advisory-verification/v1",
+  "scope": "recommendation-only analysis of certified immutable live-shadow events; no Hermes write path or outbound authority",
+  "verdict": "ADVISORY_MODE_READY"
+}

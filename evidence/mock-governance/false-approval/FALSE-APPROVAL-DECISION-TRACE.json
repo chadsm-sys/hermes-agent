@@ -1,0 +1,315 @@
+{
+  "approval_rule_or_fallback": {
+    "corrected": "ALLOW only when contract identity/applicability, authority, target, evidence validity/freshness/consistency, policy gates, conflicts, and confidence all pass.",
+    "defect": "No reason was produced for unverifiable evidence metadata or for the declared protected-mutation default block, so allowed = not reasons evaluated true.",
+    "original": "ALLOW when no reason was produced by unknown-contract, permanent-denial, authority, required-ID presence, or event policy-conflict checks"
+  },
+  "authority_tier_evaluation": {
+    "required": 3,
+    "result": "pass; authority tier was not the defect",
+    "supplied": 3
+  },
+  "classification": "implementation defect plus overly permissive contract schema and missing fail-closed validation",
+  "confidence_calculation": {
+    "corrected_rule": {
+      "failures": [],
+      "minimum": 0.8,
+      "rule": "numeric confidence clamped to [0,1] and compared with contract minimum",
+      "source": "frozen_event"
+    },
+    "input": 0.93,
+    "original_rule": "float conversion and clamp to [0,1]; confidence did not gate approval",
+    "result": "pass; confidence was not the defect and cannot override failed evidence or policy gates"
+  },
+  "contract_evaluation": {
+    "corrected_contract": {
+      "allowed_target_prefixes": [
+        "mock://launchd/"
+      ],
+      "evidence_rules": {
+        "health_receipt": {
+          "bind_to_target": true,
+          "max_age_seconds": 300,
+          "required_fields": [
+            "issued_at",
+            "target"
+          ]
+        },
+        "operator_approval": {
+          "bind_to_target": true,
+          "max_age_seconds": 900,
+          "required_fields": [
+            "issuer",
+            "issued_at",
+            "scope",
+            "target"
+          ],
+          "scope_equals_action": true
+        },
+        "rollback_plan": {
+          "bind_to_target": true,
+          "required_fields": [
+            "target",
+            "plan_id"
+          ]
+        }
+      },
+      "min_authority_tier": 3,
+      "min_confidence": 0.8,
+      "policy_applicability": "protected_mutation",
+      "policy_gate_evidence": [
+        "operator_approval"
+      ],
+      "required_evidence": [
+        "health_receipt",
+        "rollback_plan",
+        "operator_approval"
+      ]
+    },
+    "corrected_result": "contract identified; evidence rules applied; action denied because required metadata is unverifiable",
+    "original_contract_identity": "restart_service",
+    "original_defect": "Presence plus verified=true was treated as sufficient; target binding, issuer, scope, freshness, and policy applicability were not defined or checked.",
+    "original_required_evidence_ids": [
+      "health_receipt",
+      "rollback_plan",
+      "operator_approval"
+    ]
+  },
+  "deterministic_original_reproduction": {
+    "archive": "olympus-shadow-governance-20260717.tar.gz",
+    "archived_ledger_digest": "b6d466a3ee4b97d2ece7bd053dae21a6a9e6859d539093a2804461e17f909eaa",
+    "decision": "ALLOW",
+    "digest_match": true,
+    "original_contracts_sha256": "dd1eb52a7ee759774a00c373a72ba2d6c4ac70d45f5355a52f47eb3a0cb725aa",
+    "original_engine_sha256": "00894b583a0068742b488fa4f5106f52582debccb51330d163914cc8660a5af4",
+    "reproduced_digest": "b6d466a3ee4b97d2ece7bd053dae21a6a9e6859d539093a2804461e17f909eaa"
+  },
+  "event_id": "evt-005",
+  "evidence_available": [
+    "health_receipt",
+    "operator_approval",
+    "rollback_plan"
+  ],
+  "evidence_missing": [],
+  "evidence_unverifiable_metadata": {
+    "health_receipt": [
+      "issued_at",
+      "target"
+    ],
+    "operator_approval": [
+      "issuer",
+      "issued_at",
+      "scope",
+      "target"
+    ],
+    "rollback_plan": [
+      "target",
+      "plan_id"
+    ]
+  },
+  "human_baseline_analysis": {
+    "conclusion": "supported, not assumed",
+    "evidence": [
+      "The declared protected-mutation policy defaults to blocked.",
+      "The approval lacks issuer, target binding, scope, and freshness metadata.",
+      "The health receipt lacks target binding and freshness metadata.",
+      "The rollback plan lacks target binding and a plan identity."
+    ],
+    "human_decision": "DENY"
+  },
+  "normalized_input": {
+    "action_kind": "restart_service",
+    "policy_applicability": "protected_mutation",
+    "target": "mock://launchd/ai.hermes.gateway"
+  },
+  "policy_evaluation": {
+    "authoritative_policy": "policies.protected_mutations_default_blocked=true",
+    "corrected_result": {
+      "applicability": "protected_mutation",
+      "conflicts": [],
+      "failures": [
+        "protected mutation policy gate is unverifiable: operator_approval"
+      ],
+      "permanently_denied": false,
+      "simulation_only": true
+    },
+    "original_result": "pass because the v1 engine evaluated only permanent denials and event-supplied policy_conflicts"
+  },
+  "post_remediation_decision": {
+    "authority_tier": {
+      "required": 3,
+      "supplied": 3
+    },
+    "authority_violation": false,
+    "confidence": 0.93,
+    "confidence_evaluation": {
+      "failures": [],
+      "minimum": 0.8,
+      "rule": "numeric confidence clamped to [0,1] and compared with contract minimum",
+      "source": "frozen_event"
+    },
+    "contract_failure": false,
+    "contract_issues": [],
+    "contracts_evaluated": [
+      "restart_service"
+    ],
+    "contradictory_evidence": [],
+    "decision": "DENY",
+    "decision_digest": "93a895c1b691fe0af69085fb88e231ab5dad92b0701dd4d3126f7e27cfb23cad",
+    "evidence_used": [
+      {
+        "id": "health_receipt",
+        "verified": true
+      },
+      {
+        "id": "operator_approval",
+        "verified": true
+      },
+      {
+        "id": "rollback_plan",
+        "verified": true
+      }
+    ],
+    "evidence_validation": {
+      "required": [
+        "health_receipt",
+        "operator_approval",
+        "rollback_plan"
+      ],
+      "verified": [
+        "health_receipt",
+        "operator_approval",
+        "rollback_plan"
+      ]
+    },
+    "human_decision": "DENY",
+    "invalid_evidence": {
+      "health_receipt": [
+        "evidence freshness is unverifiable",
+        "evidence is not bound to the requested target",
+        "missing verification metadata: issued_at, target"
+      ],
+      "operator_approval": [
+        "evidence freshness is unverifiable",
+        "evidence is not bound to the requested target",
+        "evidence scope does not match requested action",
+        "missing verification metadata: issuer, issued_at, scope, target"
+      ],
+      "rollback_plan": [
+        "evidence is not bound to the requested target",
+        "missing verification metadata: target, plan_id"
+      ]
+    },
+    "missing_evidence": [],
+    "mode": "shadow",
+    "normalized_input": {
+      "action_kind": "restart_service",
+      "policy_applicability": "protected_mutation",
+      "target": "mock://launchd/ai.hermes.gateway"
+    },
+    "policy_conflicts": [],
+    "policy_decisions": {
+      "applicability": "protected_mutation",
+      "conflicts": [],
+      "failures": [
+        "protected mutation policy gate is unverifiable: operator_approval"
+      ],
+      "permanently_denied": false,
+      "simulation_only": true
+    },
+    "proposed_action": {
+      "kind": "restart_service",
+      "target": "mock://launchd/ai.hermes.gateway"
+    },
+    "reason": "policy failure: protected mutation policy gate is unverifiable: operator_approval; invalid evidence: health_receipt (evidence freshness is unverifiable; evidence is not bound to the requested target; missing verification metadata: issued_at, target), operator_approval (evidence freshness is unverifiable; evidence is not bound to the requested target; evidence scope does not match requested action; missing verification metadata: issuer, issued_at, scope, target), rollback_plan (evidence is not bound to the requested target; missing verification metadata: target, plan_id)",
+    "runtime_latency_ms": 0.023,
+    "schema_version": "olympus-shadow-decision/v2",
+    "simulated_outcome": "SIMULATED_BLOCKED",
+    "stale_evidence": [],
+    "target_failures": [],
+    "target_violation": false,
+    "timeline": [
+      {
+        "result": "gateway.unhealthy",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ],
+    "timestamp": "2026-07-17T12:04:00Z",
+    "triggering_event": {
+      "event_id": "evt-005",
+      "event_type": "gateway.unhealthy",
+      "source": "hermes-gateway",
+      "state": {
+        "consecutive_failures": 3,
+        "gateway": "unhealthy"
+      }
+    }
+  },
+  "schema_version": "olympus-false-approval-trace/v1",
+  "target_evaluation": {
+    "allowed_prefixes": [
+      "mock://launchd/"
+    ],
+    "result": "pass in the corrected evaluation; target identity was mock-only and contract-authorized",
+    "target": "mock://launchd/ai.hermes.gateway"
+  },
+  "triggering_event": {
+    "authority_tier": 3,
+    "confidence": 0.93,
+    "event_id": "evt-005",
+    "event_type": "gateway.unhealthy",
+    "evidence": [
+      {
+        "id": "health_receipt",
+        "verified": true
+      },
+      {
+        "id": "rollback_plan",
+        "verified": true
+      },
+      {
+        "id": "operator_approval",
+        "verified": true
+      }
+    ],
+    "human_decision": "DENY",
+    "requested_action": {
+      "kind": "restart_service",
+      "target": "mock://launchd/ai.hermes.gateway"
+    },
+    "source": "hermes-gateway",
+    "state": {
+      "consecutive_failures": 3,
+      "gateway": "unhealthy"
+    },
+    "timestamp": "2026-07-17T12:04:00Z"
+  }
+}

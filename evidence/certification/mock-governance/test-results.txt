@@ -1,0 +1,20 @@
+test_cli_run_builds_replay_reports_and_certification (test_observer_cli.CliTests) ... ok
+test_runtime_package_has_no_external_effect_imports (test_observer_cli.CliTests) ... ok
+test_observer_reads_frozen_hermes_event_stream_with_digest (test_observer_cli.ObserverTests) ... ok
+test_observer_refuses_source_outside_mock_workspace (test_observer_cli.ObserverTests) ... ok
+test_allowed_action_is_simulated_and_fully_explained (test_shadow_governance.PipelineTests) ... ok
+test_insufficient_authority_is_reported (test_shadow_governance.PipelineTests) ... ok
+test_missing_evidence_denies_action (test_shadow_governance.PipelineTests) ... ok
+test_olympus_activation_is_permanently_denied_even_with_approval (test_shadow_governance.PipelineTests) ... ok
+test_unknown_contract_fails_closed (test_shadow_governance.PipelineTests) ... ok
+test_human_comparison_classifies_false_approval_and_false_denial (test_shadow_governance.ReplayAndReportingTests) ... ok
+test_metrics_and_reports_include_required_governance_views (test_shadow_governance.ReplayAndReportingTests) ... ok
+test_replay_is_deterministic (test_shadow_governance.ReplayAndReportingTests) ... ok
+test_engine_rejects_non_shadow_mode (test_shadow_governance.SafetyTests) ... ok
+test_workspace_rejects_path_escape (test_shadow_governance.SafetyTests) ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in 0.015s
+
+OK
+{"mode": "shadow", "replay_manifest": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/replay/replay_manifest.json", "reports": {"certification_json": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/certification/CERTIFICATION_PACKET.json", "certification_markdown": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/certification/CERTIFICATION_PACKET.md", "comparison": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/reports/human_vs_olympus.json", "dashboard": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/reports/dashboard.html", "json": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/reports/governance_report.json", "markdown": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/reports/governance_report.md", "timeline": "/Users/macmini/Hermes-Handoff/mock-workspaces/olympus-shadow-governance-20260717/.test-tmp/tmp5g0kmdja/reports/execution_timeline.json"}, "status": "PASS"}

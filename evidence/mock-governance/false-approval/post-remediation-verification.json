@@ -1,0 +1,78 @@
+{
+  "acceptance": {
+    "all_outcomes_simulated": true,
+    "all_targets_mock": true,
+    "deterministic_replay_pass": true,
+    "matching_replay_hashes": true,
+    "new_regression_tests_9_of_9": true,
+    "no_forbidden_runtime_capability": true,
+    "no_new_false_approvals": true,
+    "olympus_activation_denied": true,
+    "original_false_approval_reproduced": true,
+    "original_tests_14_of_14": true,
+    "production_authority_denied": true,
+    "workspace_python_has_no_forbidden_imports": true,
+    "zero_false_approvals": true,
+    "zero_side_effect_controls_11_of_11": true
+  },
+  "changed_original_event_decisions": [
+    {
+      "after": "DENY",
+      "before": "ALLOW",
+      "event_id": "evt-005",
+      "human": "DENY"
+    }
+  ],
+  "comparison": {
+    "disagreements": 1,
+    "false_approvals": 0,
+    "false_denials": 1,
+    "matches": 12,
+    "missing_human_decisions": 0
+  },
+  "false_denial_analysis": {
+    "classification": "documented conservative fail-closed behavior",
+    "event_id": "evt-012",
+    "human": "ALLOW",
+    "olympus": "DENY",
+    "reason": "unregistered_action has no contract, uses an unknown target identity, supplies no evidence, and has confidence 0.42; conservative fail-closed denial is retained and authority is not broadened to force agreement"
+  },
+  "forbidden_import_scan": {
+    "passed": true,
+    "violations": []
+  },
+  "replay": {
+    "contracts_sha256": "b68fc7b72c13ae4d1762004447ebc9fe65f56f52b402a5fb3bbf54b427d05e11",
+    "corrected_false_approval_digest": "93a895c1b691fe0af69085fb88e231ab5dad92b0701dd4d3126f7e27cfb23cad",
+    "deterministic_replay_passed": true,
+    "event_count": 13,
+    "false_approval_event_original_reproduced": true,
+    "first_clean_run_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d",
+    "input_sha256": "eeb3af49926f3df89524c7f137c37ad8a33915842377b3e29d6d30042e77ce20",
+    "matching_replay_hashes": true,
+    "original_false_approval_digest": "b6d466a3ee4b97d2ece7bd053dae21a6a9e6859d539093a2804461e17f909eaa",
+    "schema_version": "olympus-post-remediation-replay/v1",
+    "second_clean_run_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d"
+  },
+  "schema_version": "olympus-post-remediation-verification/v1",
+  "status": "PASS",
+  "test_counts": {
+    "new_regression": 9,
+    "original": 14,
+    "total": 23
+  },
+  "verdict": "FALSE_APPROVAL_RESOLVED",
+  "zero_side_effect_checks": {
+    "all_decisions_are_shadow_mode": true,
+    "all_decisions_match_required_schema": true,
+    "all_outcomes_are_simulated": true,
+    "all_required_outputs_exist": true,
+    "all_targets_are_mock_uris": true,
+    "all_timelines_have_eight_stages": true,
+    "deterministic_replay_passed": true,
+    "olympus_activation_denied": true,
+    "production_authority_denied": true,
+    "runtime_has_no_external_effect_imports": true,
+    "workspace_has_no_symlinks": true
+  }
+}

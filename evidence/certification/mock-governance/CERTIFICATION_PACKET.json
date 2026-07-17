@@ -1,0 +1,25 @@
+{
+  "certification": "SHADOW_MODE_EVALUATION_ONLY",
+  "deterministic_replay_passed": true,
+  "deterministic_replay_required": true,
+  "event_count": 13,
+  "gaps": [
+    "authority violations",
+    "missing evidence",
+    "policy conflicts",
+    "contract failures"
+  ],
+  "governance_health": {
+    "score": 0,
+    "status": "BLOCKED"
+  },
+  "input_sha256": "eeb3af49926f3df89524c7f137c37ad8a33915842377b3e29d6d30042e77ce20",
+  "production_authority": "DISABLED",
+  "readiness": "GAPS_REMAIN",
+  "recommendations": [
+    "Keep Olympus production authority disabled.",
+    "Resolve all evidence and authority gaps before any separate production proposal.",
+    "Repeat deterministic replay after every policy or contract revision."
+  ],
+  "zero_side_effect_design": true
+}

@@ -1,0 +1,15 @@
+test_authority_or_policy_issue_requires_human_review (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_every_live_event_produces_complete_non_executable_recommendation (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_human_comparison_framework_and_adjudication (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_invalid_adjudication_classification_rejected (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_missing_evidence_requests_evidence (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_module_has_no_forbidden_imports (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_non_mock_action_fails_closed (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_public_api_has_no_execute_callback_or_writer (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_recommendation_is_deterministic (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+test_two_stream_replays_are_byte_identical (tests.test_advisory_mode.AdvisoryModeTests) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.009s
+
+OK

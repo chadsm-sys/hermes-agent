@@ -1,0 +1,9 @@
+{
+  "deterministic_replay_passed": true,
+  "event_count": 13,
+  "first_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d",
+  "input_sha256": "eeb3af49926f3df89524c7f137c37ad8a33915842377b3e29d6d30042e77ce20",
+  "input_source": "inputs/realistic_hermes_events.jsonl",
+  "schema_version": "olympus-shadow-replay-verification/v1",
+  "second_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d"
+}

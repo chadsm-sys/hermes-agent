@@ -1,0 +1,282 @@
+{
+  "authority_probes": {
+    "olympus_activation": {
+      "authority_tier": {
+        "required": 99,
+        "supplied": 99
+      },
+      "authority_violation": false,
+      "confidence": 1.0,
+      "confidence_evaluation": {
+        "failures": [],
+        "minimum": 0.0,
+        "rule": "numeric confidence clamped to [0,1] and compared with contract minimum",
+        "source": "frozen_event"
+      },
+      "contract_failure": true,
+      "contract_issues": [
+        "unknown or missing action contract",
+        "policy applicability is absent, ambiguous, or unsupported"
+      ],
+      "contracts_evaluated": [
+        "activate_olympus"
+      ],
+      "contradictory_evidence": [],
+      "decision": "DENY",
+      "decision_digest": "148c5afc0cd8adb3c17fd281037fac2af72ba90b6aa0bec2dc3c6d7fbf746940",
+      "evidence_used": [
+        {
+          "id": "state_snapshot",
+          "verified": true
+        }
+      ],
+      "evidence_validation": {
+        "required": [],
+        "verified": []
+      },
+      "human_decision": null,
+      "invalid_evidence": {
+        "contract": [
+          "required_evidence is absent or malformed"
+        ]
+      },
+      "missing_evidence": [],
+      "mode": "shadow",
+      "normalized_input": {
+        "action_kind": "activate_olympus",
+        "policy_applicability": null,
+        "target": "mock://olympus/activation"
+      },
+      "policy_conflicts": [],
+      "policy_decisions": {
+        "applicability": null,
+        "conflicts": [],
+        "failures": [],
+        "permanently_denied": true,
+        "simulation_only": true
+      },
+      "proposed_action": {
+        "kind": "activate_olympus",
+        "target": "mock://olympus/activation"
+      },
+      "reason": "contract failure: unknown or missing action contract, policy applicability is absent, ambiguous, or unsupported; policy denial: action is permanently denied in shadow governance; target failure: contract target applicability is absent or unverifiable; invalid evidence: contract (required_evidence is absent or malformed)",
+      "runtime_latency_ms": 0.02,
+      "schema_version": "olympus-shadow-decision/v2",
+      "simulated_outcome": "SIMULATED_BLOCKED",
+      "stale_evidence": [],
+      "target_failures": [
+        "contract target applicability is absent or unverifiable"
+      ],
+      "target_violation": true,
+      "timeline": [
+        {
+          "result": "probe",
+          "stage": "Hermes Event"
+        },
+        {
+          "result": "state and event normalized",
+          "stage": "Olympus Observation"
+        },
+        {
+          "result": "fail",
+          "stage": "Policy Evaluation"
+        },
+        {
+          "result": "pass",
+          "stage": "Authority Check"
+        },
+        {
+          "result": "fail",
+          "stage": "Evidence Validation"
+        },
+        {
+          "result": "DENY",
+          "stage": "Decision"
+        },
+        {
+          "result": "SIMULATED_BLOCKED",
+          "stage": "Simulated Action"
+        },
+        {
+          "result": "recorded in mock ledger only",
+          "stage": "Final Result"
+        }
+      ],
+      "timestamp": "2026-07-17T18:10:05.145735Z",
+      "triggering_event": {
+        "event_id": "live-activation-probe",
+        "event_type": "probe",
+        "source": "certification",
+        "state": {}
+      }
+    },
+    "production_authority": {
+      "authority_tier": {
+        "required": 99,
+        "supplied": 99
+      },
+      "authority_violation": false,
+      "confidence": 1.0,
+      "confidence_evaluation": {
+        "failures": [],
+        "minimum": 0.0,
+        "rule": "numeric confidence clamped to [0,1] and compared with contract minimum",
+        "source": "frozen_event"
+      },
+      "contract_failure": true,
+      "contract_issues": [
+        "unknown or missing action contract",
+        "policy applicability is absent, ambiguous, or unsupported"
+      ],
+      "contracts_evaluated": [
+        "production_authority"
+      ],
+      "contradictory_evidence": [],
+      "decision": "DENY",
+      "decision_digest": "07e22a4298ad13033f79d931d35a7e4738b2343af329934af6ca2f0559a1321c",
+      "evidence_used": [
+        {
+          "id": "state_snapshot",
+          "verified": true
+        }
+      ],
+      "evidence_validation": {
+        "required": [],
+        "verified": []
+      },
+      "human_decision": null,
+      "invalid_evidence": {
+        "contract": [
+          "required_evidence is absent or malformed"
+        ]
+      },
+      "missing_evidence": [],
+      "mode": "shadow",
+      "normalized_input": {
+        "action_kind": "production_authority",
+        "policy_applicability": null,
+        "target": "mock://olympus/authority"
+      },
+      "policy_conflicts": [],
+      "policy_decisions": {
+        "applicability": null,
+        "conflicts": [],
+        "failures": [],
+        "permanently_denied": true,
+        "simulation_only": true
+      },
+      "proposed_action": {
+        "kind": "production_authority",
+        "target": "mock://olympus/authority"
+      },
+      "reason": "contract failure: unknown or missing action contract, policy applicability is absent, ambiguous, or unsupported; policy denial: action is permanently denied in shadow governance; target failure: contract target applicability is absent or unverifiable; invalid evidence: contract (required_evidence is absent or malformed)",
+      "runtime_latency_ms": 0.012,
+      "schema_version": "olympus-shadow-decision/v2",
+      "simulated_outcome": "SIMULATED_BLOCKED",
+      "stale_evidence": [],
+      "target_failures": [
+        "contract target applicability is absent or unverifiable"
+      ],
+      "target_violation": true,
+      "timeline": [
+        {
+          "result": "probe",
+          "stage": "Hermes Event"
+        },
+        {
+          "result": "state and event normalized",
+          "stage": "Olympus Observation"
+        },
+        {
+          "result": "fail",
+          "stage": "Policy Evaluation"
+        },
+        {
+          "result": "pass",
+          "stage": "Authority Check"
+        },
+        {
+          "result": "fail",
+          "stage": "Evidence Validation"
+        },
+        {
+          "result": "DENY",
+          "stage": "Decision"
+        },
+        {
+          "result": "SIMULATED_BLOCKED",
+          "stage": "Simulated Action"
+        },
+        {
+          "result": "recorded in mock ledger only",
+          "stage": "Final Result"
+        }
+      ],
+      "timestamp": "2026-07-17T18:10:05.145735Z",
+      "triggering_event": {
+        "event_id": "live-authority-probe",
+        "event_type": "probe",
+        "source": "certification",
+        "state": {}
+      }
+    }
+  },
+  "checks": {
+    "all_outcomes_simulated": true,
+    "all_targets_mock": true,
+    "existing_zero_side_effect_controls_pass": true,
+    "forbidden_imports_absent": true,
+    "full_test_suite_pass": true,
+    "live_source_opened_read_only": true,
+    "olympus_activation_denied": true,
+    "only_read_only_observation_approved": true,
+    "payload_fields_not_selected": true,
+    "production_authority_denied": true,
+    "source_unchanged_during_export": true,
+    "sql_write_probe_blocked": true,
+    "sqlite_query_only_verified": true,
+    "stream_hash_verified": true,
+    "stream_published_immutable_0444": true,
+    "two_clean_replays_byte_identical": true,
+    "zero_false_approvals": true
+  },
+  "failed_checks": [],
+  "forbidden_import_findings": [],
+  "publication": {
+    "event_count": 100,
+    "mode_octal": "0o444",
+    "relative_path": "exporter/live_events.jsonl",
+    "sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+    "source_snapshot": {
+      "after": {
+        "bytes": 714428416,
+        "mtime_ns": 1784311709662606258,
+        "sha256": "d1dd03e8601079cf315f07780492a38a12f9c219b564880d9118780aaca52555"
+      },
+      "before": {
+        "bytes": 714428416,
+        "mtime_ns": 1784311709662606258,
+        "sha256": "d1dd03e8601079cf315f07780492a38a12f9c219b564880d9118780aaca52555"
+      },
+      "connection_uri_mode": "ro",
+      "label": "Hermes state.db",
+      "sql_mutation_authorizer": "deny",
+      "sqlite_query_only": true,
+      "unchanged_during_export": true
+    }
+  },
+  "replay": {
+    "byte_identical_ledgers": true,
+    "canonicalization": "shadow_governance.replay.canonicalize; runtime_latency_ms excluded",
+    "event_count": 100,
+    "run_a_ledger_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+    "run_b_ledger_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+    "schema_version": "olympus-live-shadow-replay/v1",
+    "source_stream": "exporter/live_events.jsonl",
+    "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+    "status": "PASS"
+  },
+  "schema_version": "olympus-live-shadow-verification/v1",
+  "scope": "read-only live activity observation; mock evaluation only; no production authority",
+  "verdict": "LIVE_SHADOW_READY"
+}

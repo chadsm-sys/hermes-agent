@@ -1,0 +1,483 @@
+[
+  {
+    "event_id": "evt-001",
+    "timeline": [
+      {
+        "result": "gateway.health",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "ALLOW",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_WOULD_EXECUTE",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-002",
+    "timeline": [
+      {
+        "result": "report.requested",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "ALLOW",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_WOULD_EXECUTE",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-003",
+    "timeline": [
+      {
+        "result": "repository.change.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "fail",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-004",
+    "timeline": [
+      {
+        "result": "gateway.degraded",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-005",
+    "timeline": [
+      {
+        "result": "gateway.unhealthy",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-006",
+    "timeline": [
+      {
+        "result": "outbound.message.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-007",
+    "timeline": [
+      {
+        "result": "outbound.message.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "ALLOW",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_WOULD_EXECUTE",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-008",
+    "timeline": [
+      {
+        "result": "olympus.activation.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-009",
+    "timeline": [
+      {
+        "result": "authority.escalation.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-010",
+    "timeline": [
+      {
+        "result": "credential.expiry.detected",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-011",
+    "timeline": [
+      {
+        "result": "watchdog.schedule.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "pass",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "ALLOW",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_WOULD_EXECUTE",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-012",
+    "timeline": [
+      {
+        "result": "novel.action.proposed",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "fail",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "fail",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  },
+  {
+    "event_id": "evt-013",
+    "timeline": [
+      {
+        "result": "schedule.conflict.detected",
+        "stage": "Hermes Event"
+      },
+      {
+        "result": "state and event normalized",
+        "stage": "Olympus Observation"
+      },
+      {
+        "result": "fail",
+        "stage": "Policy Evaluation"
+      },
+      {
+        "result": "pass",
+        "stage": "Authority Check"
+      },
+      {
+        "result": "pass",
+        "stage": "Evidence Validation"
+      },
+      {
+        "result": "DENY",
+        "stage": "Decision"
+      },
+      {
+        "result": "SIMULATED_BLOCKED",
+        "stage": "Simulated Action"
+      },
+      {
+        "result": "recorded in mock ledger only",
+        "stage": "Final Result"
+      }
+    ]
+  }
+]

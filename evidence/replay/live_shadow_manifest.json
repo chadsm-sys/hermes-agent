@@ -1,0 +1,11 @@
+{
+  "byte_identical_ledgers": true,
+  "canonicalization": "shadow_governance.replay.canonicalize; runtime_latency_ms excluded",
+  "event_count": 100,
+  "run_a_ledger_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+  "run_b_ledger_sha256": "fe90963d8696e1f8c6934eeecaf5b13b72dc04f9cadc4fd948f7ae7133632730",
+  "schema_version": "olympus-live-shadow-replay/v1",
+  "source_stream": "exporter/live_events.jsonl",
+  "source_stream_sha256": "14320e946a082159ad99c993362a8c5df1c36a6d89d5fc9279ea302c1de881af",
+  "status": "PASS"
+}

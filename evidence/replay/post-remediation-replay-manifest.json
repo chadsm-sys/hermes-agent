@@ -1,0 +1,13 @@
+{
+  "contracts_sha256": "b68fc7b72c13ae4d1762004447ebc9fe65f56f52b402a5fb3bbf54b427d05e11",
+  "corrected_false_approval_digest": "93a895c1b691fe0af69085fb88e231ab5dad92b0701dd4d3126f7e27cfb23cad",
+  "deterministic_replay_passed": true,
+  "event_count": 13,
+  "false_approval_event_original_reproduced": true,
+  "first_clean_run_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d",
+  "input_sha256": "eeb3af49926f3df89524c7f137c37ad8a33915842377b3e29d6d30042e77ce20",
+  "matching_replay_hashes": true,
+  "original_false_approval_digest": "b6d466a3ee4b97d2ece7bd053dae21a6a9e6859d539093a2804461e17f909eaa",
+  "schema_version": "olympus-post-remediation-replay/v1",
+  "second_clean_run_digest": "fde88e2e961fb898cd1617d813d287dd897663392d481df214b48f31be0bca9d"
+}
