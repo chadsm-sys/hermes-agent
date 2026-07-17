@@ -108,9 +108,6 @@ CREATE TABLE IF NOT EXISTS claims (
 CREATE INDEX IF NOT EXISTS idx_claims_entity ON claims (entity_id);
 CREATE INDEX IF NOT EXISTS idx_claims_attr ON claims (entity_id, attribute);
 CREATE INDEX IF NOT EXISTS idx_claims_status ON claims (status);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_claims_active_exclusive
-    ON claims (entity_id, attribute)
-    WHERE status = 'active' AND exclusive = 1;
 
 CREATE TABLE IF NOT EXISTS evidence (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,6 +143,11 @@ _KEY_RE = re.compile(r"[^a-z0-9]+")
 # the store is policy-free by design.
 _REL_REINFORCE_DELTA = 0.1
 SQLITE_BUSY_TIMEOUT_MS = 5000
+_ACTIVE_EXCLUSIVE_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_claims_active_exclusive
+    ON claims (entity_id, attribute)
+    WHERE status = 'active' AND exclusive = 1
+"""
 
 
 def normalize_key(text: str) -> str:
@@ -206,6 +208,45 @@ class GraphStore:
             self._conn.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
+            )
+            self._repair_legacy_exclusive_conflicts()
+            self._conn.execute(_ACTIVE_EXCLUSIVE_INDEX)
+
+    def _repair_legacy_exclusive_conflicts(self) -> None:
+        """Quarantine pre-index duplicate active exclusive claims for review."""
+        groups = self._conn.execute(
+            "SELECT entity_id, attribute FROM claims "
+            "WHERE status = 'active' AND exclusive = 1 "
+            "GROUP BY entity_id, attribute HAVING COUNT(*) > 1"
+        ).fetchall()
+        for group in groups:
+            rows = self._conn.execute(
+                "SELECT id FROM claims WHERE entity_id = ? AND attribute = ? "
+                "AND status = 'active' AND exclusive = 1 ORDER BY id",
+                (group["entity_id"], group["attribute"]),
+            ).fetchall()
+            claim_ids = [row["id"] for row in rows]
+            self._conn.execute(
+                "UPDATE claims SET status = 'contradicted', updated_at = ? "
+                "WHERE entity_id = ? AND attribute = ? "
+                "AND status = 'active' AND exclusive = 1",
+                (self.now(), group["entity_id"], group["attribute"]),
+            )
+            self._conn.execute(
+                "INSERT INTO governance_log "
+                "(ts, event, subject_kind, subject_id, details) "
+                "VALUES (?, 'exclusive_invariant_repaired', 'claim_group', NULL, ?)",
+                (
+                    self.now(),
+                    json.dumps(
+                        {
+                            "entity_id": group["entity_id"],
+                            "attribute": group["attribute"],
+                            "claims": claim_ids,
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
             )
 
     @contextmanager

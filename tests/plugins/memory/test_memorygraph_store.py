@@ -317,6 +317,26 @@ def test_cross_connection_exclusive_writes_leave_one_active_claim(tmp_path):
         second.close()
 
 
+def test_reopen_repairs_legacy_duplicate_active_exclusive_claims(tmp_path):
+    path = tmp_path / "graph.db"
+    store = GraphStore(str(path))
+    entity = store.upsert_entity("Chad", "person")
+    store._conn.execute("DROP INDEX uq_claims_active_exclusive")
+    store.insert_claim(entity["id"], "employer", "Facility A", exclusive=True)
+    store.insert_claim(entity["id"], "employer", "Facility B", exclusive=True)
+    store.close()
+
+    reopened = GraphStore(str(path))
+    try:
+        claims = reopened.claims_for(entity["id"], "employer", include_history=True)
+        assert {claim["status"] for claim in claims} == {"contradicted"}
+        assert reopened.claims_for(entity["id"], "employer") == []
+        assert reopened.recent_events(1)[0]["event"] == "exclusive_invariant_repaired"
+        assert reopened._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        reopened.close()
+
+
 def test_normalize_ts_validates_format(store, clock):
     from plugins.memory.memorygraph.store import normalize_ts
 
