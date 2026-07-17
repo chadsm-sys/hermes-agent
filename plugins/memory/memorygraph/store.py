@@ -145,6 +145,7 @@ _KEY_RE = re.compile(r"[^a-z0-9]+")
 # Mirrors GovernancePolicy.reinforce_delta for claims; kept here because
 # the store is policy-free by design.
 _REL_REINFORCE_DELTA = 0.1
+SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 def normalize_key(text: str) -> str:
@@ -190,9 +191,16 @@ class GraphStore:
         self._lock = threading.RLock()
         self._transaction_depth = 0
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            self.db_path,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+            check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = FULL")
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
             self._conn.execute(

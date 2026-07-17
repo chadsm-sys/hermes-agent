@@ -235,6 +235,53 @@ def test_persistence_across_reopen(tmp_path, clock):
     s2.close()
 
 
+def test_connection_uses_wal_and_explicit_busy_timeout(tmp_path):
+    store = GraphStore(str(tmp_path / "graph.db"))
+    try:
+        journal_mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        synchronous = store._conn.execute("PRAGMA synchronous").fetchone()[0]
+        assert journal_mode == "wal"
+        assert busy_timeout == 5000
+        assert synchronous == 2  # FULL durability is preserved.
+    finally:
+        store.close()
+
+
+def test_cross_connection_writer_waits_then_commits(tmp_path):
+    path = tmp_path / "graph.db"
+    first = GraphStore(str(path))
+    second = GraphStore(str(path))
+    started = threading.Event()
+    finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer():
+        started.set()
+        try:
+            second.set_meta("contended", "committed")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=writer)
+    try:
+        with first.write_transaction(immediate=True):
+            first.set_meta("holder", "active")
+            thread.start()
+            assert started.wait(timeout=1)
+            assert not finished.wait(timeout=0.1)
+        assert finished.wait(timeout=5)
+        thread.join(timeout=1)
+        assert errors == []
+        assert first.get_meta("contended") == "committed"
+        assert first._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        first.close()
+        second.close()
+
+
 def test_cross_connection_exclusive_writes_leave_one_active_claim(tmp_path):
     path = tmp_path / "graph.db"
     first = GraphStore(str(path))
