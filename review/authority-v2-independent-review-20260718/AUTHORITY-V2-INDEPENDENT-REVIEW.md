@@ -95,6 +95,21 @@ review subject. Each was examined and excluded:
    Build Program docs (PR #9). These are implementation and program
    artifacts of the v1 lane, not the V2 authority proposal.
 
+### Supplementary searches (added 2026-07-18, same session)
+
+| # | Surface | Method | Result |
+|---|---|---|---|
+| 7 | Operator Gmail | Connector search for `"authority model" OR "AUTHORITY-V2" OR olympus` | 25 threads, all GitHub CI/review notifications; no proposal package or attachment |
+| 8 | Operator Google Drive | Connector search attempted | **Declined by operator at permission prompt; not searched** |
+
+The Gmail sweep additionally surfaced two sibling repositories not
+authorized for this session: `chadsm-sys/olympus-core` (e.g. PR #7,
+"unify execution governance and ACP authority") and
+`chadsm-sys/mission-control-v0`. Either — particularly `olympus-core` —
+is a plausible home for the V2 package, but both are outside this
+review's authorized repository scope and were **not** read. This is
+recorded as a lead, not a finding.
+
 **Conclusion of evidence acquisition: the Olympus Authority Model Proposal
 V2 package is not present in, and cannot be retrieved from, any surface
 accessible to this review environment.** Its existence, contents, and the
