@@ -28,12 +28,14 @@ Logical lineage (not strictly chronological within the day):
 
 ## Open items at record time
 
-- **RT-02 residue (open):** `/private/tmp/olympus-gbr-request.json`, request
-  `APR-GBR-84d0edb540ed446f708e374e`, issued 2026-07-17T11:28:30Z, expired
-  2026-07-17T11:33:30Z, no matching assertion. Archival requires explicit
-  operator authority; RC4 preflight fail-closes until cleared.
-- **Ceremony:** NOT GO until W3-HANDOFF steps 2–5 complete (see
-  `CURRENT-RELEASE.md`).
+- **RT-02 residue — RESOLVED 2026-07-18:** `/private/tmp/olympus-gbr-request.json`
+  (request `APR-GBR-84d0edb540ed446f708e374e`, expired 2026-07-17T11:33:30Z,
+  no matching assertion) archived under explicit operator authority to
+  `20260718T-olympus-gbr-expired-request-archive/` and removed from `/tmp`;
+  RC4 preflight subsequently returned `RESULT: PASS — GO permitted`. Full
+  record: `../2026-07-18/RT02-ARCHIVAL-AND-PREFLIGHT.md`.
+- **Ceremony:** NOT GO until W3-HANDOFF steps 4–5 complete (off-box digest
+  comparison, explicit ceremony authorization); see `CURRENT-RELEASE.md`.
 - **Supervised activation:** separately gated; requires GBR adoption, sealed
   REB/PCE/EER, corrected staged ledger root, reconciled service
   label/topology, complete release/worker/Mission Control assets, a final
