@@ -188,6 +188,38 @@ statement were checked against repo-resident evidence and found consistent:
 
 These checks validate the *surrounding state*, not the proposal.
 
+## 7a. Operator direction received mid-review (2026-07-18)
+
+After the searches above, the operator directed this review to a sealed
+external review bundle as the complete review subject:
+
+- **Named artifact:**
+  `/Users/macmini/Hermes-Handoff/artifacts/external-review/20260718T153015Z-olympus-authority-v2-review-bundle/`
+- **Expected archive SHA-256 (operator-supplied):**
+  `9bc14a989fb4e0cf4b42d9a731f4ea6cc93d82b7a9b732fd7bdab6f6242dc11f`
+- **Operator instruction:** verify the detached SHA-256 before reading;
+  review only the bundle's contents; treat it as the complete subject.
+
+Disposition of that direction:
+
+1. The path is on the operator's macOS machine. This review runs in an
+   isolated remote Linux container; `/Users` does not exist here and no
+   mount, copy, or transfer of the bundle is present (verified by direct
+   path check and filesystem sweep).
+2. A targeted Gmail search for the bundle name and digest returned
+   nothing; a targeted Google Drive search was declined at the operator
+   permission prompt (second decline) and was not performed.
+3. A fresh `git fetch --prune` and full-branch sweep for
+   `20260718T153015Z`, `review-bundle`, and `external-review` paths found
+   nothing new in the repository.
+
+The direction is constitutionally significant in one positive respect:
+**a digest-bound commissioning now exists.** The expected archive SHA-256
+above supersedes the unbound commissioning criticized in findings F1/F4.
+What is still absent is the bytes. Under review doctrine §2 (reviews bind
+to exact bytes; evidence-or-silence), a digest without its artifact
+verifies nothing and must not be treated as partial access.
+
 ## 8. Verdict
 
 Under the mandated adversarial posture, the proposal must be assumed
@@ -202,15 +234,23 @@ is currently evidenced by nothing.
 
 ## 9. Unblock conditions (informative, not a V3 draft)
 
-This review can be re-commissioned and completed if, and only if:
+The commissioning is now digest-bound (§7a); the single remaining
+condition is delivery of the bytes. This review can be completed as soon
+as:
 
-1. The complete V2 proposal package is published to a surface accessible
-   to the independent reviewer (e.g. a dedicated branch of this repository),
-   with a `SHA256SUMS` manifest and the package bound to an exact commit SHA.
-2. The commissioning statement binds the review to that digest/commit.
-3. The internal validation suite (the 34 consistency checks and 9 negative
-   tests) ships *inside* the package so the reviewer can re-run or at
-   minimum re-derive it, rather than accept reported totals.
+1. The sealed bundle archive whose SHA-256 equals
+   `9bc14a989fb4e0cf4b42d9a731f4ea6cc93d82b7a9b732fd7bdab6f6242dc11f`
+   is transferred into a surface reachable from the review environment —
+   e.g. committed to a branch of this repository, attached to the session,
+   or staged in a connector the operator permits searching. Any transfer
+   channel is acceptable because the digest, not the channel, provides
+   integrity: the reviewer will recompute the archive SHA-256 and proceed
+   only on an exact match, fail-closed on any mismatch.
+2. The reviewer verifies the detached SHA-256 before reading, then reviews
+   only the bundle's contents, per the operator's instruction.
+3. Preferably, the internal validation suite (the 34 consistency checks
+   and 9 negative tests) ships inside the bundle so results can be
+   independently re-executed rather than accepted as reported totals.
 
 No inference should be drawn from this record that the package, once
 produced, is either sound or unsound. This record must not be cited as a
